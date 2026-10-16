@@ -26,7 +26,7 @@ pnpm install
 
 # 1. Pon la clave de tu usuario administrador de Postgres en .env (DATABASE_URL_ADMIN) y:
 pnpm db:bootstrap      # crea la base "facturacion", los roles y completa el .env
-pnpm db:migrate        # aplica las migraciones (usa el rol dueño)
+pnpm db:deploy         # aplica las migraciones (usa el rol dueño)
 
 # 2. Arrancar todo
 pnpm dev               # web en :3000, api en :3001
@@ -39,7 +39,8 @@ pnpm dev               # web en :3000, api en :3001
 | `pnpm dev` | Web + API en modo desarrollo |
 | `pnpm build` | Compila todo (genera el cliente Prisma primero) |
 | `pnpm lint` / `pnpm typecheck` / `pnpm test` | Calidad |
-| `pnpm db:migrate` | Crea/aplica migraciones en desarrollo |
+| `pnpm db:deploy` | Aplica las migraciones pendientes |
+| `pnpm db:diff` | Imprime el SQL de lo que cambió en `schema.prisma` (ver docs/PLAN.md §0.3.1) |
 | `pnpm db:studio` | Prisma Studio |
 
 ## Multiempresa
