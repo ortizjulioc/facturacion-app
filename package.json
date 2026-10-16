@@ -19,7 +19,7 @@
     "db:deploy": "pnpm --filter @facturacion/db db:deploy",
     "merge": "git switch main && git pull origin main && git merge dev && git push origin main && git switch dev",
     "sync": "prisma generate && prisma db push",
-    "pushdev": "prisma generate && prisma db push"
+    "pushdev": "git push origin dev"
   },
   "devDependencies": {
     "prettier": "^3.9.10",
