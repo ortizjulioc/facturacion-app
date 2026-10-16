@@ -18,7 +18,8 @@
     "db:bootstrap": "pnpm --filter @facturacion/db db:bootstrap",
     "db:deploy": "pnpm --filter @facturacion/db db:deploy",
     "merge": "git switch main && git pull origin main && git merge dev && git push origin main && git switch dev",
-    "sync": "prisma generate && prisma db push"
+    "sync": "prisma generate && prisma db push",
+    "pushdev": "prisma generate && prisma db push"
   },
   "devDependencies": {
     "prettier": "^3.9.10",
