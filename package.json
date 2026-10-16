@@ -1,26 +1,26 @@
 {
-  "name": "facturacion-app",
-  "version": "0.1.0",
+  "name": "facturacion",
   "private": true,
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
+  "packageManager": "pnpm@11.23.0",
+  "engines": {
+    "node": ">=24"
   },
-  "dependencies": {
-    "next": "16.4.2",
-    "react": "19.3.0",
-    "react-dom": "19.3.0"
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "db:generate": "turbo run db:generate",
+    "db:migrate": "pnpm --filter @facturacion/db db:migrate",
+    "db:studio": "pnpm --filter @facturacion/db db:studio",
+    "format": "prettier --write .",
+    "db:bootstrap": "pnpm --filter @facturacion/db db:bootstrap",
+    "db:deploy": "pnpm --filter @facturacion/db db:deploy"
   },
   "devDependencies": {
-    "@tailwindcss/turbopack": "^4",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "16.4.2",
-    "tailwindcss": "^4",
-    "typescript": "^5"
+    "prettier": "^3.9.10",
+    "turbo": "^2.11.8",
+    "typescript": "~5.9.3"
   }
 }

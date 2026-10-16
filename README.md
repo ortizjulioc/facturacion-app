@@ -1,36 +1,47 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Facturación
 
-## Getting Started
+Sistema de facturación electrónica (e-CF, República Dominicana) y punto de venta, multiempresa y multigiro.
 
-First, run the development server:
+- Plan y decisiones técnicas: [docs/PLAN.md](docs/PLAN.md)
+- Despliegue en Oracle Cloud + Dokploy: [docs/DESPLIEGUE.md](docs/DESPLIEGUE.md)
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## Estructura
+
+```
+apps/
+  web/   Next.js 16 – back-office
+  api/   Hono + Better Auth – API, sincronización, workers
+packages/
+  db/    Prisma 7 (Postgres) – schema, migraciones, RLS por empresa
+  core/  Lógica de negocio pura (dinero en centavos, impuestos…)
+docker/  Dockerfiles (arm64) y compose de desarrollo
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Puesta en marcha local
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Requisitos: Node 24, pnpm 11 (`corepack enable`), PostgreSQL 18 (local o `docker compose -f docker/docker-compose.dev.yml up -d`).
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+pnpm install
 
-## Learn More
+# 1. Pon la clave de tu usuario administrador de Postgres en .env (DATABASE_URL_ADMIN) y:
+pnpm db:bootstrap      # crea la base "facturacion", los roles y completa el .env
+pnpm db:migrate        # aplica las migraciones (usa el rol dueño)
 
-To learn more about Next.js, take a look at the following resources:
+# 2. Arrancar todo
+pnpm dev               # web en :3000, api en :3001
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Comandos
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+| Comando | Qué hace |
+|---|---|
+| `pnpm dev` | Web + API en modo desarrollo |
+| `pnpm build` | Compila todo (genera el cliente Prisma primero) |
+| `pnpm lint` / `pnpm typecheck` / `pnpm test` | Calidad |
+| `pnpm db:migrate` | Crea/aplica migraciones en desarrollo |
+| `pnpm db:studio` | Prisma Studio |
 
-## Deploy on Vercel
+## Multiempresa
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Cada empresa es una *organización* de Better Auth. Las tablas de negocio llevan `organizationId` y tienen **Row-Level Security**: la API fija `app.tenant_id` en cada transacción (`withTenant` en `packages/db/src/tenant.ts`) y la app se conecta con un rol que no puede saltarse las políticas. Las pruebas de `packages/db` verifican el aislamiento directamente contra Postgres.

@@ -1,0 +1,40 @@
+# Back-office (Next.js standalone). Contexto de build: raíz del monorepo.
+#   docker buildx build --platform linux/arm64 -f docker/Dockerfile.web \
+#     --build-arg NEXT_PUBLIC_API_URL=https://api.tudominio.com -t facturacion-web .
+
+FROM node:24-slim AS base
+ENV PNPM_HOME=/pnpm
+ENV PATH=$PNPM_HOME:$PATH
+RUN corepack enable && corepack prepare pnpm@11.23.0 --activate
+WORKDIR /app
+
+FROM base AS pruner
+COPY . .
+RUN pnpm dlx turbo@2.11.8 prune @facturacion/web --docker
+
+FROM base AS builder
+COPY --from=pruner /app/out/json/ .
+RUN pnpm install --frozen-lockfile
+COPY --from=pruner /app/out/full/ .
+# NEXT_PUBLIC_* se incrusta en el JS del navegador en tiempo de build.
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN pnpm turbo run build --filter=@facturacion/web
+
+FROM node:24-slim AS runner
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+WORKDIR /app
+RUN groupadd --system --gid 1001 app && useradd --system --uid 1001 --gid app app
+# El standalone conserva la estructura del monorepo (apps/web/server.js).
+COPY --from=builder --chown=app:app /app/apps/web/.next/standalone ./
+COPY --from=builder --chown=app:app /app/apps/web/.next/static ./apps/web/.next/static
+COPY --from=builder --chown=app:app /app/apps/web/public ./apps/web/public
+USER app
+EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+CMD ["node", "apps/web/server.js"]

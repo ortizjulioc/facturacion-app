@@ -1,0 +1,40 @@
+# API (Hono + workers). Contexto de build: raíz del monorepo.
+#   docker buildx build --platform linux/arm64 -f docker/Dockerfile.api -t facturacion-api .
+
+FROM node:24-slim AS base
+ENV PNPM_HOME=/pnpm
+ENV PATH=$PNPM_HOME:$PATH
+RUN corepack enable && corepack prepare pnpm@11.23.0 --activate
+WORKDIR /app
+
+# 1) Podar el monorepo a lo que necesita la API (mejor caché de capas).
+FROM base AS pruner
+COPY . .
+RUN pnpm dlx turbo@2.11.8 prune @facturacion/api --docker
+
+# 2) Instalar dependencias + generar Prisma + compilar.
+FROM base AS builder
+COPY --from=pruner /app/out/json/ .
+RUN pnpm install --frozen-lockfile
+COPY --from=pruner /app/out/full/ .
+RUN pnpm turbo run build --filter=@facturacion/api
+# Solo dependencias de producción (+ CLI de Prisma para migrar al arrancar).
+RUN pnpm --filter @facturacion/api deploy --legacy --prod /prod/api
+RUN mkdir -p /prod/api/db && cp -r packages/db/prisma packages/db/prisma.config.ts /prod/api/db/
+
+# 3) Imagen final.
+FROM node:24-slim AS runner
+ENV NODE_ENV=production
+WORKDIR /app
+RUN groupadd --system --gid 1001 app && useradd --system --uid 1001 --gid app app
+COPY --from=builder --chown=app:app /prod/api/node_modules ./node_modules
+COPY --from=builder --chown=app:app /prod/api/dist ./dist
+COPY --from=builder --chown=app:app /prod/api/db ./db
+COPY --chown=app:app docker/api-entrypoint.sh ./entrypoint.sh
+RUN chmod +x entrypoint.sh
+USER app
+EXPOSE 3001
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.API_PORT||3001)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+ENTRYPOINT ["./entrypoint.sh"]
+CMD ["node", "dist/server.mjs"]

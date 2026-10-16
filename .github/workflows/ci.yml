@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: facturacion
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL_ADMIN: postgresql://postgres:postgres@localhost:5432/facturacion
+      DATABASE_URL_MIGRATE: postgresql://facturacion_migrator:migrator_ci_password@localhost:5432/facturacion
+      DATABASE_URL: postgresql://facturacion_app:app_ci_password@localhost:5432/facturacion
+      BETTER_AUTH_SECRET: ci-secret-ci-secret-ci-secret-1234
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Roles y migraciones
+        run: |
+          psql "$DATABASE_URL_ADMIN" -v ON_ERROR_STOP=1 -v dbname=facturacion \
+            -v migrator_password="'migrator_ci_password'" -v app_password="'app_ci_password'" \
+            -f packages/db/scripts/setup-roles.sql
+          pnpm --filter @facturacion/db db:deploy
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
