@@ -2,7 +2,13 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import { secureHeaders } from "hono/secure-headers";
+import { Prisma } from "@facturacion/db";
 import { branches } from "./routes/branches";
+import { calculate } from "./routes/calculate";
+import { categories } from "./routes/categories";
+import { customers } from "./routes/customers";
+import { products } from "./routes/products";
+import { terminals } from "./routes/terminals";
 import { requireTenant } from "./middleware/tenant";
 import { webOrigins } from "./env";
 import type { AppEnv, Deps } from "./types";
@@ -56,10 +62,22 @@ export function createApp(deps: Deps) {
       if (c.req.path === "/v1/me") return next();
       return requireTenant(c, next);
     })
-    .route("/v1/branches", branches);
+    .route("/v1/branches", branches)
+    .route("/v1/terminals", terminals)
+    .route("/v1/categories", categories)
+    .route("/v1/products", products)
+    .route("/v1/customers", customers)
+    .route("/v1", calculate);
 
   app.onError((err, c) => {
     if (err instanceof HTTPException) return c.json({ error: err.message }, err.status);
+    if (err instanceof Prisma.PrismaClientKnownRequestError) {
+      // P2002 = violación de unicidad, P2025 = registro inexistente (o de otra empresa: RLS lo oculta).
+      if (err.code === "P2002") {
+        return c.json({ error: "Ya existe un registro con esos datos (código, SKU o documento repetido)" }, 409);
+      }
+      if (err.code === "P2025") return c.json({ error: "No encontrado" }, 404);
+    }
     logger.error({ err }, "error no controlado");
     return c.json({ error: "Error interno" }, 500);
   });

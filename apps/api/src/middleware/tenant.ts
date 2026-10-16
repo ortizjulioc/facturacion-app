@@ -1,6 +1,6 @@
 import { createMiddleware } from "hono/factory";
 import { HTTPException } from "hono/http-exception";
-import { withTenant } from "@facturacion/db";
+import { tenantTransaction, withTenant } from "@facturacion/db";
 import type { AppEnv } from "../types";
 
 /**
@@ -27,6 +27,7 @@ export const requireTenant = createMiddleware<AppEnv>(async (c, next) => {
   c.set("organizationId", organizationId);
   c.set("role", member.role);
   c.set("db", withTenant(prisma, organizationId));
+  c.set("run", (fn) => tenantTransaction(prisma, organizationId, fn));
   await next();
 });
 
