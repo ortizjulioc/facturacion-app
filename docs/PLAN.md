@@ -173,7 +173,7 @@ facturacion/
 
 > **Ruta crítica: el módulo e-CF.** La certificación ante la DGII (ambientes TesteCF → CerteCF → producción) toma semanas. Por eso arranca en paralelo desde la fase 1.
 
-### Fase 0 – Fundamentos (1–2 semanas)
+### Fase 0 – Fundamentos (1–2 semanas) · ✅ hecha en local; falta el despliegue de prueba en Dokploy
 - Convertir el proyecto en monorepo (pnpm + Turborepo) y mover el Next actual a `apps/web`.
 - Configuración compartida (TS, ESLint, Prettier), Vitest, CI en GitHub Actions.
 - Docker Compose local: Postgres 18 + MinIO (simula OCI Object Storage).
@@ -182,7 +182,10 @@ facturacion/
 - `packages/db` con Prisma: schema inicial, primera migración, políticas RLS en SQL y extensión de cliente que fija el tenant.
 - Better Auth: registro de empresa, usuarios, roles.
 
-### Fase 1 – Núcleo de negocio + prototipo fiscal (3–4 semanas)
+### Fase 1 – Núcleo de negocio + prototipo fiscal (3–4 semanas) · 🔶 en curso
+**Hecho:** motor de cálculo en `packages/core` (ITBIS 18/16/0/exento, precio con o sin impuesto, descuentos, propina legal, redondeo por línea; 35 pruebas) · normalización de RNC/cédula/pasaporte · schema y RLS de sucursales, cajas, categorías, productos y clientes · API REST con roles y bitácora atómica (24 pruebas) · pantallas de productos, clientes y sucursales/cajas.
+**Pendiente:** facturas/documentos (E31, E32…), prototipo e-CF contra TesteCF (requiere certificado digital de pruebas y decidir proveedor), validación de RNC contra el padrón de la DGII, invitar usuarios a la empresa.
+
 - CRUD de empresa, sucursales, cajas, impuestos, catálogo, clientes.
 - `packages/core`: motor de cálculo (líneas, descuentos, ITBIS, totales, redondeo) **con pruebas exhaustivas**.
 - **Prototipo e-CF**: generar un E32 y un E31, firmarlos, autenticarse en TesteCF, enviarlos y consultar el TrackId.
