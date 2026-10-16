@@ -4,6 +4,173 @@ Sistema de facturación y punto de venta **multiempresa y multigiro** (tienda, r
 
 ---
 
+## 0. Estado actual y cómo continuar
+
+> **Última actualización:** 2026-10-16 · **Repositorio:** `github.com/ortizjulioc/facturacion-app` (rama `main`)
+> **Regla del proyecto:** el despliegue en Dokploy se hace **cuando el producto esté terminado y pulido**, no antes. Mientras tanto se desarrolla y prueba todo en local.
+
+### 0.1 Resumen en una mirada
+
+| Fase | Estado |
+|---|---|
+| 0 · Fundamentos (monorepo, BD, auth, CI, Dockerfiles) | ✅ hecha en local · ⏸ despliegue de prueba en Dokploy **aplazado a propósito** |
+| 1 · Núcleo de negocio | 🔶 **~60 %**: catálogo, clientes, sucursales/cajas y motor de cálculo listos; **faltan facturas, empresa fiscal, secuencias y prototipo e-CF** |
+| 2 – 8 | ⬜ sin empezar |
+
+Calidad actual (todo en verde): `lint`, `typecheck`, `build` y **67 pruebas** (35 `core` + 8 RLS en `db` + 24 de la API contra Postgres real). Verificado además a mano en el navegador: registro → empresa → sucursal → caja → categoría → productos → clientes.
+
+### 0.2 Retomar el trabajo en otra PC
+
+**Requisitos:** Git, **Node 24**, **pnpm 11** (`npm i -g pnpm@11.23.0` o `corepack enable`), **PostgreSQL 18** con `psql` en el `PATH` (o Docker Desktop) y, si usas Claude Code, que el repo esté abierto en esa carpeta.
+
+```bash
+git clone https://github.com/ortizjulioc/facturacion-app.git
+cd facturacion-app
+pnpm install
+```
+
+**Base de datos (elige una):**
+
+- *Postgres instalado en la PC:* crea un archivo `.env` en la raíz con una sola línea (usuario administrador, solo lo usa el script de bootstrap):
+  ```env
+  DATABASE_URL_ADMIN="postgresql://postgres:TU_CLAVE@localhost:5432/postgres"
+  ```
+- *Docker:* `docker compose -f docker/docker-compose.dev.yml up -d` y usa
+  ```env
+  DATABASE_URL_ADMIN="postgresql://postgres:postgres@localhost:5433/postgres"
+  ```
+
+```bash
+pnpm db:bootstrap   # crea la base "facturacion", los roles y completa el .env (DATABASE_URL, DATABASE_URL_MIGRATE, BETTER_AUTH_SECRET)
+pnpm db:deploy      # aplica las migraciones
+pnpm dev            # web en http://localhost:3000 y API en http://localhost:3001
+```
+
+Abre `http://localhost:3000/registro`, crea una empresa y ya tienes un entorno completo. Comprobación final: `pnpm lint && pnpm typecheck && pnpm test && pnpm build`.
+
+> El `.env` **no está en git** (contiene secretos). En la PC nueva se genera con `pnpm db:bootstrap`; no copies el de la otra PC.
+> Los datos de desarrollo (empresas de prueba) **no viajan**: cada PC tiene su propia base.
+
+### 0.3 Comandos del día a día
+
+| Comando | Qué hace |
+|---|---|
+| `pnpm dev` | Web + API con recarga en caliente (genera el cliente Prisma antes) |
+| `pnpm lint` · `pnpm typecheck` · `pnpm test` · `pnpm build` | Calidad (Turborepo, con caché) |
+| `pnpm db:deploy` | Aplica migraciones pendientes (con el rol dueño) |
+| `pnpm db:diff` | Imprime el SQL de los cambios hechos en `schema.prisma` (ver §0.3.1) |
+| `pnpm db:studio` | Prisma Studio |
+| `pnpm --filter @facturacion/api test` | Solo las pruebas de la API (necesitan Postgres y el `.env`) |
+| `pnpm --filter @facturacion/core test` | Solo el motor fiscal (no necesita BD) |
+
+**Variables de entorno** (ver `.env.example`): `DATABASE_URL` (rol `facturacion_app`, la usa la API), `DATABASE_URL_MIGRATE` (rol `facturacion_migrator`, dueño de las tablas), `DATABASE_URL_ADMIN` (solo bootstrap local), `BETTER_AUTH_SECRET`, `API_PORT`, `API_PUBLIC_URL`, `WEB_ORIGIN`, `COOKIE_DOMAIN` (vacío en local), `NEXT_PUBLIC_API_URL`.
+
+### 0.3.1 Cómo crear una migración nueva
+
+`prisma migrate dev` **no funciona aquí** (comprobado: *"Prisma Migrate could not create the shadow database"*): necesita crear una *shadow database* y el rol `facturacion_migrator` no tiene permiso `CREATEDB`, a propósito, igual que en producción. Por eso no existe un script `db:migrate`. El flujo probado es:
+
+```bash
+cd packages/db
+# 1. edita prisma/schema.prisma
+# 2. genera el SQL comparando contra la BD viva (sin shadow DB):
+mkdir prisma/migrations/AAAAMMDDHHMMSS_nombre
+pnpm db:diff > prisma/migrations/AAAAMMDDHHMMSS_nombre/migration.sql
+# 3. al final de ese archivo agrega a mano el bloque RLS de cada tabla nueva (ver migraciones existentes)
+# 4. aplica y regenera el cliente
+pnpm db:deploy && pnpm exec prisma generate
+```
+
+**Toda tabla de negocio nueva debe llevar `organizationId` + políticas RLS** y una prueba en `packages/db/src/tenant.test.ts`.
+
+### 0.4 Lo que ya está hecho
+
+**Infraestructura**
+- Monorepo pnpm + Turborepo (`apps/web`, `apps/api`, `packages/core`, `packages/db`), TypeScript estricto, Prettier, `.nvmrc` (Node 24).
+- Postgres 18 con **RLS por empresa**: la API se conecta con un rol sin privilegios y cada consulta fija `app.tenant_id` dentro de su transacción (`withTenant` / `tenantTransaction`). Sin tenant, las tablas aparecen vacías (falla cerrado). La bitácora (`audit_log`) es inmutable para el rol de la app.
+- Better Auth: registro, login, **organizaciones = empresas**, sesión por cookie, roles `owner` / `admin` / `member`.
+- Dockerfiles arm64 (`docker/Dockerfile.api`, `Dockerfile.web`), `docker-compose.dev.yml` (Postgres + MinIO), workflows de CI y de despliegue (`.github/workflows`) y guía [DESPLIEGUE.md](DESPLIEGUE.md). **Los Dockerfiles y el workflow de despliegue nunca se han ejecutado** (la PC de desarrollo no tiene Docker).
+
+**`packages/core`** (lógica fiscal pura, sin frameworks): dinero en centavos `bigint`, cantidades en milésimas, impuestos `ITBIS18 / ITBIS16 / ITBIS0 / EXENTO` con etiquetas, `calculateLine` y `calculateDocument` (precio con o sin ITBIS, descuentos por % o monto, redondeo mitad-arriba **por línea**, totales agrupados por tasa como en el e-CF, propina legal 10 %) y normalización/formato de RNC, cédula y pasaporte (solo formato; sin dígito verificador a propósito).
+
+**`packages/db`**: tablas `user/session/account/verification/organization/member/invitation` (Better Auth), `branch`, `terminal`, `category`, `product`, `customer`, `audit_log`; enums `TaxCode` y `DocumentType`; 3 migraciones.
+
+**`apps/api`** (Hono, JSON con montos como **texto decimal** `"19.99"`, errores `{ error, issues? }`):
+
+| Ruta | Métodos | Quién escribe |
+|---|---|---|
+| `/health`, `/ready` | GET | — |
+| `/api/auth/*` | Better Auth | — |
+| `/v1/me` | GET | — |
+| `/v1/branches` | GET, POST, PATCH `/:id` | owner/admin |
+| `/v1/terminals` | GET (`?branchId`), POST, PATCH `/:id` | owner/admin |
+| `/v1/categories` | GET, POST, PATCH `/:id`, DELETE `/:id` | owner/admin |
+| `/v1/products` | GET (`q, categoryId, active, page, pageSize`), GET `/:id`, GET `/by-barcode/:code`, POST, PATCH `/:id`, DELETE `/:id` (**desactiva**) | owner/admin |
+| `/v1/customers` | GET (`q, active, page`), GET `/:id`, POST, PATCH `/:id` | owner/admin/**member** |
+| `/v1/tax-codes` | GET | — |
+| `/v1/calculate` | POST (mismo motor que usará la facturación) | — |
+
+Cada cambio escribe en `audit_log` **dentro de la misma transacción** (si falla el cambio, no queda rastro).
+
+**`apps/web`** (Next 16): `/registro`, `/login` y el panel `/panel` con **Resumen**, **Productos** (búsqueda, filtros, paginación, categorías, alta/edición/desactivar), **Clientes** (RNC/cédula con formato) y **Sucursales y cajas**. Cliente tipado de la API con Hono RPC (`apps/web/lib/api.ts`), componentes propios en `apps/web/components/ui.tsx`.
+
+### 0.5 Lo que falta (backlog en orden de prioridad)
+
+**A. Terminar la Fase 1 (siguiente trabajo inmediato)**
+
+1. **Datos fiscales de la empresa** (tabla `company_profile`): RNC, razón social, nombre comercial, dirección, provincia/municipio, actividad económica, ambiente (`TesteCF` / `CerteCF` / `eCF`) y certificado digital `.p12` (cifrado). Pantalla de configuración.
+2. **Modelo de documentos**: `document` (tipo E31/E32/E33/E34, estado, e-NCF, sucursal, caja, cliente, fecha, moneda y tasa, totales por tasa en `BigInt`), `document_line` (**copia** de nombre, precio, cantidad, impuesto y descuento: nunca depender del producto actual) y `payment` (efectivo, tarjeta, transferencia, mixto). Reglas: el servidor **recalcula siempre** con `core.calculateDocument` (no confía en el cliente); un documento emitido es **inmutable** (se corrige con nota de crédito/débito); E31 exige cliente con RNC; E32 ≥ RD$250,000 exige identificar al comprador.
+3. **Secuencias e-NCF** (`sequence`): tipo, desde/hasta, actual, fecha de vencimiento, asignación por caja. Asignación **atómica** (`UPDATE … RETURNING`) y `unique(organizationId, encf)`.
+4. **`packages/ecf`** + interfaz `FiscalProvider`: XML de E32 y E31, validación contra los XSD oficiales, firma XMLDSig, autenticación (semilla → token), envío, consulta por TrackId, código de seguridad y QR. Evaluar primero la librería `dgii-ecf` de npm.
+5. **Prototipo contra TesteCF**: emitir y consultar un E32 y un E31 de prueba. *Necesita de ti:* un certificado digital de pruebas y acceso a la Oficina Virtual de la DGII (verifica en dgii.gov.do cómo obtenerlo y su costo).
+6. **Invitar usuarios** a la empresa y gestionar miembros (hoy solo hay owner y un `member` que se crea por BD). Define el rol de cajero.
+7. **Validar RNC contra el padrón de la DGII** (archivo público) y autocompletar el nombre del cliente.
+
+**B. Pulido antes de desplegar** (requisito tuyo: "terminado y pulido")
+
+- Seguridad: *rate limiting* en login/registro, verificación de correo y recuperación de contraseña (requiere proveedor de correo: Resend u OCI Email Delivery), revisar `trustedOrigins` y cookies en producción.
+- UX: reemplazar `window.prompt`/`confirm` por diálogos propios, avisos tras guardar (toasts), estados vacíos y de error cuidados, revisión móvil y modo oscuro, accesibilidad (foco, contraste, etiquetas).
+- Calidad: pruebas E2E con Playwright, Sentry, límites de tamaño y paginación en sucursales/cajas, `README` por paquete.
+- Evaluar mover los componentes a `packages/ui` y adoptar shadcn/ui (hoy son componentes propios).
+
+**C. Cuando esté listo para producción** (ver [DESPLIEGUE.md](DESPLIEGUE.md))
+
+- Instalar Docker (o usar el runner de GitHub) y **construir las dos imágenes arm64 por primera vez**; corregir lo que falle.
+- Reducir el tamaño de la imagen de la API (~700 MB): `better-auth` arrastra `next` como peer opcional y la CLI de Prisma trae Studio; opciones: `autoInstallPeers: false` o podar en el Dockerfile.
+- Crear el servicio Postgres en Dokploy, roles con `setup-roles.sql`, secretos en GitHub, dominios `app.` y `api.`, backups a OCI y **probar una restauración**.
+- Entorno `staging`.
+
+**D. Fases 2 a 8:** igual que en §6.
+
+### 0.6 Decisiones tomadas (y por quién)
+
+| Decisión | Detalle |
+|---|---|
+| País y normativa | **República Dominicana**, e-CF de la DGII (Ley 32-23). La "factura" en la caja se imprime en una **impresora térmica normal** + lector de códigos de barras. |
+| Despliegue | **Híbrido**: nube (Oracle Cloud **Ampere A1 / arm64**, `uname -m` = `aarch64`, con **Dokploy**) + caja que sigue facturando sin internet. |
+| ORM | **Prisma 7** (preferencia tuya: "es más cómodo"). Dos schemas: Postgres (nube) y SQLite (caja, pendiente). |
+| Caja | **Electron** (TypeScript/Node: SQLite, firma XML, ESC/POS). |
+| Backend | **Next.js** (back-office) + **API Hono** separada. |
+| Idioma | Interfaz y mensajes de la API en **español**; las respuestas del asistente en español neutro (tú, sin regionalismos). |
+| Commits | Formato `[Add] - "mensaje"`, `[Update]`, `[Fix]`, `[Delete]`; el asistente solo commitea cuando se lo pides. |
+| Despliegue | Solo cuando el producto esté terminado y pulido. |
+
+**Sigue abierto:** conexión directa con la DGII **o** proveedor certificado (se decide con el prototipo); proveedor de correo; dominio; alcance de multimoneda (DOP/USD) en la primera versión.
+
+### 0.7 Trampas conocidas (te ahorrarán tiempo)
+
+- **pnpm 11 pide aprobar scripts de build** (`allowBuilds` en `pnpm-workspace.yaml`, ya configurado) y añade solo excepciones de antigüedad mínima (`minimumReleaseAgeExclude`) para versiones recientes. Si tras un `pnpm deploy` local pnpm se queja de `modules directory`, ejecuta `CI=true pnpm install --frozen-lockfile`.
+- **`tsconfig.tsbuildinfo` obsoleto** produce errores falsos (por ejemplo `TS2737` de `bigint`) tras cambiar el `target`: bórralo (`apps/web/tsconfig.tsbuildinfo`). `apps/web` usa `target: ES2022` porque `core` usa literales `bigint`.
+- **El cliente Prisma se genera** en `packages/db/src/generated` (ignorado por git). Turborepo lo regenera solo (`^db:generate`); si falta, `pnpm --filter @facturacion/db db:generate`. `prisma generate` **no** necesita base de datos.
+- **Next 16 es distinto al que conoces**: `apps/web/AGENTS.md` obliga a leer `node_modules/next/dist/docs/` antes de tocar código de Next. Con `cacheComponents` el acceso a datos dinámicos va dentro de `<Suspense>`. Las páginas del panel son un `page.tsx` de servidor con `export const instant = false` que renderiza una vista de cliente (`*-view.tsx`), porque un componente de cliente no puede exportar esa opción.
+- **Zod 4**: `.partial()` **conserva** los `.default()`, y eso pisaría campos en un PATCH. Por eso los valores por defecto de producto se aplican en el POST, no en el esquema (ver `routes/products.ts`).
+- **JSON no admite `BigInt`**: los montos salen como texto decimal (`fromCents`) y entran como texto (`toCents`).
+- **Referencias entre tablas y RLS**: una clave foránea comprueba la existencia **saltándose RLS**, así que antes de enlazar (p. ej. una caja con su sucursal) hay que verificar que el registro pertenece a la empresa con el cliente de tenant (ver `routes/terminals.ts`).
+- **Los miembros no se pueden invitar todavía**: las pruebas de roles insertan el `member` directo en BD.
+- **El panel del navegador integrado puede estar oculto**: ahí fallan las capturas de pantalla; se verifica con texto/JS.
+- **Docker no está instalado** en la PC de desarrollo original: nada de `docker build` se ha probado.
+
+---
+
 ## 1. Requisitos que definen la arquitectura
 
 | Requisito | Consecuencia técnica |
@@ -65,7 +232,7 @@ Estado: ✅ decidido · 🔶 se decide en la fase indicada
 | Lenguaje y runtime | **TypeScript** + **Node 24 LTS** | ✅ | Un solo lenguaje en web, API, caja y librería fiscal. La imagen `node:24-slim` es multiarquitectura (arm64). |
 | Monorepo | **pnpm workspaces + Turborepo** | ✅ | Comparte tipos, esquemas, UI y lógica fiscal. `turbo prune` genera imágenes Docker pequeñas por app. |
 | Back-office web | **Next.js 16** (ya instalado) + React 19, `output: "standalone"` | ✅ | Panel administrativo y reportes. El modo standalone produce una imagen de ~150 MB. |
-| UI | **Tailwind v4 + shadcn/ui** en `packages/ui` | ✅ | Los mismos componentes en la web y en la caja. |
+| UI | **Tailwind v4** + componentes propios (`apps/web/components/ui.tsx`); mover a `packages/ui` y valorar **shadcn/ui** | 🔶 Pulido | Hoy la web usa componentes propios sencillos. Se compartirán con la caja cuando exista `apps/pos`. |
 | API y workers | **Hono** sobre Node + **pg-boss** | ✅ | Es ligero. pg-boss maneja colas y reintentos usando Postgres, sin sumar Redis al servidor. Los endpoints receptor de la DGII quedan separados del front. |
 | Contrato API | **Zod** + **Hono RPC** | ✅ | Validación y tipos de punta a punta entre la web, la caja y la API. |
 | BD nube | **PostgreSQL 18** (servicio de BD de Dokploy) con **Row-Level Security** por `tenant_id` | ✅ | Aísla los datos entre empresas a nivel de base de datos. Dokploy hace los backups. |
@@ -122,7 +289,7 @@ Estado: ✅ decidido · 🔶 se decide en la fase indicada
   - `packages/db` → `schema.prisma` con `provider = "postgresql"` (la nube, completo).
   - `packages/db-local` → `schema.prisma` con `provider = "sqlite"` (la caja, solo lo que necesita: catálogo, clientes, documentos, cola de sync, turnos).
   - Los tipos de dominio compartidos (por ejemplo `DocumentoFiscal`) viven en `packages/core` y cada lado los mapea desde su modelo Prisma.
-- **Multiempresa con RLS.** Las políticas `CREATE POLICY` se escriben en SQL dentro de migraciones creadas con `prisma migrate dev --create-only`. Una *client extension* abre cada consulta en una transacción con `SELECT set_config('app.tenant_id', $1, true)`, así Postgres filtra por empresa aunque una consulta olvide el `where`.
+- **Multiempresa con RLS.** Las políticas `CREATE POLICY` se escriben en SQL al final de cada migración (flujo en §0.3.1; `prisma migrate dev` no se usa). Una *client extension* abre cada consulta en una transacción con `SELECT set_config('app.tenant_id', $1, true)`, así Postgres filtra por empresa aunque una consulta olvide el `where`.
 - **Dinero:** campos `BigInt` en centavos (no `Float`). Las tasas de impuesto, en `Decimal`.
 - **Migraciones en la caja:** las PCs de los locales no tienen la CLI de Prisma. La app incluye la carpeta `migrations/` y, al arrancar, aplica en orden los `.sql` pendientes (registrándolos en una tabla de control) antes de abrir la base.
 - **Better Auth** usa su adaptador de Prisma, así que las tablas de usuarios y organizaciones viven en el mismo schema.
@@ -133,23 +300,26 @@ Estado: ✅ decidido · 🔶 se decide en la fase indicada
 
 ## 4. Estructura del monorepo
 
+✅ = existe · ⬜ = pendiente
+
 ```
 facturacion/
 ├─ apps/
-│  ├─ web/        Next.js – back-office (lo que hoy es facturacion-app)
-│  ├─ api/        Hono – API, sync, endpoints receptor DGII, workers
-│  └─ pos/        Electron – caja offline
+│  ├─ web/        ✅ Next.js – back-office
+│  ├─ api/        ✅ Hono – API, auth, rutas /v1  (⬜ sync, receptor DGII, workers)
+│  └─ pos/        ⬜ Electron – caja offline
 ├─ packages/
-│  ├─ db/         Prisma: schema de la nube (Postgres) y migraciones
-│  ├─ db-local/   Prisma: schema de la caja (SQLite) y migraciones
-│  ├─ core/       Lógica de negocio pura: totales, impuestos, descuentos,
-│  │              propina legal, pagos mixtos, multimoneda
-│  ├─ ecf/        XML e-CF, firma, cliente DGII, RFCE, QR, FiscalProvider
-│  ├─ printing/   Plantillas de ticket ESC/POS
-│  ├─ ui/         Componentes compartidos (shadcn)
-│  └─ config/     tsconfig, eslint, tailwind compartidos
-├─ docker/        compose de desarrollo (Postgres + MinIO)
-└─ .github/       workflows: CI, imágenes arm64, instalador de la caja
+│  ├─ db/         ✅ Prisma: schema de la nube (Postgres), migraciones, RLS, tenant
+│  ├─ db-local/   ⬜ Prisma: schema de la caja (SQLite) y migraciones
+│  ├─ core/       ✅ Lógica de negocio pura: dinero, cantidades, impuestos, totales, documentos de identidad
+│  │              (⬜ pagos mixtos, multimoneda)
+│  ├─ ecf/        ⬜ XML e-CF, firma, cliente DGII, RFCE, QR, FiscalProvider
+│  ├─ printing/   ⬜ Plantillas de ticket ESC/POS
+│  ├─ ui/         ⬜ Componentes compartidos
+│  └─ config/     ⬜ (hoy la config compartida es tsconfig.base.json en la raíz)
+├─ docker/        ✅ Dockerfiles arm64, entrypoint con migraciones, compose de desarrollo
+├─ docs/          ✅ PLAN.md (este archivo) y DESPLIEGUE.md
+└─ .github/       ✅ workflows CI y despliegue  (⬜ instalador de la caja)
 ```
 
 `packages/core` y `packages/ecf` **no dependen de ningún framework**. Así se ejecutan igual en la API, en la caja y en las pruebas.
@@ -173,23 +343,30 @@ facturacion/
 
 > **Ruta crítica: el módulo e-CF.** La certificación ante la DGII (ambientes TesteCF → CerteCF → producción) toma semanas. Por eso arranca en paralelo desde la fase 1.
 
-### Fase 0 – Fundamentos (1–2 semanas) · ✅ hecha en local; falta el despliegue de prueba en Dokploy
-- Convertir el proyecto en monorepo (pnpm + Turborepo) y mover el Next actual a `apps/web`.
-- Configuración compartida (TS, ESLint, Prettier), Vitest, CI en GitHub Actions.
-- Docker Compose local: Postgres 18 + MinIO (simula OCI Object Storage).
-- Dockerfiles de `web` y `api` (arm64), pipeline GitHub Actions → GHCR → webhook de Dokploy, y Postgres creado en Dokploy con backups a OCI.
-- Desplegar un "hola mundo" de `web` y `api` en `app.` y `api.` para validar el flujo de punta a punta desde el día uno.
-- `packages/db` con Prisma: schema inicial, primera migración, políticas RLS en SQL y extensión de cliente que fija el tenant.
-- Better Auth: registro de empresa, usuarios, roles.
+### Fase 0 – Fundamentos (1–2 semanas) · ✅ hecha en local · ⏸ despliegue aplazado
+- [x] Monorepo (pnpm + Turborepo) con el Next movido a `apps/web`.
+- [x] Configuración compartida (TS estricto, ESLint, Prettier), Vitest y CI en GitHub Actions.
+- [x] `docker-compose.dev.yml` con Postgres 18 + MinIO *(escrito, no ejecutado: falta Docker)*.
+- [x] Dockerfiles de `web` y `api` (arm64) y workflow GitHub Actions → GHCR → webhook de Dokploy *(escritos; **sin ejecutar**)*.
+- [x] `packages/db` con Prisma: schema, migraciones, políticas RLS y extensión de cliente que fija el tenant.
+- [x] Better Auth: registro de empresa, login, organizaciones y roles.
+- [x] Script `pnpm db:bootstrap` para preparar la BD local.
+- [ ] ⏸ Desplegar un "hola mundo" de `web` y `api` en Dokploy (`app.` / `api.`) — **aplazado hasta que el producto esté pulido** (ver §0.5-C).
 
-### Fase 1 – Núcleo de negocio + prototipo fiscal (3–4 semanas) · 🔶 en curso
-**Hecho:** motor de cálculo en `packages/core` (ITBIS 18/16/0/exento, precio con o sin impuesto, descuentos, propina legal, redondeo por línea; 35 pruebas) · normalización de RNC/cédula/pasaporte · schema y RLS de sucursales, cajas, categorías, productos y clientes · API REST con roles y bitácora atómica (24 pruebas) · pantallas de productos, clientes y sucursales/cajas.
-**Pendiente:** facturas/documentos (E31, E32…), prototipo e-CF contra TesteCF (requiere certificado digital de pruebas y decidir proveedor), validación de RNC contra el padrón de la DGII, invitar usuarios a la empresa.
+### Fase 1 – Núcleo de negocio + prototipo fiscal (3–4 semanas) · 🔶 ~60 %
+**Hecho**
+- [x] `packages/core`: motor de cálculo (ITBIS 18/16/0/exento, precio con o sin impuesto, descuentos, propina legal, redondeo por línea) con 35 pruebas, más normalización de RNC/cédula/pasaporte.
+- [x] Schema y RLS de sucursales, cajas, categorías, productos y clientes; bitácora inmutable.
+- [x] API `/v1`: sucursales, cajas, categorías, productos (búsqueda, código de barras), clientes, `tax-codes` y `calculate`; roles y bitácora atómica; 24 pruebas contra Postgres real.
+- [x] Panel web: resumen, productos, clientes, sucursales y cajas.
 
-- CRUD de empresa, sucursales, cajas, impuestos, catálogo, clientes.
-- `packages/core`: motor de cálculo (líneas, descuentos, ITBIS, totales, redondeo) **con pruebas exhaustivas**.
-- **Prototipo e-CF**: generar un E32 y un E31, firmarlos, autenticarse en TesteCF, enviarlos y consultar el TrackId.
-- **Decisión:** proveedor certificado o conexión directa con la DGII (ver §7).
+**Pendiente** (detalle en §0.5-A)
+- [ ] Datos fiscales de la empresa + certificado `.p12`.
+- [ ] Modelo y API de documentos (E31, E32, E33, E34) con líneas, pagos y totales recalculados en el servidor.
+- [ ] Secuencias e-NCF con asignación atómica.
+- [ ] `packages/ecf` y `FiscalProvider`; **prototipo contra TesteCF** (E32 y E31: generar, firmar, enviar, consultar TrackId).
+- [ ] **Decisión:** proveedor certificado o conexión directa con la DGII (ver §7).
+- [ ] Invitar usuarios y gestionar miembros; validar RNC contra el padrón de la DGII.
 
 ### Fase 2 – Facturación en la web (3 semanas)
 - Emisión desde el back-office: E31, E32, E34, E33 con pagos y multimoneda (DOP/USD).
@@ -242,7 +419,9 @@ facturacion/
    - *Conexión directa:* sin costo por documento y con control total, pero hay que certificarse y mantenerse al día con los cambios técnicos de la DGII.
    - Gracias a la interfaz `FiscalProvider`, se puede empezar con una y cambiar después.
 2. **Contexto de mercado:** el plazo para pequeños, micro y no clasificados vence el **15 de noviembre de 2026** (prórroga de 6 meses). Muchos negocios estarán usando el facturador gratuito de la DGII y buscando algo mejor después: hay una buena ventana para un MVP en el primer trimestre de 2027.
-3. **Capacidad del servidor:** si el servidor Ampere es el de la capa gratuita (hasta 4 OCPU / 24 GB), alcanza de sobra para el MVP y los primeros clientes. Cuando crezca, el primer paso es mover Postgres a su propia instancia.
+3. **Proveedor de correo** (verificación de cuenta, recuperación de contraseña y envío del e-CF al cliente): Resend u OCI Email Delivery. Hace falta para el pulido previo al despliegue.
+4. **Multimoneda (DOP/USD):** ¿entra en la primera versión o después de la certificación? El e-CF ya contempla moneda y tipo de cambio.
+5. **Capacidad del servidor:** si el servidor Ampere es el de la capa gratuita (hasta 4 OCPU / 24 GB), alcanza de sobra para el MVP y los primeros clientes. Cuando crezca, el primer paso es mover Postgres a su propia instancia.
 
 ---
 
@@ -257,3 +436,5 @@ facturacion/
 | Errores de redondeo de ITBIS | Montos en enteros y pruebas con los casos oficiales de la DGII. |
 | Un solo servidor (Oracle) | Backups diarios fuera de la instancia (Object Storage), restauración probada, y la caja sigue facturando aunque la nube caiga. |
 | Oracle reclama instancias gratuitas inactivas | Mantener uso real o pasar la cuenta a *Pay As You Go* (sigue sin costo dentro de los límites gratuitos). |
+| Dockerfiles y workflow de despliegue sin probar | Construir las imágenes arm64 cuanto antes en un entorno con Docker (o con el runner de GitHub) y corregir; no esperar al día del despliegue. |
+| Una clave foránea puede enlazar registros de otra empresa (la FK se salta RLS) | Verificar la pertenencia con el cliente de tenant antes de enlazar, y valorar claves compuestas `(organizationId, id)` en las tablas de documentos. |
