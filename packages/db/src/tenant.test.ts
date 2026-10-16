@@ -81,6 +81,36 @@ describe.skipIf(!process.env.DATABASE_URL)("RLS multiempresa", () => {
     expect(count).toBe(2);
   });
 
+  it("todas las tablas de negocio están aisladas por empresa", async () => {
+    const asA = withTenant(prisma, orgA);
+    const asB = withTenant(prisma, orgB);
+    const branchA = await asA.branch.findFirstOrThrow();
+
+    await asA.category.create({ data: { organizationId: orgA, name: "Cat A" } });
+    await asA.product.create({
+      data: { organizationId: orgA, name: "Prod A", price: 1000n, barcode: "RLS-1" },
+    });
+    await asA.customer.create({ data: { organizationId: orgA, name: "Cliente A" } });
+    await asA.terminal.create({
+      data: { organizationId: orgA, branchId: branchA.id, name: "Caja A", code: "CA1" },
+    });
+
+    for (const model of ["category", "product", "customer", "terminal"] as const) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect(await (asA[model] as any).count(), `${model} visible para su dueño`).toBe(1);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect(await (asB[model] as any).count(), `${model} oculto para otra empresa`).toBe(0);
+    }
+
+    // Insertar en nombre de otra empresa también falla en todas las tablas.
+    await expect(
+      asB.product.create({ data: { organizationId: orgA, name: "Intruso", price: 1n } }),
+    ).rejects.toThrow();
+    await expect(
+      asB.customer.create({ data: { organizationId: orgA, name: "Intruso" } }),
+    ).rejects.toThrow();
+  });
+
   it("la bitácora es inmutable para el rol de la app", async () => {
     const asA = withTenant(prisma, orgA);
     const log = await asA.auditLog.create({

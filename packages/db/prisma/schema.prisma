@@ -89,6 +89,10 @@ model Organization {
   members     Member[]
   invitations Invitation[]
   branches    Branch[]
+  terminals   Terminal[]
+  categories  Category[]
+  products    Product[]
+  customers   Customer[]
   auditLogs   AuditLog[]
 
   @@map("organization")
@@ -137,9 +141,107 @@ model Branch {
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  terminals      Terminal[]
 
   @@unique([organizationId, code])
   @@map("branch")
+}
+
+/// Caja / terminal de venta. En la Fase 3 recibe aquí sus bloques de secuencias e-NCF.
+model Terminal {
+  id             String       @id @default(uuid(7)) @db.Uuid
+  organizationId String
+  branchId       String       @db.Uuid
+  name           String
+  code           String
+  active         Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch         Branch       @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, code])
+  @@index([branchId])
+  @@map("terminal")
+}
+
+/// Mismo código que `TaxCode` de @facturacion/core (la API verifica que coincidan).
+enum TaxCode {
+  ITBIS18
+  ITBIS16
+  ITBIS0
+  EXENTO
+}
+
+enum DocumentType {
+  RNC
+  CEDULA
+  PASAPORTE
+}
+
+model Category {
+  id             String       @id @default(uuid(7)) @db.Uuid
+  organizationId String
+  name           String
+  active         Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  products       Product[]
+
+  @@unique([organizationId, name])
+  @@map("category")
+}
+
+/// Producto o servicio vendible. Dinero en centavos (BigInt); impuesto según TaxCode.
+model Product {
+  id               String       @id @default(uuid(7)) @db.Uuid
+  organizationId   String
+  categoryId       String?      @db.Uuid
+  sku              String?
+  barcode          String?
+  name             String
+  description      String?
+  /// Precio unitario en centavos.
+  price            BigInt
+  /// true: `price` ya incluye el impuesto (precio al consumidor).
+  priceIncludesTax Boolean      @default(true)
+  tax              TaxCode      @default(ITBIS18)
+  /// Unidad de medida mostrada: UND, KG, LB, HORA…
+  unit             String       @default("UND")
+  /// true: se vende con decimales (peso, volumen).
+  allowsDecimals   Boolean      @default(false)
+  active           Boolean      @default(true)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  category         Category?    @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, sku])
+  @@unique([organizationId, barcode])
+  @@index([organizationId, name])
+  @@index([categoryId])
+  @@map("product")
+}
+
+model Customer {
+  id             String        @id @default(uuid(7)) @db.Uuid
+  organizationId String
+  name           String
+  documentType   DocumentType?
+  /// Solo dígitos (RNC 9, cédula 11) o texto libre para pasaporte.
+  documentNumber String?
+  email          String?
+  phone          String?
+  address        String?
+  active         Boolean       @default(true)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, documentNumber])
+  @@index([organizationId, name])
+  @@map("customer")
 }
 
 /// Bitácora inmutable (solo se inserta; la migración revoca UPDATE/DELETE al rol de la app).
