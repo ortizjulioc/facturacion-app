@@ -97,6 +97,8 @@ model Organization {
   sequences      Sequence[]
   documents      Document[]
   auditLogs      AuditLog[]
+  stockLevels    StockLevel[]
+  stockMovements StockMovement[]
 
   @@map("organization")
 }
@@ -135,17 +137,19 @@ model Invitation {
 
 /// Sucursal / local de la empresa. Las cajas (terminales) cuelgan de aquí en la Fase 1.
 model Branch {
-  id             String       @id @default(uuid(7)) @db.Uuid
+  id             String          @id @default(uuid(7)) @db.Uuid
   organizationId String
   name           String
   code           String
   address        String?
-  active         Boolean      @default(true)
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  active         Boolean         @default(true)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   terminals      Terminal[]
   documents      Document[]
+  stockLevels    StockLevel[]
+  stockMovements StockMovement[]
 
   @@unique([organizationId, code])
   @@map("branch")
@@ -201,9 +205,9 @@ model Category {
 
 /// Producto o servicio vendible. Dinero en centavos (BigInt); impuesto según TaxCode.
 model Product {
-  id               String         @id @default(uuid(7)) @db.Uuid
+  id               String          @id @default(uuid(7)) @db.Uuid
   organizationId   String
-  categoryId       String?        @db.Uuid
+  categoryId       String?         @db.Uuid
   sku              String?
   barcode          String?
   name             String
@@ -211,18 +215,24 @@ model Product {
   /// Precio unitario en centavos.
   price            BigInt
   /// true: `price` ya incluye el impuesto (precio al consumidor).
-  priceIncludesTax Boolean        @default(true)
-  tax              TaxCode        @default(ITBIS18)
+  priceIncludesTax Boolean         @default(true)
+  tax              TaxCode         @default(ITBIS18)
   /// Unidad de medida mostrada: UND, KG, LB, HORA…
-  unit             String         @default("UND")
+  unit             String          @default("UND")
   /// true: se vende con decimales (peso, volumen).
-  allowsDecimals   Boolean        @default(false)
-  active           Boolean        @default(true)
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
-  organization     Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  category         Category?      @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  allowsDecimals   Boolean         @default(false)
+  /// true: al emitir se descuenta de las existencias de la sucursal.
+  trackInventory   Boolean         @default(false)
+  /// Existencia mínima (milésimas) por sucursal; por debajo se avisa de stock bajo.
+  minStock         BigInt          @default(0)
+  active           Boolean         @default(true)
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  organization     Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  category         Category?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   documentLines    DocumentLine[]
+  stockLevels      StockLevel[]
+  stockMovements   StockMovement[]
 
   @@unique([organizationId, sku])
   @@unique([organizationId, barcode])
@@ -290,21 +300,23 @@ enum EcfEnvironment {
 
 /// Datos fiscales del emisor (uno por empresa).
 model CompanyProfile {
-  id               String         @id @default(uuid(7)) @db.Uuid
-  organizationId   String         @unique
-  rnc              String
-  legalName        String
-  tradeName        String?
-  address          String
-  province         String?
-  municipality     String?
-  economicActivity String?
-  email            String?
-  phone            String?
-  environment      EcfEnvironment @default(TEST)
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
-  organization     Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  id                 String         @id @default(uuid(7)) @db.Uuid
+  organizationId     String         @unique
+  rnc                String
+  legalName          String
+  tradeName          String?
+  address            String
+  province           String?
+  municipality       String?
+  economicActivity   String?
+  email              String?
+  phone              String?
+  environment        EcfEnvironment @default(TEST)
+  /// false: no se puede emitir un comprobante si falta existencia de un producto con inventario.
+  allowNegativeStock Boolean        @default(true)
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+  organization       Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@map("company_profile")
 }
@@ -334,51 +346,52 @@ model Sequence {
 
 /// Comprobante. Editable solo en DRAFT; después una función de BD impide cambiar importes o líneas.
 model Document {
-  id                   String         @id @default(uuid(7)) @db.Uuid
+  id                   String          @id @default(uuid(7)) @db.Uuid
   organizationId       String
   type                 EcfType
-  status               DocumentStatus @default(DRAFT)
+  status               DocumentStatus  @default(DRAFT)
   /// Se asigna al emitir.
   encf                 String?
-  branchId             String         @db.Uuid
-  terminalId           String?        @db.Uuid
-  customerId           String?        @db.Uuid
+  branchId             String          @db.Uuid
+  terminalId           String?         @db.Uuid
+  customerId           String?         @db.Uuid
   /// Copia del comprador al emitir (el cliente puede cambiar después).
   buyerName            String?
   buyerDocType         DocumentType?
   buyerDocNumber       String?
-  currency             String         @default("DOP")
-  exchangeRate         Decimal        @default(1) @db.Decimal(14, 4)
-  propinaLegal         Boolean        @default(false)
+  currency             String          @default("DOP")
+  exchangeRate         Decimal         @default(1) @db.Decimal(14, 4)
+  propinaLegal         Boolean         @default(false)
   notes                String?
   /// Solo notas de crédito/débito.
-  referencedDocumentId String?        @db.Uuid
+  referencedDocumentId String?         @db.Uuid
   referencedEncf       String?
   modificationCode     Int?
   // Totales en centavos, calculados SIEMPRE en el servidor con @facturacion/core.
-  totalDiscount        BigInt         @default(0)
-  subtotal             BigInt         @default(0)
-  base18               BigInt         @default(0)
-  tax18                BigInt         @default(0)
-  base16               BigInt         @default(0)
-  tax16                BigInt         @default(0)
-  base0                BigInt         @default(0)
-  baseExempt           BigInt         @default(0)
-  totalTax             BigInt         @default(0)
-  propinaAmount        BigInt         @default(0)
-  total                BigInt         @default(0)
+  totalDiscount        BigInt          @default(0)
+  subtotal             BigInt          @default(0)
+  base18               BigInt          @default(0)
+  tax18                BigInt          @default(0)
+  base16               BigInt          @default(0)
+  tax16                BigInt          @default(0)
+  base0                BigInt          @default(0)
+  baseExempt           BigInt          @default(0)
+  totalTax             BigInt          @default(0)
+  propinaAmount        BigInt          @default(0)
+  total                BigInt          @default(0)
   issuedAt             DateTime?
   createdById          String
-  createdAt            DateTime       @default(now())
-  updatedAt            DateTime       @updatedAt
-  organization         Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  branch               Branch         @relation(fields: [branchId], references: [id], onDelete: NoAction)
-  terminal             Terminal?      @relation(fields: [terminalId], references: [id], onDelete: NoAction)
-  customer             Customer?      @relation(fields: [customerId], references: [id], onDelete: NoAction)
-  referencedDocument   Document?      @relation("Modifies", fields: [referencedDocumentId], references: [id], onDelete: NoAction)
-  modifiedBy           Document[]     @relation("Modifies")
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+  organization         Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch               Branch          @relation(fields: [branchId], references: [id], onDelete: NoAction)
+  terminal             Terminal?       @relation(fields: [terminalId], references: [id], onDelete: NoAction)
+  customer             Customer?       @relation(fields: [customerId], references: [id], onDelete: NoAction)
+  referencedDocument   Document?       @relation("Modifies", fields: [referencedDocumentId], references: [id], onDelete: NoAction)
+  modifiedBy           Document[]      @relation("Modifies")
   lines                DocumentLine[]
   payments             Payment[]
+  stockMovements       StockMovement[]
 
   @@unique([organizationId, encf])
   @@index([organizationId, status])
@@ -432,6 +445,63 @@ model Payment {
 
   @@index([documentId])
   @@map("payment")
+}
+
+enum StockMovementType {
+  /// Entrada de mercancía (compra, producción…).
+  RECEIPT
+  /// Salida por una venta emitida.
+  SALE
+  /// Reingreso por anulación de una venta (nota de crédito código 1).
+  RETURN
+  /// Corrección manual tras un conteo o por merma.
+  ADJUSTMENT
+}
+
+/// Existencia actual de un producto en una sucursal. Se actualiza SIEMPRE junto con su movimiento.
+model StockLevel {
+  id             String       @id @default(uuid(7)) @db.Uuid
+  organizationId String
+  productId      String       @db.Uuid
+  branchId       String       @db.Uuid
+  /// Cantidad en milésimas (1000 = 1.000). Puede ser negativa si la empresa lo permite.
+  quantity       BigInt       @default(0)
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  product        Product      @relation(fields: [productId], references: [id], onDelete: NoAction)
+  branch         Branch       @relation(fields: [branchId], references: [id], onDelete: NoAction)
+
+  @@unique([productId, branchId])
+  @@index([organizationId, branchId])
+  @@map("stock_level")
+}
+
+/// Libro de movimientos de inventario: solo se inserta (la BD impide modificar o borrar filas).
+model StockMovement {
+  id             String            @id @default(uuid(7)) @db.Uuid
+  organizationId String
+  productId      String            @db.Uuid
+  branchId       String            @db.Uuid
+  type           StockMovementType
+  /// Con signo, en milésimas: entradas > 0, salidas < 0.
+  quantity       BigInt
+  /// Existencia resultante después de este movimiento.
+  balanceAfter   BigInt
+  /// Costo unitario en centavos (entradas).
+  unitCost       BigInt?
+  documentId     String?           @db.Uuid
+  reason         String?
+  createdById    String
+  createdAt      DateTime          @default(now())
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  product        Product           @relation(fields: [productId], references: [id], onDelete: NoAction)
+  branch         Branch            @relation(fields: [branchId], references: [id], onDelete: NoAction)
+  document       Document?         @relation(fields: [documentId], references: [id], onDelete: NoAction)
+
+  @@index([organizationId, productId, createdAt])
+  @@index([organizationId, createdAt])
+  @@index([documentId])
+  @@map("stock_movement")
 }
 
 /// Bitácora inmutable (solo se inserta; la migración revoca UPDATE/DELETE al rol de la app).

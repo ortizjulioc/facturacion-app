@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { toCents } from "./money";
-import { fromMilli, toMilli } from "./quantity";
+import { fromMilli, toMilli, toSignedMilli } from "./quantity";
 import { divRound, TAX_CODES } from "./tax";
 import { calculateDocument, calculateLine, type LineInput } from "./totals";
 
-const line = (price: string, qty: string, tax: LineInput["tax"], rest: Partial<LineInput> = {}) =>
-  calculateLine({ unitPrice: toCents(price), quantity: toMilli(qty), tax, ...rest });
+const line = (
+  price: string,
+  qty: string,
+  tax: LineInput["tax"],
+  rest: Partial<LineInput> = {},
+) => calculateLine({ unitPrice: toCents(price), quantity: toMilli(qty), tax, ...rest });
 
 describe("divRound", () => {
   it("redondea mitad hacia arriba", () => {
@@ -29,6 +33,17 @@ describe("quantity", () => {
     expect(toMilli(3)).toBe(3000n);
     expect(fromMilli(1250n)).toBe("1.25");
     expect(fromMilli(1000n)).toBe("1");
+  });
+  it("admite cantidades con signo (ajustes de inventario)", () => {
+    expect(toSignedMilli("-2.5")).toBe(-2500n);
+    expect(toSignedMilli("3")).toBe(3000n);
+    expect(toSignedMilli("-0.001")).toBe(-1n);
+    expect(() => toSignedMilli("--1")).toThrow();
+    expect(() => toSignedMilli("-")).toThrow();
+    expect(fromMilli(-2500n)).toBe("-2.5");
+    expect(fromMilli(-1n)).toBe("-0.001");
+    expect(fromMilli(-3000n)).toBe("-3");
+    expect(fromMilli(0n)).toBe("0");
   });
   it("rechaza más de 3 decimales o formato inválido", () => {
     expect(() => toMilli("1.2345")).toThrow();
@@ -128,7 +143,9 @@ describe("calculateLine · precio con ITBIS incluido", () => {
 describe("calculateLine · validaciones", () => {
   it("rechaza datos inválidos", () => {
     expect(() => line("-1.00", "1", "ITBIS18")).toThrow();
-    expect(() => calculateLine({ unitPrice: 100n, quantity: 0n, tax: "ITBIS18" })).toThrow();
+    expect(() =>
+      calculateLine({ unitPrice: 100n, quantity: 0n, tax: "ITBIS18" }),
+    ).toThrow();
     expect(() =>
       line("10.00", "1", "ITBIS18", { discount: { type: "amount", cents: 1001n } }),
     ).toThrow();
@@ -150,7 +167,12 @@ describe("calculateDocument", () => {
     expect(t.byTax.ITBIS18).toEqual({ base: 39997n, taxAmount: 7199n });
     expect(t.byTax.EXENTO).toEqual({ base: 5000n, taxAmount: 0n });
     expect(t.byTax.ITBIS16).toEqual({ base: 0n, taxAmount: 0n });
-    expect(t).toMatchObject({ subtotal: 44997n, totalTax: 7199n, propinaLegal: 0n, total: 52196n });
+    expect(t).toMatchObject({
+      subtotal: 44997n,
+      totalTax: 7199n,
+      propinaLegal: 0n,
+      total: 52196n,
+    });
   });
 
   it("propina legal = 10 % del subtotal sin ITBIS", () => {
@@ -218,7 +240,10 @@ describe("invariantes (datos pseudoaleatorios, semilla fija)", () => {
         propinaLegal: rand(2) === 1,
       });
       expect(t.total).toBe(t.lines.reduce((s, l) => s + l.total, 0n) + t.propinaLegal);
-      const buckets = TAX_CODES.reduce((s, c) => s + t.byTax[c].base + t.byTax[c].taxAmount, 0n);
+      const buckets = TAX_CODES.reduce(
+        (s, c) => s + t.byTax[c].base + t.byTax[c].taxAmount,
+        0n,
+      );
       expect(buckets + t.propinaLegal).toBe(t.total);
     }
   });

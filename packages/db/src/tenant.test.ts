@@ -8,7 +8,10 @@ import { createPrisma, tenantTransaction, withTenant } from "./index";
  * Se omiten si no hay DATABASE_URL.
  */
 describe.skipIf(!process.env.DATABASE_URL)("RLS multiempresa", () => {
-  const prisma = createPrisma({ connectionString: process.env.DATABASE_URL ?? "", max: 3 });
+  const prisma = createPrisma({
+    connectionString: process.env.DATABASE_URL ?? "",
+    max: 3,
+  });
   const orgA = `test-a-${randomUUID()}`;
   const orgB = `test-b-${randomUUID()}`;
 
@@ -75,7 +78,9 @@ describe.skipIf(!process.env.DATABASE_URL)("RLS multiempresa", () => {
 
   it("tenantTransaction agrupa varias operaciones bajo el mismo tenant", async () => {
     const count = await tenantTransaction(prisma, orgA, async (tx) => {
-      await tx.branch.create({ data: { organizationId: orgA, name: "Segunda A", code: "A2" } });
+      await tx.branch.create({
+        data: { organizationId: orgA, name: "Segunda A", code: "A2" },
+      });
       return tx.branch.count();
     });
     expect(count).toBe(2);
@@ -99,7 +104,9 @@ describe.skipIf(!process.env.DATABASE_URL)("RLS multiempresa", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect(await (asA[model] as any).count(), `${model} visible para su dueño`).toBe(1);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      expect(await (asB[model] as any).count(), `${model} oculto para otra empresa`).toBe(0);
+      expect(await (asB[model] as any).count(), `${model} oculto para otra empresa`).toBe(
+        0,
+      );
     }
 
     // Insertar en nombre de otra empresa también falla en todas las tablas.
@@ -160,14 +167,31 @@ describe.skipIf(!process.env.DATABASE_URL)("RLS multiempresa", () => {
         },
       });
       await asA.companyProfile.create({
-        data: { organizationId: orgA, rnc: "101001577", legalName: "A SRL", address: "Calle 1" },
+        data: {
+          organizationId: orgA,
+          rnc: "101001577",
+          legalName: "A SRL",
+          address: "Calle 1",
+        },
       });
 
-      for (const model of ["document", "documentLine", "payment", "sequence", "companyProfile"] as const) {
+      for (const model of [
+        "document",
+        "documentLine",
+        "payment",
+        "sequence",
+        "companyProfile",
+      ] as const) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        expect(await (asA[model] as any).count(), `${model} visible para su dueño`).toBeGreaterThan(0);
+        expect(
+          await (asA[model] as any).count(),
+          `${model} visible para su dueño`,
+        ).toBeGreaterThan(0);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        expect(await (asB[model] as any).count(), `${model} oculto para otra empresa`).toBe(0);
+        expect(
+          await (asB[model] as any).count(),
+          `${model} oculto para otra empresa`,
+        ).toBe(0);
       }
       expect(await asB.document.findFirst({ where: { id: doc.id } })).toBeNull();
     });
@@ -175,7 +199,10 @@ describe.skipIf(!process.env.DATABASE_URL)("RLS multiempresa", () => {
     it("un borrador se puede editar y eliminar", async () => {
       const doc = await draftDoc(orgA);
       const asA = withTenant(prisma, orgA);
-      await asA.document.update({ where: { id: doc.id }, data: { notes: "cambio permitido" } });
+      await asA.document.update({
+        where: { id: doc.id },
+        data: { notes: "cambio permitido" },
+      });
       await asA.payment.deleteMany({ where: { documentId: doc.id } });
       await asA.document.delete({ where: { id: doc.id } });
       expect(await asA.document.findFirst({ where: { id: doc.id } })).toBeNull();
@@ -191,26 +218,40 @@ describe.skipIf(!process.env.DATABASE_URL)("RLS multiempresa", () => {
       expect(issued.status).toBe("ISSUED");
 
       // No se puede alterar ningún dato…
-      await expect(asA.document.update({ where: { id: doc.id }, data: { total: 1n } })).rejects.toThrow(
-        /no se puede modificar/,
-      );
-      await expect(asA.document.update({ where: { id: doc.id }, data: { notes: "x" } })).rejects.toThrow();
+      await expect(
+        asA.document.update({ where: { id: doc.id }, data: { total: 1n } }),
+      ).rejects.toThrow(/no se puede modificar/);
+      await expect(
+        asA.document.update({ where: { id: doc.id }, data: { notes: "x" } }),
+      ).rejects.toThrow();
       // …ni volver a borrador, ni borrarlo.
-      await expect(asA.document.update({ where: { id: doc.id }, data: { status: "DRAFT" } })).rejects.toThrow(
-        /volver a borrador/,
+      await expect(
+        asA.document.update({ where: { id: doc.id }, data: { status: "DRAFT" } }),
+      ).rejects.toThrow(/volver a borrador/);
+      await expect(asA.document.delete({ where: { id: doc.id } })).rejects.toThrow(
+        /no se puede eliminar/,
       );
-      await expect(asA.document.delete({ where: { id: doc.id } })).rejects.toThrow(/no se puede eliminar/);
       // Tampoco sus líneas ni sus pagos.
       await expect(
-        asA.documentLine.updateMany({ where: { documentId: doc.id }, data: { unitPrice: 1n } }),
+        asA.documentLine.updateMany({
+          where: { documentId: doc.id },
+          data: { unitPrice: 1n },
+        }),
       ).rejects.toThrow(/no se pueden modificar/);
-      await expect(asA.payment.deleteMany({ where: { documentId: doc.id } })).rejects.toThrow();
       await expect(
-        asA.payment.create({ data: { organizationId: orgA, documentId: doc.id, method: "CASH", amount: 1n } }),
+        asA.payment.deleteMany({ where: { documentId: doc.id } }),
+      ).rejects.toThrow();
+      await expect(
+        asA.payment.create({
+          data: { organizationId: orgA, documentId: doc.id, method: "CASH", amount: 1n },
+        }),
       ).rejects.toThrow();
 
       // Lo único que puede avanzar es el estado fiscal.
-      const sent = await asA.document.update({ where: { id: doc.id }, data: { status: "SENT" } });
+      const sent = await asA.document.update({
+        where: { id: doc.id },
+        data: { status: "SENT" },
+      });
       expect(sent.status).toBe("SENT");
     });
 
@@ -229,9 +270,15 @@ describe.skipIf(!process.env.DATABASE_URL)("RLS multiempresa", () => {
       const asA = withTenant(prisma, orgA);
       const first = await draftDoc(orgA);
       const second = await draftDoc(orgA);
-      await asA.document.update({ where: { id: first.id }, data: { status: "ISSUED", encf: "E320000000777" } });
+      await asA.document.update({
+        where: { id: first.id },
+        data: { status: "ISSUED", encf: "E320000000777" },
+      });
       await expect(
-        asA.document.update({ where: { id: second.id }, data: { status: "ISSUED", encf: "E320000000777" } }),
+        asA.document.update({
+          where: { id: second.id },
+          data: { status: "ISSUED", encf: "E320000000777" },
+        }),
       ).rejects.toThrow();
     });
 
@@ -248,11 +295,15 @@ describe.skipIf(!process.env.DATABASE_URL)("RLS multiempresa", () => {
         },
       });
       await asA.sequence.update({ where: { id: seq.id }, data: { nextNumber: 103n } });
-      await expect(asA.sequence.update({ where: { id: seq.id }, data: { nextNumber: 101n } })).rejects.toThrow(
-        /no puede retroceder/,
+      await expect(
+        asA.sequence.update({ where: { id: seq.id }, data: { nextNumber: 101n } }),
+      ).rejects.toThrow(/no puede retroceder/);
+      await expect(
+        asA.sequence.update({ where: { id: seq.id }, data: { fromNumber: 50n } }),
+      ).rejects.toThrow();
+      await expect(asA.sequence.delete({ where: { id: seq.id } })).rejects.toThrow(
+        /ya se usó/,
       );
-      await expect(asA.sequence.update({ where: { id: seq.id }, data: { fromNumber: 50n } })).rejects.toThrow();
-      await expect(asA.sequence.delete({ where: { id: seq.id } })).rejects.toThrow(/ya se usó/);
       // Rangos incoherentes los rechaza la restricción CHECK.
       await expect(
         asA.sequence.create({
@@ -265,6 +316,121 @@ describe.skipIf(!process.env.DATABASE_URL)("RLS multiempresa", () => {
             expiresAt: new Date("2099-12-31"),
           },
         }),
+      ).rejects.toThrow();
+    });
+  });
+
+  describe("inventario", () => {
+    const setup = async (org: string, code: string) => {
+      const as = withTenant(prisma, org);
+      const branch = await as.branch.findFirstOrThrow();
+      const product = await as.product.create({
+        data: {
+          organizationId: org,
+          name: `Prod ${code}`,
+          price: 1000n,
+          trackInventory: true,
+          minStock: 5000n,
+        },
+      });
+      return { as, branch, product };
+    };
+    const movement = (
+      org: string,
+      productId: string,
+      branchId: string,
+      over: object = {},
+    ) => ({
+      organizationId: org,
+      productId,
+      branchId,
+      type: "RECEIPT" as const,
+      quantity: 10_000n,
+      balanceAfter: 10_000n,
+      createdById: "test-user",
+      ...over,
+    });
+
+    it("aísla existencias y movimientos por empresa", async () => {
+      const a = await setup(orgA, "A");
+      await a.as.stockLevel.create({
+        data: {
+          organizationId: orgA,
+          productId: a.product.id,
+          branchId: a.branch.id,
+          quantity: 10_000n,
+        },
+      });
+      await a.as.stockMovement.create({
+        data: movement(orgA, a.product.id, a.branch.id),
+      });
+
+      const asB = withTenant(prisma, orgB);
+      expect(await a.as.stockLevel.count()).toBeGreaterThan(0);
+      expect(await a.as.stockMovement.count()).toBeGreaterThan(0);
+      expect(await asB.stockLevel.count()).toBe(0);
+      expect(await asB.stockMovement.count()).toBe(0);
+      await expect(
+        asB.stockLevel.create({
+          data: {
+            organizationId: orgA,
+            productId: a.product.id,
+            branchId: a.branch.id,
+            quantity: 1n,
+          },
+        }),
+      ).rejects.toThrow();
+    });
+
+    it("un producto tiene una sola fila de existencia por sucursal", async () => {
+      const a = await setup(orgA, "U");
+      const data = {
+        organizationId: orgA,
+        productId: a.product.id,
+        branchId: a.branch.id,
+        quantity: 0n,
+      };
+      await a.as.stockLevel.create({ data });
+      await expect(a.as.stockLevel.create({ data })).rejects.toThrow();
+    });
+
+    it("el libro de movimientos no se modifica ni se borra", async () => {
+      const a = await setup(orgA, "M");
+      const m = await a.as.stockMovement.create({
+        data: movement(orgA, a.product.id, a.branch.id),
+      });
+      await expect(
+        a.as.stockMovement.update({ where: { id: m.id }, data: { quantity: 1n } }),
+      ).rejects.toThrow(/no se pueden modificar ni eliminar/);
+      await expect(a.as.stockMovement.delete({ where: { id: m.id } })).rejects.toThrow();
+      await expect(
+        a.as.stockMovement.deleteMany({ where: { productId: a.product.id } }),
+      ).rejects.toThrow();
+    });
+
+    it("el signo del movimiento debe coincidir con su tipo y nunca es cero", async () => {
+      const a = await setup(orgA, "S");
+      const create = (over: object) =>
+        a.as.stockMovement.create({
+          data: movement(orgA, a.product.id, a.branch.id, over),
+        });
+
+      await expect(create({ type: "SALE", quantity: 1_000n })).rejects.toThrow(); // una venta no suma
+      await expect(create({ type: "RECEIPT", quantity: -1_000n })).rejects.toThrow(); // una entrada no resta
+      await expect(create({ type: "RETURN", quantity: -1_000n })).rejects.toThrow();
+      await expect(create({ type: "ADJUSTMENT", quantity: 0n })).rejects.toThrow();
+      await expect(
+        create({ type: "SALE", quantity: -2_000n, balanceAfter: 8_000n }),
+      ).resolves.toBeTruthy();
+      await expect(
+        create({ type: "ADJUSTMENT", quantity: -500n, balanceAfter: 7_500n }),
+      ).resolves.toBeTruthy();
+    });
+
+    it("la existencia mínima no puede ser negativa", async () => {
+      const a = await setup(orgA, "N");
+      await expect(
+        a.as.product.update({ where: { id: a.product.id }, data: { minStock: -1n } }),
       ).rejects.toThrow();
     });
   });
