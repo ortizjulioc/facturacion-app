@@ -8,9 +8,11 @@ import { authClient } from "@/lib/api";
 
 const NAV = [
   { href: "/panel", label: "Resumen" },
+  { href: "/panel/facturas", label: "Facturas" },
   { href: "/panel/productos", label: "Productos" },
   { href: "/panel/clientes", label: "Clientes" },
   { href: "/panel/sucursales", label: "Sucursales y cajas" },
+  { href: "/panel/fiscal", label: "Configuración fiscal" },
 ];
 
 export function PanelShell({ children }: { children: ReactNode }) {
@@ -39,7 +41,7 @@ export function PanelShell({ children }: { children: ReactNode }) {
   return (
     <PanelContext.Provider value={{ organizationName: org?.name ?? "", canManage }}>
       <div className="flex min-h-screen flex-col md:flex-row">
-        <aside className="flex shrink-0 flex-col gap-6 border-b border-zinc-200 p-4 md:w-60 md:border-r md:border-b-0 dark:border-zinc-800">
+        <aside className="no-print flex shrink-0 flex-col gap-6 border-b border-zinc-200 p-4 md:w-60 md:border-r md:border-b-0 dark:border-zinc-800">
           <div>
             <p className="text-xs uppercase tracking-wide text-zinc-500">Empresa</p>
             <p className="truncate font-semibold">{org?.name ?? "—"}</p>
