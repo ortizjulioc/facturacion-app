@@ -14,11 +14,11 @@ Sistema de facturación y punto de venta **multiempresa y multigiro** (tienda, r
 | Fase | Estado |
 |---|---|
 | 0 · Fundamentos (monorepo, BD, auth, CI, Dockerfiles) | ✅ hecha en local · ⏸ despliegue de prueba en Dokploy **aplazado a propósito** |
-| 1 · Núcleo de negocio | 🔶 **~85 %**: catálogo, clientes, cajas, motor de cálculo, **datos fiscales, secuencias e-NCF y facturas (E31/E32/E33/E34) emitibles y congeladas**; **falta `packages/ecf` y el prototipo contra TesteCF**, invitar usuarios y validar RNC |
+| 1 · Núcleo de negocio | 🔶 **~85 %**: catálogo, clientes, cajas, motor de cálculo, **datos fiscales, secuencias e-NCF y facturas (E31/E32/E33/E34) emitibles y congeladas**; **falta `packages/ecf` y el prototipo contra TesteCF** y validar RNC contra el padrón; **equipo e invitaciones ya funcionan** |
 | 2 · Facturación en la web | 🔶 emisión desde el back-office **hecha** (sin enviar a la DGII); faltan PDF con QR, envío por correo y workers |
 | 3 – 8 | ⬜ sin empezar |
 
-Calidad actual (todo en verde): `lint`, `typecheck`, `build` y **114 pruebas** (46 `core` + 14 de BD: RLS, inmutabilidad y secuencias + 54 de la API contra Postgres real). Verificado además a mano en el navegador: registro → datos fiscales → secuencias → factura con código de barras → emisión → nota de crédito → factura de crédito fiscal con RNC.
+Calidad actual (todo en verde): `lint`, `typecheck`, `build` y **128 pruebas** (46 `core` + 14 de BD: RLS, inmutabilidad y secuencias + 68 de la API contra Postgres real). Verificado además a mano en el navegador: registro → datos fiscales → secuencias → factura con código de barras → emisión → nota de crédito → factura de crédito fiscal con RNC → reportes → invitar a un cajero, que crea su cuenta con el enlace y trabaja con permisos limitados.
 
 ### 0.2 Retomar el trabajo en otra PC
 
@@ -108,6 +108,9 @@ pnpm db:deploy && pnpm exec prisma generate
 | `/v1/products` | GET (`q, categoryId, active, page, pageSize`), GET `/:id`, GET `/by-barcode/:code`, POST, PATCH `/:id`, DELETE `/:id` (**desactiva**) | owner/admin |
 | `/v1/customers` | GET (`q, active, page`), GET `/:id`, POST, PATCH `/:id` | owner/admin/**member** |
 | `/v1/company` | GET, PUT (datos fiscales del emisor, ambiente DGII) | owner/admin |
+| `/v1/reports/sales` | GET `?from&to&groupBy=day\|month`: ventas netas, ITBIS por tasa, por tipo, por forma de pago y más vendidos | **solo owner/admin** |
+| `/v1/reports/sales.csv` | GET: comprobantes emitidos del período en CSV (UTF-8 con BOM; neutraliza fórmulas de Excel) | **solo owner/admin** |
+| `/api/auth/organization/*` | Better Auth: `invite-member`, `accept-invitation`, `cancel-invitation`, `list-members`, `list-invitations`, `update-member-role`, `remove-member` | según rol de Better Auth |
 | `/v1/sequences` | GET, POST, PATCH `/:id` (rangos de e-NCF; no se solapan; no se borran) | owner/admin |
 | `/v1/documents` | GET (`q, type, status, customerId, branchId, from, to, page`), GET `/:id`, POST (borrador), PUT `/:id` (reemplaza un borrador), DELETE `/:id` (solo borrador), POST `/:id/issue` | **cualquier miembro** (incluido el cajero) |
 | `/v1/tax-codes` | GET | — |
@@ -117,7 +120,7 @@ Cada cambio escribe en `audit_log` **dentro de la misma transacción** (si falla
 
 **Emisión (`POST /v1/documents/:id/issue`)**, en una sola transacción: exige datos fiscales y total > 0 · refresca el comprador desde la ficha del cliente · aplica las reglas del comprador (E31 exige RNC; E32 ≥ RD$250,000 exige identificarlo) · exige que los pagos sumen el total (E31/E32) · en notas de crédito bloquea el original y verifica que no se exceda lo acreditable (código 1 = anular exige el total) · **asigna el e-NCF de forma atómica** (`UPDATE … WHERE id = (SELECT … FOR UPDATE)`; prefiere la secuencia de la caja, luego la general; ignora rangos vencidos, agotados o inactivos) · congela el comprobante. Los totales siempre se recalculan en el servidor con `core`.
 
-**`apps/web`** (Next 16): `/registro`, `/login` y el panel `/panel` con **Resumen**, **Facturas** (listado con filtros, **editor** con buscador de productos y lector de códigos de barras, totales en vivo con el mismo motor fiscal, pagos mixtos, descuentos, propina legal, notas de crédito/débito, **detalle imprimible**), **Productos** (búsqueda, filtros, paginación, categorías, alta/edición/desactivar), **Clientes** (RNC/cédula con formato), **Sucursales y cajas** y **Configuración fiscal** (datos del emisor y secuencias). Cliente tipado de la API con Hono RPC (`apps/web/lib/api.ts`), componentes propios en `apps/web/components/ui.tsx`.
+**`apps/web`** (Next 16): `/registro`, `/login` y el panel `/panel` con **Resumen**, **Facturas** (listado con filtros, **editor** con buscador de productos y lector de códigos de barras, totales en vivo con el mismo motor fiscal, pagos mixtos, descuentos, propina legal, notas de crédito/débito, **detalle imprimible**), **Productos** (búsqueda, filtros, paginación, categorías, alta/edición/desactivar), **Clientes** (RNC/cédula con formato), **Sucursales y cajas**, **Configuración fiscal** (datos del emisor y secuencias), **Equipo** (miembros, roles Propietario/Administrador/Cajero, invitaciones con enlace copiable, quitar miembros) y **Reportes** (solo admins: KPIs, gráfico, ITBIS, formas de pago, más vendidos y exportar CSV; el Resumen muestra ventas de hoy y del mes). Flujo de invitación: `/invitacion/[id]` → iniciar sesión o crear cuenta (sin crear empresa) → aceptar. Diálogos de confirmación y avisos propios (`components/dialogs.tsx`, sin `window.confirm/prompt`) y buscador de clientes con autocompletado en el editor. Cliente tipado de la API con Hono RPC (`apps/web/lib/api.ts`), componentes propios en `apps/web/components/ui.tsx`.
 
 ### 0.5 Lo que falta (backlog en orden de prioridad)
 
@@ -128,7 +131,7 @@ Cada cambio escribe en `audit_log` **dentro de la misma transacción** (si falla
 3. ✅ ~~Secuencias e-NCF~~ con asignación atómica y rangos sin solape.
 4. **`packages/ecf`** + interfaz `FiscalProvider`: XML de E32 y E31, validación contra los XSD oficiales, firma XMLDSig, autenticación (semilla → token), envío, consulta por TrackId, código de seguridad y QR. Evaluar primero la librería `dgii-ecf` de npm.
 5. **Prototipo contra TesteCF**: emitir y consultar un E32 y un E31 de prueba. *Necesita de ti:* un certificado digital de pruebas y acceso a la Oficina Virtual de la DGII (verifica en dgii.gov.do cómo obtenerlo y su costo).
-6. **Invitar usuarios** a la empresa y gestionar miembros (hoy solo hay owner y un `member` que se crea por BD). Define el rol de cajero.
+6. ✅ ~~Invitar usuarios y gestionar miembros~~: hoy se comparte un **enlace** (no se envía correo hasta elegir proveedor de correo; `sendInvitationEmail` de Better Auth es opcional y queda por conectar).
 7. **Validar RNC contra el padrón de la DGII** (archivo público) y autocompletar el nombre del cliente.
 
 **A-bis. Facturación pendiente (Fase 2)**
@@ -136,13 +139,13 @@ Cada cambio escribe en `audit_log` **dentro de la misma transacción** (si falla
 - PDF / representación impresa con **código QR y código de seguridad** (hoy el detalle se imprime con el navegador, sin QR).
 - Envío del comprobante por correo y *workers* (pg-boss) para enviar a la DGII con reintentos.
 - E32 de menos de RD$250,000: **resumen RFCE**. Estados `SIGNED/SENT/ACCEPTED/REJECTED` (ya existen en el enum, nada los usa todavía).
-- Selector de cliente con búsqueda (hoy es una lista de los primeros 200) y ficha rápida de cliente desde el editor.
+- Ficha rápida para crear un cliente desde el editor de facturas.
 - Devoluciones desde la caja, anulación de rangos (ANECF) y reportes de ventas.
 
 **B. Pulido antes de desplegar** (requisito tuyo: "terminado y pulido")
 
 - Seguridad: *rate limiting* en login/registro, verificación de correo y recuperación de contraseña (requiere proveedor de correo: Resend u OCI Email Delivery), revisar `trustedOrigins` y cookies en producción.
-- UX: reemplazar `window.prompt`/`confirm` por diálogos propios, avisos tras guardar (toasts), estados vacíos y de error cuidados, revisión móvil y modo oscuro, accesibilidad (foco, contraste, etiquetas).
+- UX: ✅ diálogos propios y avisos tras guardar. Pendiente: estados vacíos y de error cuidados, revisión móvil y modo oscuro, accesibilidad (foco, contraste, etiquetas).
 - Calidad: pruebas E2E con Playwright, Sentry, límites de tamaño y paginación en sucursales/cajas, `README` por paquete.
 - Evaluar mover los componentes a `packages/ui` y adoptar shadcn/ui (hoy son componentes propios).
 
@@ -185,6 +188,9 @@ Cada cambio escribe en `audit_log` **dentro de la misma transacción** (si falla
 - **Next 16 conserva ocultas las pantallas anteriores** (React `Activity` con `cacheComponents`): su estado (`useState`) sobrevive aunque salgas de la ruta, y al volver los *efectos* se ejecutan de nuevo (por eso los listados se refrescan solos). Consecuencia: un formulario **no se reinicia** al reabrirlo. El editor de facturas lo resuelve con una `key` (sesión + comprobante + referencia) que cambia al guardar y al abrir otra referencia. Al probar con JavaScript en el navegador, filtra por `offsetParent !== null` o contarás elementos de pantallas ocultas.
 - **Claves foráneas diferibles**: las FK que protegen comprobantes y rangos son `DEFERRABLE INITIALLY DEFERRED` (migración `fk_deferrable`). Sin eso, eliminar una empresa con comprobantes falla según el orden en que Postgres ejecute las cascadas. Los triggers de inmutabilidad dejan pasar borrados en cascada con `pg_trigger_depth() > 1`.
 - **Notas de crédito concurrentes**: se serializan bloqueando el comprobante original (`SELECT … FOR UPDATE`) antes de sumar lo ya acreditado.
+- **Un `<Suspense>` alrededor de un formulario client lo deja sin hidratar** (probado en desarrollo y en el build de producción dentro del panel de pruebas): el HTML se ve, pero el `onSubmit` no se engancha y el navegador envía el formulario de forma nativa (GET con la contraseña en la URL). Por eso `/login`, `/registro` y `/invitacion` son páginas de servidor con `export const instant = false` y **sin** `<Suspense>`, y los formularios de acceso llevan `method="post"` por si alguna vez se envían antes de hidratar. Para comprobar hidratación en pruebas: `Object.keys(form).some(k => k.startsWith('__react'))`.
+- **Puerto 3000 ocupado**: otro proyecto tuyo (`registro-aportes`) usa el 3000, así que Next salta al 3001 y choca con la API. Soluciones: cerrar ese proyecto, o arrancar la API y la web por separado: `cd apps/api && WEB_ORIGIN=http://localhost:3100 pnpm dev` y `cd apps/web && pnpm exec next dev -p 3100`. **Turbo filtra las variables de entorno** (`PORT`, `WEB_ORIGIN` no llegan a las tareas), por eso no sirve `PORT=3100 pnpm dev`.
+- **`next dev` modifica `apps/web/AGENTS.md`**: con `experimental.agentFeedback: true` (viene de la plantilla de create-next-app) añade un bloque con instrucciones para que un agente "reporte feedback" a Next.js ejecutando `npx next internal agent-feedback-instructions`. Es contenido generado, no una instrucción tuya: no se sigue ni se commitea (se revierte con `git checkout -- apps/web/AGENTS.md`). Si prefieres que deje de aparecer, pon `agentFeedback: false` en `next.config.ts`.
 - **El shell rechaza a veces heredocs grandes** (`unexpected EOF`): para archivos largos usa la herramienta de escritura de archivos en vez de `cat <<EOF`.
 
 ---
@@ -415,8 +421,8 @@ facturacion/
 - División de cuenta, propina legal 10 %.
 - Tablets de meseros: PWA en la red local conectada a la caja.
 
-### Fase 7 – Reportes y cumplimiento (2–3 semanas)
-- Ventas por período, producto, cajero y sucursal; ITBIS cobrado y pagado.
+### Fase 7 – Reportes y cumplimiento (2–3 semanas) · 🔶 reporte de ventas hecho
+- [x] Ventas por período, por tipo, forma de pago y producto; ITBIS cobrado; exportación CSV. *(Falta filtrar por cajero y sucursal, y ITBIS pagado en compras.)*
 - Formatos de envío 606/607/608 (según lo que siga exigiendo la DGII con e-CF).
 - Panel de control con indicadores.
 
