@@ -6,8 +6,11 @@ import { Prisma } from "@facturacion/db";
 import { branches } from "./routes/branches";
 import { calculate } from "./routes/calculate";
 import { categories } from "./routes/categories";
+import { company } from "./routes/company";
 import { customers } from "./routes/customers";
+import { documents } from "./routes/documents";
 import { products } from "./routes/products";
+import { sequences } from "./routes/sequences";
 import { terminals } from "./routes/terminals";
 import { requireTenant } from "./middleware/tenant";
 import { webOrigins } from "./env";
@@ -67,6 +70,9 @@ export function createApp(deps: Deps) {
     .route("/v1/categories", categories)
     .route("/v1/products", products)
     .route("/v1/customers", customers)
+    .route("/v1/company", company)
+    .route("/v1/sequences", sequences)
+    .route("/v1/documents", documents)
     .route("/v1", calculate);
 
   app.onError((err, c) => {

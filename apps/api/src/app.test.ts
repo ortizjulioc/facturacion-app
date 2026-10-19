@@ -362,6 +362,508 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     });
   });
 
+  // ───────────── Facturación ─────────────
+
+  const profileBody = {
+    rnc: "1-01-00157-7",
+    legalName: "Empresa de Prueba SRL",
+    address: "Calle Principal 1, Santo Domingo",
+    environment: "TEST",
+  };
+  const seqBody = (ecfType: string, fromNumber: number, toNumber: number, extra: object = {}) => ({
+    ecfType,
+    fromNumber,
+    toNumber,
+    expiresAt: "2099-12-31",
+    ...extra,
+  });
+
+  /** Empresa con sucursal, un producto de RD$118.00 (ITBIS incluido) y, opcionalmente, datos fiscales y secuencias. */
+  async function billing(label: string, opts: { profile?: boolean; seqs?: [string, number, number][] } = {}) {
+    const o = await owner(label);
+    const branch = (await json(await post("/v1/branches", { name: "Principal", code: "P1" }, o.cookie))).data;
+    const product = (
+      await json(await post("/v1/products", { name: "Producto 118", price: "118.00", tax: "ITBIS18" }, o.cookie))
+    ).data;
+    if (opts.profile !== false) {
+      expect((await send("PUT", "/v1/company", profileBody, o.cookie)).status).toBe(200);
+    }
+    for (const [type, from, to] of opts.seqs ?? []) {
+      expect((await post("/v1/sequences", seqBody(type, from, to), o.cookie)).status).toBe(201);
+    }
+    return { ...o, branch, product };
+  }
+  type Billing = Awaited<ReturnType<typeof billing>>;
+
+  const draftBody = (b: Billing, over: Json = {}) => ({
+    type: "E32",
+    branchId: b.branch.id,
+    lines: [{ productId: b.product.id, quantity: "2" }],
+    payments: [{ method: "CASH", amount: "236.00" }],
+    ...over,
+  });
+  const createDraft = async (b: Billing, over: Json = {}) => {
+    const res = await post("/v1/documents", draftBody(b, over), b.cookie);
+    expect(res.status, JSON.stringify(await res.clone().json())).toBe(201);
+    return (await json(res)).data as Json;
+  };
+  const issue = (b: Billing, id: string) => post(`/v1/documents/${id}/issue`, {}, b.cookie);
+  const error = async (res: Response) => (await json(res)).error as string;
+
+  describe("datos fiscales y secuencias", () => {
+    it("guarda el RNC normalizado y valida el formato", async () => {
+      const b = await billing("f1", { profile: false });
+      expect((await json(await get("/v1/company", b.cookie))).data).toBeNull();
+
+      const bad = await send("PUT", "/v1/company", { ...profileBody, rnc: "123" }, b.cookie);
+      expect(bad.status).toBe(422);
+
+      const ok = await send("PUT", "/v1/company", profileBody, b.cookie);
+      expect((await json(ok)).data).toMatchObject({ rnc: "101001577", environment: "TEST" });
+      // Es idempotente: una segunda llamada actualiza, no duplica.
+      const again = await send("PUT", "/v1/company", { ...profileBody, tradeName: "Mi Colmado" }, b.cookie);
+      expect((await json(again)).data.tradeName).toBe("Mi Colmado");
+    });
+
+    it("las secuencias no se solapan y el rango debe ser coherente", async () => {
+      const b = await billing("f2");
+      const created = await post("/v1/sequences", seqBody("E32", 1, 100), b.cookie);
+      expect(created.status).toBe(201);
+      expect((await json(created)).data).toMatchObject({ fromNumber: 1, toNumber: 100, nextNumber: 1, remaining: 100 });
+
+      expect((await post("/v1/sequences", seqBody("E32", 50, 150), b.cookie)).status).toBe(409);
+      expect((await post("/v1/sequences", seqBody("E31", 50, 150), b.cookie)).status).toBe(201); // otro tipo: sin conflicto
+      expect((await post("/v1/sequences", seqBody("E32", 200, 100), b.cookie)).status).toBe(400);
+      expect((await post("/v1/sequences", seqBody("E32", 101, 200, { terminalId: randomUUID() }), b.cookie)).status).toBe(422);
+    });
+
+    it("permite ampliar el rango pero no recortarlo por debajo de lo emitido", async () => {
+      const b = await billing("f3", { seqs: [["E32", 1, 10]] });
+      const d = await createDraft(b);
+      await issue(b, d.id);
+
+      const seq = (await json(await get("/v1/sequences", b.cookie))).data[0];
+      expect(seq).toMatchObject({ nextNumber: 2, remaining: 9 });
+      expect((await patch(`/v1/sequences/${seq.id}`, { toNumber: 50 }, b.cookie)).status).toBe(200);
+      expect((await patch(`/v1/sequences/${seq.id}`, { toNumber: 0 }, b.cookie)).status).toBe(400);
+      expect((await patch(`/v1/sequences/${seq.id}`, { active: false }, b.cookie)).status).toBe(200);
+    });
+
+    it("el cajero (member) no puede cambiar datos fiscales ni secuencias", async () => {
+      const b = await billing("f4");
+      const cashier = await signUp("f4c");
+      await prisma.member.create({
+        data: { id: randomUUID(), organizationId: b.orgId, userId: cashier.userId, role: "member" },
+      });
+      const cookie = await setActive(b.orgId, cashier.cookie);
+
+      expect((await send("PUT", "/v1/company", profileBody, cookie)).status).toBe(403);
+      expect((await post("/v1/sequences", seqBody("E32", 1, 10), cookie)).status).toBe(403);
+      expect((await get("/v1/company", cookie)).status).toBe(200); // puede leerlos
+    });
+  });
+
+  describe("borradores", () => {
+    it("calcula los totales en el servidor e ignora los que envíe el cliente", async () => {
+      const b = await billing("d1");
+      const d = await createDraft(b, { total: "1.00", totals: { total: "1.00" } });
+      expect(d.status).toBe("DRAFT");
+      expect(d.encf).toBeNull();
+      expect(d.totals).toMatchObject({ base18: "200.00", tax18: "36.00", tax: "36.00", total: "236.00" });
+      expect(d.lines[0]).toMatchObject({ name: "Producto 118", quantity: "2", unitPrice: "118.00", total: "236.00" });
+    });
+
+    it("aplica descuentos antes del impuesto", async () => {
+      const b = await billing("d2");
+      const d = await createDraft(b, {
+        lines: [{ productId: b.product.id, quantity: "2", discount: { type: "percent", bps: 1000 } }],
+        payments: [],
+      });
+      expect(d.totals).toMatchObject({ discount: "23.60", total: "212.40", tax: "32.40" });
+    });
+
+    it("copia los datos del producto: cambiar el precio después no altera el comprobante", async () => {
+      const b = await billing("d3");
+      const d = await createDraft(b);
+      await patch(`/v1/products/${b.product.id}`, { price: "999.00", name: "Renombrado" }, b.cookie);
+      const again = (await json(await get(`/v1/documents/${d.id}`, b.cookie))).data;
+      expect(again.lines[0]).toMatchObject({ name: "Producto 118", unitPrice: "118.00" });
+      expect(again.totals.total).toBe("236.00");
+    });
+
+    it("valida las líneas", async () => {
+      const b = await billing("d4");
+      const lines = (l: Json[]) => post("/v1/documents", draftBody(b, { lines: l, payments: [] }), b.cookie);
+
+      // Sin producto, hay que dar nombre, precio e impuesto.
+      expect((await lines([{ quantity: "1", name: "Servicio" }])).status).toBe(422);
+      const manual = await lines([{ quantity: "1", name: "Servicio", unitPrice: "100.00", tax: "ITBIS18" }]);
+      expect(manual.status).toBe(201);
+      expect((await json(manual)).data.totals.total).toBe("118.00");
+
+      expect((await lines([{ productId: randomUUID(), quantity: "1" }])).status).toBe(422);
+      expect((await lines([{ productId: b.product.id, quantity: "1.5" }])).status).toBe(422); // no admite decimales
+      expect((await lines([{ productId: b.product.id, quantity: "0" }])).status).toBe(422);
+      expect((await lines([])).status).toBe(400);
+      expect(
+        (await lines([{ productId: b.product.id, quantity: "1", discount: { type: "amount", amount: "500.00" } }])).status,
+      ).toBe(422); // descuento mayor que la línea
+
+      await call(`/v1/products/${b.product.id}`, { method: "DELETE", cookie: b.cookie });
+      expect((await lines([{ productId: b.product.id, quantity: "1" }])).status).toBe(422); // producto inactivo
+    });
+
+    it("exige tasa de cambio solo en dólares", async () => {
+      const b = await billing("d5");
+      const usd = (rate: string) =>
+        post("/v1/documents", draftBody(b, { currency: "USD", exchangeRate: rate, payments: [] }), b.cookie);
+      expect((await usd("1")).status).toBe(400);
+      const ok = await usd("58.75");
+      expect(ok.status).toBe(201);
+      expect((await json(ok)).data.exchangeRate).toBe("58.75");
+      expect((await post("/v1/documents", draftBody(b, { exchangeRate: "58.75", payments: [] }), b.cookie)).status).toBe(400);
+    });
+
+    it("se puede reemplazar y eliminar mientras es borrador", async () => {
+      const b = await billing("d6");
+      const d = await createDraft(b);
+      const put = await send(
+        "PUT",
+        `/v1/documents/${d.id}`,
+        draftBody(b, { lines: [{ productId: b.product.id, quantity: "1" }], payments: [] }),
+        b.cookie,
+      );
+      expect(put.status).toBe(200);
+      const updated = (await json(put)).data;
+      expect(updated.lines).toHaveLength(1);
+      expect(updated.totals.total).toBe("118.00");
+      expect(updated.payments).toHaveLength(0);
+
+      expect((await call(`/v1/documents/${d.id}`, { method: "DELETE", cookie: b.cookie })).status).toBe(204);
+      expect((await get(`/v1/documents/${d.id}`, b.cookie)).status).toBe(404);
+    });
+
+    it("rechaza sucursales, cajas y clientes de otra empresa", async () => {
+      const a = await billing("d7a");
+      const other = await billing("d7b");
+      const customer = (await json(await post("/v1/customers", { name: "De A" }, a.cookie))).data;
+
+      const forBranch = await post("/v1/documents", draftBody(other, { branchId: a.branch.id }), other.cookie);
+      expect(forBranch.status).toBe(422);
+      const forCustomer = await post("/v1/documents", draftBody(other, { customerId: customer.id }), other.cookie);
+      expect(forCustomer.status).toBe(422);
+    });
+  });
+
+  describe("emisión", () => {
+    it("exige los datos fiscales de la empresa", async () => {
+      const b = await billing("e1", { profile: false, seqs: [["E32", 1, 10]] });
+      const d = await createDraft(b);
+      const res = await issue(b, d.id);
+      expect(res.status).toBe(422);
+      expect(await error(res)).toMatch(/datos fiscales/i);
+    });
+
+    it("exige una secuencia vigente del tipo correspondiente", async () => {
+      const b = await billing("e2");
+      const d = await createDraft(b);
+      const none = await issue(b, d.id);
+      expect(none.status).toBe(422);
+      expect(await error(none)).toMatch(/secuencia/i);
+
+      // Una secuencia vencida no sirve.
+      await post("/v1/sequences", seqBody("E32", 1, 10, { expiresAt: "2020-01-01" }), b.cookie);
+      expect((await issue(b, d.id)).status).toBe(422);
+      // Una de otro tipo tampoco.
+      await post("/v1/sequences", seqBody("E31", 1, 10), b.cookie);
+      expect((await issue(b, d.id)).status).toBe(422);
+      // El borrador sigue intacto y se puede emitir al registrar una secuencia válida.
+      await post("/v1/sequences", seqBody("E32", 100, 110), b.cookie);
+      const ok = await issue(b, d.id);
+      expect(ok.status).toBe(200);
+      expect((await json(ok)).data.encf).toBe("E320000000100");
+    });
+
+    it("emite con e-NCF consecutivo y congela el comprobante", async () => {
+      const b = await billing("e3", { seqs: [["E32", 1, 2]] });
+      const first = await issue(b, (await createDraft(b)).id);
+      expect(first.status).toBe(200);
+      const doc = (await json(first)).data;
+      expect(doc).toMatchObject({ status: "ISSUED", encf: "E320000000001" });
+      expect(doc.issuedAt).toBeTruthy();
+
+      expect((await json(await issue(b, (await createDraft(b)).id))).data.encf).toBe("E320000000002");
+
+      // Rango agotado.
+      const third = await issue(b, (await createDraft(b)).id);
+      expect(third.status).toBe(422);
+
+      // Un comprobante emitido no se modifica, no se elimina ni se vuelve a emitir.
+      expect((await send("PUT", `/v1/documents/${doc.id}`, draftBody(b), b.cookie)).status).toBe(409);
+      expect((await call(`/v1/documents/${doc.id}`, { method: "DELETE", cookie: b.cookie })).status).toBe(409);
+      expect((await issue(b, doc.id)).status).toBe(409);
+    });
+
+    it("exige que los pagos sumen el total", async () => {
+      const b = await billing("e4", { seqs: [["E32", 1, 10]] });
+      const short = await createDraft(b, { payments: [{ method: "CASH", amount: "100.00" }] });
+      const res = await issue(b, short.id);
+      expect(res.status).toBe(422);
+      expect(await error(res)).toMatch(/pagos/i);
+
+      const none = await createDraft(b, { payments: [] });
+      expect((await issue(b, none.id)).status).toBe(422);
+
+      const mixed = await createDraft(b, {
+        payments: [
+          { method: "CASH", amount: "136.00" },
+          { method: "CARD", amount: "100.00", reference: "AUTH-123" },
+        ],
+      });
+      expect((await issue(b, mixed.id)).status).toBe(200);
+    });
+
+    it("prefiere la secuencia de la caja sobre la general", async () => {
+      const b = await billing("e5", { seqs: [["E32", 1, 100]] });
+      const terminal = (
+        await json(await post("/v1/terminals", { branchId: b.branch.id, name: "Caja 1", code: "C1" }, b.cookie))
+      ).data;
+      expect((await post("/v1/sequences", seqBody("E32", 500, 510, { terminalId: terminal.id }), b.cookie)).status).toBe(201);
+
+      const withTerminal = await createDraft(b, { terminalId: terminal.id });
+      expect((await json(await issue(b, withTerminal.id))).data.encf).toBe("E320000000500");
+      const without = await createDraft(b);
+      expect((await json(await issue(b, without.id))).data.encf).toBe("E320000000001");
+    });
+
+    it("no duplica e-NCF cuando varias cajas emiten a la vez", async () => {
+      const b = await billing("e6", { seqs: [["E32", 1, 50]] });
+      const drafts = await Promise.all(Array.from({ length: 8 }, () => createDraft(b)));
+      const results = await Promise.all(drafts.map((d) => issue(b, d.id)));
+      expect(results.map((r) => r.status)).toEqual(Array(8).fill(200));
+
+      const encfs = (await Promise.all(results.map(async (r) => (await json(r)).data.encf as string))).sort();
+      expect(encfs).toEqual(Array.from({ length: 8 }, (_, i) => `E32${String(i + 1).padStart(10, "0")}`));
+      expect((await json(await get("/v1/sequences", b.cookie))).data[0].nextNumber).toBe(9);
+    });
+
+    it("la factura de crédito fiscal (E31) exige un cliente con RNC", async () => {
+      const b = await billing("e7", { seqs: [["E31", 1, 10]] });
+      const consumer = (await json(await post("/v1/customers", { name: "Juan", documentType: "CEDULA", documentNumber: "00112345678" }, b.cookie))).data;
+      const company = (await json(await post("/v1/customers", { name: "Acme SRL", documentType: "RNC", documentNumber: "131246796" }, b.cookie))).data;
+
+      const noCustomer = await createDraft(b, { type: "E31" });
+      expect(await error(await issue(b, noCustomer.id))).toMatch(/RNC/);
+      const cedula = await createDraft(b, { type: "E31", customerId: consumer.id });
+      expect((await issue(b, cedula.id)).status).toBe(422);
+
+      const ok = await createDraft(b, { type: "E31", customerId: company.id });
+      const issued = (await json(await issue(b, ok.id))).data;
+      expect(issued).toMatchObject({ encf: "E310000000001", buyerName: "Acme SRL", buyerDocType: "RNC", buyerDocNumber: "131246796" });
+    });
+
+    it("las facturas de consumo desde RD$250,000 exigen identificar al comprador", async () => {
+      const b = await billing("e8", { seqs: [["E32", 1, 10]] });
+      const big = {
+        lines: [{ name: "Equipo", unitPrice: "300000.00", tax: "EXENTO", quantity: "1" }],
+        payments: [{ method: "TRANSFER", amount: "300000.00" }],
+      };
+      const anonymous = await createDraft(b, big);
+      const res = await issue(b, anonymous.id);
+      expect(res.status).toBe(422);
+      expect(await error(res)).toMatch(/250,000/);
+
+      const identified = await createDraft(b, { ...big, buyer: { name: "Juan Pérez", docType: "CEDULA", docNumber: "001-1234567-8" } });
+      const issued = (await json(await issue(b, identified.id))).data;
+      expect(issued).toMatchObject({ status: "ISSUED", buyerDocNumber: "00112345678" });
+
+      // Por debajo del umbral no hace falta.
+      const small = await createDraft(b);
+      expect((await issue(b, small.id)).status).toBe(200);
+    });
+
+    it("toma el comprador de la ficha del cliente al momento de emitir", async () => {
+      const b = await billing("e9", { seqs: [["E32", 1, 10]] });
+      const customer = (await json(await post("/v1/customers", { name: "Nombre Viejo" }, b.cookie))).data;
+      const d = await createDraft(b, { customerId: customer.id });
+      expect(d.buyerName).toBe("Nombre Viejo");
+      await patch(`/v1/customers/${customer.id}`, { name: "Nombre Nuevo" }, b.cookie);
+      expect((await json(await issue(b, d.id))).data.buyerName).toBe("Nombre Nuevo");
+      // Después de emitido, la ficha puede cambiar sin tocar el comprobante.
+      await patch(`/v1/customers/${customer.id}`, { name: "Otro más" }, b.cookie);
+      expect((await json(await get(`/v1/documents/${d.id}`, b.cookie))).data.buyerName).toBe("Nombre Nuevo");
+    });
+  });
+
+  describe("notas de crédito y débito", () => {
+    /** Factura de consumo emitida por RD$236.00 lista para ser modificada. */
+    async function issuedInvoice(label: string) {
+      const b = await billing(label, { seqs: [["E32", 1, 20], ["E34", 1, 20], ["E33", 1, 20]] });
+      const customer = (await json(await post("/v1/customers", { name: "Cliente Nota", documentType: "RNC", documentNumber: "101001577" }, b.cookie))).data;
+      const invoice = await createDraft(b, { customerId: customer.id, currency: "USD", exchangeRate: "58.50" });
+      const original = (await json(await issue(b, invoice.id))).data as Json;
+      return { b, original };
+    }
+    const note = (b: Billing, original: Json, amount: string, over: Json = {}) =>
+      createDraft(b, {
+        type: "E34",
+        referencedDocumentId: original.id,
+        modificationCode: 3,
+        lines: [{ name: "Ajuste", unitPrice: amount, tax: "EXENTO", quantity: "1" }],
+        payments: [],
+        ...over,
+      });
+
+    it("hereda comprador y moneda del comprobante original", async () => {
+      const { b, original } = await issuedInvoice("n1");
+      const n = await note(b, original, "50.00");
+      expect(n).toMatchObject({
+        type: "E34",
+        referencedEncf: original.encf,
+        buyerName: "Cliente Nota",
+        currency: "USD",
+        exchangeRate: "58.5",
+        modificationCode: 3,
+      });
+      const issued = (await json(await issue(b, n.id))).data;
+      expect(issued.encf).toBe("E340000000001");
+    });
+
+    it("no permite acreditar más que el total del original", async () => {
+      const { b, original } = await issuedInvoice("n2");
+      expect((await issue(b, (await note(b, original, "50.00")).id)).status).toBe(200);
+
+      const tooMuch = await issue(b, (await note(b, original, "200.00")).id);
+      expect(tooMuch.status).toBe(422);
+      expect(await error(tooMuch)).toMatch(/excede/);
+
+      expect((await issue(b, (await note(b, original, "186.00")).id)).status).toBe(200); // lo que queda
+      expect((await issue(b, (await note(b, original, "0.01")).id)).status).toBe(422); // ya no queda nada
+    });
+
+    it("el código 1 (anular) exige acreditar el total completo", async () => {
+      const { b, original } = await issuedInvoice("n3");
+      const partial = await note(b, original, "100.00", { modificationCode: 1 });
+      expect(await error(await issue(b, partial.id))).toMatch(/anular/i);
+
+      const full = await note(b, original, "236.00", { modificationCode: 1 });
+      expect((await issue(b, full.id)).status).toBe(200);
+    });
+
+    it("una nota de débito no tiene tope", async () => {
+      const { b, original } = await issuedInvoice("n4");
+      const debit = await note(b, original, "500.00", { type: "E33" });
+      const issued = (await json(await issue(b, debit.id))).data;
+      expect(issued).toMatchObject({ type: "E33", encf: "E330000000001" });
+    });
+
+    it("exige un comprobante emitido y los datos de modificación", async () => {
+      const b = await billing("n5", { seqs: [["E32", 1, 5], ["E34", 1, 5]] });
+      const draft = await createDraft(b);
+
+      const body = (over: Json) =>
+        post(
+          "/v1/documents",
+          draftBody(b, { type: "E34", lines: [{ name: "x", unitPrice: "10", tax: "EXENTO", quantity: "1" }], payments: [], ...over }),
+          b.cookie,
+        );
+      expect((await body({})).status).toBe(400); // sin referencia
+      expect((await body({ referencedDocumentId: draft.id, modificationCode: 3 })).status).toBe(422); // aún es borrador
+      expect((await body({ referencedDocumentId: randomUUID(), modificationCode: 3 })).status).toBe(422);
+      expect((await body({ referencedDocumentId: draft.id })).status).toBe(400); // sin código
+      // Un comprobante normal no puede traer referencia.
+      expect((await post("/v1/documents", draftBody(b, { referencedDocumentId: draft.id, modificationCode: 3 }), b.cookie)).status).toBe(400);
+    });
+
+    it("no se pueden referenciar comprobantes de otra empresa", async () => {
+      const { original } = await issuedInvoice("n6a");
+      const other = await billing("n6b", { seqs: [["E34", 1, 5]] });
+      const res = await post(
+        "/v1/documents",
+        draftBody(other, {
+          type: "E34",
+          referencedDocumentId: original.id,
+          modificationCode: 3,
+          lines: [{ name: "x", unitPrice: "10", tax: "EXENTO", quantity: "1" }],
+          payments: [],
+        }),
+        other.cookie,
+      );
+      expect(res.status).toBe(422);
+    });
+  });
+
+  describe("consulta, aislamiento y roles", () => {
+    it("lista y filtra comprobantes", async () => {
+      const b = await billing("l1", { seqs: [["E32", 1, 10], ["E31", 1, 10]] });
+      const customer = (await json(await post("/v1/customers", { name: "Distribuidora Norte", documentType: "RNC", documentNumber: "131246796" }, b.cookie))).data;
+      await createDraft(b); // borrador
+      const e32 = await createDraft(b);
+      await issue(b, e32.id);
+      const e31 = await createDraft(b, { type: "E31", customerId: customer.id });
+      await issue(b, e31.id);
+
+      const all = await json(await get("/v1/documents", b.cookie));
+      expect(all.total).toBe(3);
+      expect(all.data[0].total).toBe("236.00");
+
+      const ids = async (qs: string) => (await json(await get(`/v1/documents?${qs}`, b.cookie))).data.map((d: Json) => d.id);
+      expect(await ids("status=DRAFT")).toHaveLength(1);
+      expect(await ids("type=E31")).toEqual([e31.id]);
+      expect(await ids("q=E310000000001")).toEqual([e31.id]);
+      expect(await ids("q=norte")).toEqual([e31.id]);
+      expect(await ids("q=131-24679-6")).toEqual([e31.id]);
+      expect(await ids(`customerId=${customer.id}`)).toEqual([e31.id]);
+      expect(await ids("pageSize=2")).toHaveLength(2);
+      expect(await ids("from=2099-01-01")).toEqual([]);
+    });
+
+    it("otra empresa no ve, emite ni elimina los comprobantes ajenos", async () => {
+      const a = await billing("i1a", { seqs: [["E32", 1, 10]] });
+      const b = await billing("i1b", { seqs: [["E32", 1, 10]] });
+      const draft = await createDraft(a);
+      const issued = await createDraft(a);
+      await issue(a, issued.id);
+
+      for (const id of [draft.id, issued.id]) {
+        expect((await get(`/v1/documents/${id}`, b.cookie)).status).toBe(404);
+        expect((await issue(b, id)).status).toBe(404);
+        expect((await call(`/v1/documents/${id}`, { method: "DELETE", cookie: b.cookie })).status).toBe(404);
+        expect((await send("PUT", `/v1/documents/${id}`, draftBody(b), b.cookie)).status).toBe(404);
+      }
+      expect((await json(await get("/v1/documents", b.cookie))).total).toBe(0);
+      // Cada empresa usa su propia numeración.
+      expect((await json(await issue(b, (await createDraft(b)).id))).data.encf).toBe("E320000000001");
+    });
+
+    it("el cajero puede crear y emitir, y todo queda en la bitácora", async () => {
+      const boss = await billing("rl1", { seqs: [["E32", 1, 10]] });
+      const cashier = await signUp("rl1c");
+      await prisma.member.create({
+        data: { id: randomUUID(), organizationId: boss.orgId, userId: cashier.userId, role: "member" },
+      });
+      const cookie = await setActive(boss.orgId, cashier.cookie);
+
+      const created = await post("/v1/documents", draftBody(boss), cookie);
+      expect(created.status).toBe(201);
+      const id = (await json(created)).data.id;
+      expect((await post(`/v1/documents/${id}/issue`, {}, cookie)).status).toBe(200);
+
+      const logs = await withTenant(prisma, boss.orgId).auditLog.findMany({
+        where: { entity: "document" },
+        orderBy: { createdAt: "asc" },
+      });
+      expect(logs.map((l) => l.action)).toEqual(["document.create", "document.issue"]);
+      expect(logs.every((l) => l.actorUserId === cashier.userId)).toBe(true);
+    });
+
+    it("sin sesión no se accede a nada de facturación", async () => {
+      for (const path of ["/v1/documents", "/v1/sequences", "/v1/company"]) {
+        expect((await get(path)).status).toBe(401);
+      }
+    });
+  });
+
   describe("bitácora", () => {
     it("registra cada cambio, de forma atómica con el cambio", async () => {
       const { cookie, orgId } = await owner("log");
