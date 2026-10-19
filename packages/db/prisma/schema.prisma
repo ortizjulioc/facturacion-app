@@ -16,13 +16,13 @@ datasource db {
 // ───────────── Better Auth (usuarios, sesiones, organizaciones) ─────────────
 
 model User {
-  id            String    @id
+  id            String       @id
   name          String
-  email         String    @unique
-  emailVerified Boolean   @default(false)
+  email         String       @unique
+  emailVerified Boolean      @default(false)
   image         String?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
   sessions      Session[]
   accounts      Account[]
   members       Member[]
@@ -80,20 +80,23 @@ model Verification {
 }
 
 model Organization {
-  id          String       @id
-  name        String
-  slug        String       @unique
-  logo        String?
-  createdAt   DateTime     @default(now())
-  metadata    String?
-  members     Member[]
-  invitations Invitation[]
-  branches    Branch[]
-  terminals   Terminal[]
-  categories  Category[]
-  products    Product[]
-  customers   Customer[]
-  auditLogs   AuditLog[]
+  id             String          @id
+  name           String
+  slug           String          @unique
+  logo           String?
+  createdAt      DateTime        @default(now())
+  metadata       String?
+  members        Member[]
+  invitations    Invitation[]
+  branches       Branch[]
+  terminals      Terminal[]
+  categories     Category[]
+  products       Product[]
+  customers      Customer[]
+  companyProfile CompanyProfile?
+  sequences      Sequence[]
+  documents      Document[]
+  auditLogs      AuditLog[]
 
   @@map("organization")
 }
@@ -142,6 +145,7 @@ model Branch {
   updatedAt      DateTime     @updatedAt
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   terminals      Terminal[]
+  documents      Document[]
 
   @@unique([organizationId, code])
   @@map("branch")
@@ -158,7 +162,9 @@ model Terminal {
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  branch         Branch       @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  branch         Branch       @relation(fields: [branchId], references: [id], onDelete: NoAction)
+  sequences      Sequence[]
+  documents      Document[]
 
   @@unique([organizationId, code])
   @@index([branchId])
@@ -195,9 +201,9 @@ model Category {
 
 /// Producto o servicio vendible. Dinero en centavos (BigInt); impuesto según TaxCode.
 model Product {
-  id               String       @id @default(uuid(7)) @db.Uuid
+  id               String         @id @default(uuid(7)) @db.Uuid
   organizationId   String
-  categoryId       String?      @db.Uuid
+  categoryId       String?        @db.Uuid
   sku              String?
   barcode          String?
   name             String
@@ -205,17 +211,18 @@ model Product {
   /// Precio unitario en centavos.
   price            BigInt
   /// true: `price` ya incluye el impuesto (precio al consumidor).
-  priceIncludesTax Boolean      @default(true)
-  tax              TaxCode      @default(ITBIS18)
+  priceIncludesTax Boolean        @default(true)
+  tax              TaxCode        @default(ITBIS18)
   /// Unidad de medida mostrada: UND, KG, LB, HORA…
-  unit             String       @default("UND")
+  unit             String         @default("UND")
   /// true: se vende con decimales (peso, volumen).
-  allowsDecimals   Boolean      @default(false)
-  active           Boolean      @default(true)
-  createdAt        DateTime     @default(now())
-  updatedAt        DateTime     @updatedAt
-  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  category         Category?    @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  allowsDecimals   Boolean        @default(false)
+  active           Boolean        @default(true)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  organization     Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  category         Category?      @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  documentLines    DocumentLine[]
 
   @@unique([organizationId, sku])
   @@unique([organizationId, barcode])
@@ -238,10 +245,193 @@ model Customer {
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
   organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  documents      Document[]
 
   @@unique([organizationId, documentNumber])
   @@index([organizationId, name])
   @@map("customer")
+}
+
+/// Tipos de e-CF que se emiten hoy. Para agregar otros (E41, E43…) basta ampliar el enum.
+enum EcfType {
+  E31
+  E32
+  E33
+  E34
+}
+
+enum DocumentStatus {
+  /// Editable. Aún sin e-NCF.
+  DRAFT
+  /// Tiene e-NCF asignado y ya no se puede modificar.
+  ISSUED
+  SIGNED
+  SENT
+  ACCEPTED
+  ACCEPTED_CONDITIONAL
+  REJECTED
+}
+
+enum PaymentMethod {
+  CASH
+  TRANSFER
+  CHECK
+  CARD
+  CREDIT
+  OTHER
+}
+
+/// Ambiente de la DGII: TesteCF (pruebas), CerteCF (certificación) o eCF (producción).
+enum EcfEnvironment {
+  TEST
+  CERT
+  PROD
+}
+
+/// Datos fiscales del emisor (uno por empresa).
+model CompanyProfile {
+  id               String         @id @default(uuid(7)) @db.Uuid
+  organizationId   String         @unique
+  rnc              String
+  legalName        String
+  tradeName        String?
+  address          String
+  province         String?
+  municipality     String?
+  economicActivity String?
+  email            String?
+  phone            String?
+  environment      EcfEnvironment @default(TEST)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  organization     Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("company_profile")
+}
+
+/// Rango de e-NCF autorizado por la DGII. `nextNumber` avanza de forma atómica al emitir.
+model Sequence {
+  id             String       @id @default(uuid(7)) @db.Uuid
+  organizationId String
+  ecfType        EcfType
+  fromNumber     BigInt
+  toNumber       BigInt
+  /// Próximo número a asignar (from <= next <= to + 1).
+  nextNumber     BigInt
+  expiresAt      DateTime     @db.Date
+  /// null = sirve a toda la empresa; con valor, solo a esa caja.
+  terminalId     String?      @db.Uuid
+  active         Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  terminal       Terminal?    @relation(fields: [terminalId], references: [id], onDelete: NoAction)
+
+  @@unique([organizationId, ecfType, fromNumber])
+  @@index([organizationId, ecfType, active])
+  @@map("sequence")
+}
+
+/// Comprobante. Editable solo en DRAFT; después una función de BD impide cambiar importes o líneas.
+model Document {
+  id                   String         @id @default(uuid(7)) @db.Uuid
+  organizationId       String
+  type                 EcfType
+  status               DocumentStatus @default(DRAFT)
+  /// Se asigna al emitir.
+  encf                 String?
+  branchId             String         @db.Uuid
+  terminalId           String?        @db.Uuid
+  customerId           String?        @db.Uuid
+  /// Copia del comprador al emitir (el cliente puede cambiar después).
+  buyerName            String?
+  buyerDocType         DocumentType?
+  buyerDocNumber       String?
+  currency             String         @default("DOP")
+  exchangeRate         Decimal        @default(1) @db.Decimal(14, 4)
+  propinaLegal         Boolean        @default(false)
+  notes                String?
+  /// Solo notas de crédito/débito.
+  referencedDocumentId String?        @db.Uuid
+  referencedEncf       String?
+  modificationCode     Int?
+  // Totales en centavos, calculados SIEMPRE en el servidor con @facturacion/core.
+  totalDiscount        BigInt         @default(0)
+  subtotal             BigInt         @default(0)
+  base18               BigInt         @default(0)
+  tax18                BigInt         @default(0)
+  base16               BigInt         @default(0)
+  tax16                BigInt         @default(0)
+  base0                BigInt         @default(0)
+  baseExempt           BigInt         @default(0)
+  totalTax             BigInt         @default(0)
+  propinaAmount        BigInt         @default(0)
+  total                BigInt         @default(0)
+  issuedAt             DateTime?
+  createdById          String
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+  organization         Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch               Branch         @relation(fields: [branchId], references: [id], onDelete: NoAction)
+  terminal             Terminal?      @relation(fields: [terminalId], references: [id], onDelete: NoAction)
+  customer             Customer?      @relation(fields: [customerId], references: [id], onDelete: NoAction)
+  referencedDocument   Document?      @relation("Modifies", fields: [referencedDocumentId], references: [id], onDelete: NoAction)
+  modifiedBy           Document[]     @relation("Modifies")
+  lines                DocumentLine[]
+  payments             Payment[]
+
+  @@unique([organizationId, encf])
+  @@index([organizationId, status])
+  @@index([organizationId, createdAt])
+  @@index([customerId])
+  @@index([branchId])
+  @@index([referencedDocumentId])
+  @@map("document")
+}
+
+/// Línea de un comprobante: copia de los datos del producto al momento de la venta.
+model DocumentLine {
+  id               String   @id @default(uuid(7)) @db.Uuid
+  organizationId   String
+  documentId       String   @db.Uuid
+  lineNumber       Int
+  productId        String?  @db.Uuid
+  name             String
+  description      String?
+  unit             String   @default("UND")
+  /// Cantidad en milésimas (1000 = 1.000).
+  quantity         BigInt
+  unitPrice        BigInt
+  priceIncludesTax Boolean
+  tax              TaxCode
+  /// "PERCENT" (valor en puntos básicos) o "AMOUNT" (valor en centavos).
+  discountType     String?
+  discountValue    BigInt?
+  gross            BigInt
+  discount         BigInt
+  base             BigInt
+  taxAmount        BigInt
+  total            BigInt
+  document         Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  product          Product? @relation(fields: [productId], references: [id], onDelete: NoAction)
+
+  @@unique([documentId, lineNumber])
+  @@index([productId])
+  @@map("document_line")
+}
+
+model Payment {
+  id             String        @id @default(uuid(7)) @db.Uuid
+  organizationId String
+  documentId     String        @db.Uuid
+  method         PaymentMethod
+  amount         BigInt
+  reference      String?
+  createdAt      DateTime      @default(now())
+  document       Document      @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId])
+  @@map("payment")
 }
 
 /// Bitácora inmutable (solo se inserta; la migración revoca UPDATE/DELETE al rol de la app).

@@ -111,6 +111,164 @@ describe.skipIf(!process.env.DATABASE_URL)("RLS multiempresa", () => {
     ).rejects.toThrow();
   });
 
+  describe("documentos fiscales", () => {
+    const draftDoc = async (org: string) => {
+      const as = withTenant(prisma, org);
+      const branch = await as.branch.findFirstOrThrow();
+      return as.document.create({
+        data: {
+          organizationId: org,
+          type: "E32",
+          branchId: branch.id,
+          createdById: "test-user",
+          total: 11800n,
+          lines: {
+            create: [
+              {
+                organizationId: org,
+                lineNumber: 1,
+                name: "Producto",
+                quantity: 1000n,
+                unitPrice: 11800n,
+                priceIncludesTax: true,
+                tax: "ITBIS18",
+                gross: 11800n,
+                discount: 0n,
+                base: 10000n,
+                taxAmount: 1800n,
+                total: 11800n,
+              },
+            ],
+          },
+          payments: { create: [{ organizationId: org, method: "CASH", amount: 11800n }] },
+        },
+      });
+    };
+
+    it("aísla documentos, líneas, pagos, secuencias y empresa por tenant", async () => {
+      const doc = await draftDoc(orgA);
+      const asA = withTenant(prisma, orgA);
+      const asB = withTenant(prisma, orgB);
+      await asA.sequence.create({
+        data: {
+          organizationId: orgA,
+          ecfType: "E32",
+          fromNumber: 1n,
+          toNumber: 10n,
+          nextNumber: 1n,
+          expiresAt: new Date("2099-12-31"),
+        },
+      });
+      await asA.companyProfile.create({
+        data: { organizationId: orgA, rnc: "101001577", legalName: "A SRL", address: "Calle 1" },
+      });
+
+      for (const model of ["document", "documentLine", "payment", "sequence", "companyProfile"] as const) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect(await (asA[model] as any).count(), `${model} visible para su dueño`).toBeGreaterThan(0);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect(await (asB[model] as any).count(), `${model} oculto para otra empresa`).toBe(0);
+      }
+      expect(await asB.document.findFirst({ where: { id: doc.id } })).toBeNull();
+    });
+
+    it("un borrador se puede editar y eliminar", async () => {
+      const doc = await draftDoc(orgA);
+      const asA = withTenant(prisma, orgA);
+      await asA.document.update({ where: { id: doc.id }, data: { notes: "cambio permitido" } });
+      await asA.payment.deleteMany({ where: { documentId: doc.id } });
+      await asA.document.delete({ where: { id: doc.id } });
+      expect(await asA.document.findFirst({ where: { id: doc.id } })).toBeNull();
+    });
+
+    it("un comprobante emitido queda congelado en la base de datos", async () => {
+      const doc = await draftDoc(orgA);
+      const asA = withTenant(prisma, orgA);
+      const issued = await asA.document.update({
+        where: { id: doc.id },
+        data: { status: "ISSUED", encf: "E320000000001", issuedAt: new Date() },
+      });
+      expect(issued.status).toBe("ISSUED");
+
+      // No se puede alterar ningún dato…
+      await expect(asA.document.update({ where: { id: doc.id }, data: { total: 1n } })).rejects.toThrow(
+        /no se puede modificar/,
+      );
+      await expect(asA.document.update({ where: { id: doc.id }, data: { notes: "x" } })).rejects.toThrow();
+      // …ni volver a borrador, ni borrarlo.
+      await expect(asA.document.update({ where: { id: doc.id }, data: { status: "DRAFT" } })).rejects.toThrow(
+        /volver a borrador/,
+      );
+      await expect(asA.document.delete({ where: { id: doc.id } })).rejects.toThrow(/no se puede eliminar/);
+      // Tampoco sus líneas ni sus pagos.
+      await expect(
+        asA.documentLine.updateMany({ where: { documentId: doc.id }, data: { unitPrice: 1n } }),
+      ).rejects.toThrow(/no se pueden modificar/);
+      await expect(asA.payment.deleteMany({ where: { documentId: doc.id } })).rejects.toThrow();
+      await expect(
+        asA.payment.create({ data: { organizationId: orgA, documentId: doc.id, method: "CASH", amount: 1n } }),
+      ).rejects.toThrow();
+
+      // Lo único que puede avanzar es el estado fiscal.
+      const sent = await asA.document.update({ where: { id: doc.id }, data: { status: "SENT" } });
+      expect(sent.status).toBe("SENT");
+    });
+
+    it("rechaza e-NCF mal formados, de otro tipo o ausentes al emitir", async () => {
+      const asA = withTenant(prisma, orgA);
+      const bad = async (data: object) => {
+        const doc = await draftDoc(orgA);
+        return asA.document.update({ where: { id: doc.id }, data });
+      };
+      await expect(bad({ encf: "B0100000001" })).rejects.toThrow();
+      await expect(bad({ encf: "E310000000002" })).rejects.toThrow(); // E31 en un documento E32
+      await expect(bad({ status: "ISSUED" })).rejects.toThrow(); // emitido sin e-NCF
+    });
+
+    it("no permite repetir un e-NCF dentro de la empresa", async () => {
+      const asA = withTenant(prisma, orgA);
+      const first = await draftDoc(orgA);
+      const second = await draftDoc(orgA);
+      await asA.document.update({ where: { id: first.id }, data: { status: "ISSUED", encf: "E320000000777" } });
+      await expect(
+        asA.document.update({ where: { id: second.id }, data: { status: "ISSUED", encf: "E320000000777" } }),
+      ).rejects.toThrow();
+    });
+
+    it("las secuencias solo avanzan y un rango en uso no se reescribe", async () => {
+      const asA = withTenant(prisma, orgA);
+      const seq = await asA.sequence.create({
+        data: {
+          organizationId: orgA,
+          ecfType: "E31",
+          fromNumber: 100n,
+          toNumber: 110n,
+          nextNumber: 100n,
+          expiresAt: new Date("2099-12-31"),
+        },
+      });
+      await asA.sequence.update({ where: { id: seq.id }, data: { nextNumber: 103n } });
+      await expect(asA.sequence.update({ where: { id: seq.id }, data: { nextNumber: 101n } })).rejects.toThrow(
+        /no puede retroceder/,
+      );
+      await expect(asA.sequence.update({ where: { id: seq.id }, data: { fromNumber: 50n } })).rejects.toThrow();
+      await expect(asA.sequence.delete({ where: { id: seq.id } })).rejects.toThrow(/ya se usó/);
+      // Rangos incoherentes los rechaza la restricción CHECK.
+      await expect(
+        asA.sequence.create({
+          data: {
+            organizationId: orgA,
+            ecfType: "E34",
+            fromNumber: 10n,
+            toNumber: 5n,
+            nextNumber: 10n,
+            expiresAt: new Date("2099-12-31"),
+          },
+        }),
+      ).rejects.toThrow();
+    });
+  });
+
   it("la bitácora es inmutable para el rol de la app", async () => {
     const asA = withTenant(prisma, orgA);
     const log = await asA.auditLog.create({
