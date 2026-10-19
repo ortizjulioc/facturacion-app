@@ -1659,6 +1659,449 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     });
   });
 
+  describe("inventario", () => {
+    /** Empresa lista para facturar con un producto que controla inventario (precio RD$100.00 exento). */
+    async function stocked(
+      label: string,
+      opts: { min?: string; decimals?: boolean } = {},
+    ) {
+      const b = await billing(label, {
+        seqs: [
+          ["E32", 1, 100],
+          ["E34", 1, 100],
+        ],
+      });
+      const tracked = (
+        await json(
+          await post(
+            "/v1/products",
+            {
+              name: "Martillo",
+              price: "100.00",
+              tax: "EXENTO",
+              trackInventory: true,
+              minStock: opts.min ?? "0",
+              allowsDecimals: opts.decimals ?? false,
+            },
+            b.cookie,
+          ),
+        )
+      ).data;
+      return { ...b, tracked };
+    }
+    type Stocked = Awaited<ReturnType<typeof stocked>>;
+
+    const receipt = (s: Stocked, qty: string, extra: Json = {}) =>
+      post(
+        "/v1/inventory/receipts",
+        { productId: s.tracked.id, branchId: s.branch.id, quantity: qty, ...extra },
+        s.cookie,
+      );
+    const adjust = (s: Stocked, mode: string, qty: string, reason = "Conteo de prueba") =>
+      post(
+        "/v1/inventory/adjustments",
+        { productId: s.tracked.id, branchId: s.branch.id, mode, quantity: qty, reason },
+        s.cookie,
+      );
+    const onHand = async (s: Stocked) => {
+      const res = await json(
+        await get(`/v1/inventory/stock?branchId=${s.branch.id}`, s.cookie),
+      );
+      return res.data.find((r: Json) => r.productId === s.tracked.id)?.quantity as
+        string | undefined;
+    };
+    const sell = async (s: Stocked, qty: string, over: Json = {}) => {
+      const total = (Number(qty) * 100).toFixed(2);
+      const d = await createDraft(s, {
+        lines: [{ productId: s.tracked.id, quantity: qty }],
+        payments: [{ method: "CASH", amount: total }],
+        ...over,
+      });
+      return issue(s, d.id);
+    };
+    const setNegative = (s: Stocked, allow: boolean) =>
+      send("PATCH", "/v1/inventory/settings", { allowNegativeStock: allow }, s.cookie);
+
+    it("el producto guarda si controla inventario y su mínimo", async () => {
+      const s = await stocked("v1", { min: "5" });
+      expect(s.tracked).toMatchObject({ trackInventory: true, minStock: "5" });
+      const upd = await patch(
+        `/v1/products/${s.tracked.id}`,
+        { minStock: "8.5" },
+        s.cookie,
+      );
+      expect((await json(upd)).data).toMatchObject({
+        trackInventory: true,
+        minStock: "8.5",
+        name: "Martillo",
+      });
+      const plain = (
+        await json(
+          await post("/v1/products", { name: "Sin control", price: "5" }, s.cookie),
+        )
+      ).data;
+      expect(plain).toMatchObject({ trackInventory: false, minStock: "0" });
+    });
+
+    it("las entradas suman y quedan en el libro con el saldo resultante", async () => {
+      const s = await stocked("v2");
+      expect(await onHand(s)).toBe("0");
+
+      const first = await receipt(s, "20", {
+        unitCost: "55.50",
+        reason: "Compra a proveedor",
+      });
+      expect(first.status).toBe(201);
+      expect((await json(first)).data.balance).toBe("20");
+      await receipt(s, "5");
+      expect(await onHand(s)).toBe("25");
+
+      const moves = await json(
+        await get(`/v1/inventory/movements?productId=${s.tracked.id}`, s.cookie),
+      );
+      expect(moves.total).toBe(2);
+      expect(moves.data[0]).toMatchObject({
+        type: "RECEIPT",
+        quantity: "5",
+        balanceAfter: "25",
+      });
+      expect(moves.data[1]).toMatchObject({
+        quantity: "20",
+        unitCost: "55.50",
+        reason: "Compra a proveedor",
+      });
+      expect(moves.data[0].product.name).toBe("Martillo");
+    });
+
+    it("valida entradas y exige que el producto controle inventario", async () => {
+      const s = await stocked("v3");
+      expect((await receipt(s, "0")).status).toBe(422);
+      expect((await receipt(s, "-4")).status).toBe(400);
+      expect((await receipt(s, "1.5")).status).toBe(422); // no se vende en fracciones
+      const plain = (
+        await json(
+          await post("/v1/products", { name: "Sin control", price: "5" }, s.cookie),
+        )
+      ).data;
+      const res = await post(
+        "/v1/inventory/receipts",
+        { productId: plain.id, branchId: s.branch.id, quantity: "3" },
+        s.cookie,
+      );
+      expect(res.status).toBe(422);
+      expect(await error(res)).toMatch(/inventario/i);
+      expect((await receipt(s, "2", { productId: randomUUID() })).status).toBe(422);
+    });
+
+    it("los productos por peso admiten fracciones", async () => {
+      const s = await stocked("v4", { decimals: true });
+      expect((await receipt(s, "12.5")).status).toBe(201);
+      expect(await onHand(s)).toBe("12.5");
+      expect((await sell(s, "2.25")).status).toBe(200);
+      expect(await onHand(s)).toBe("10.25");
+    });
+
+    it("ajusta por diferencia y por conteo, y pide motivo", async () => {
+      const s = await stocked("v5");
+      await receipt(s, "20");
+
+      expect((await adjust(s, "delta", "-3", "Merma")).status).toBe(201);
+      expect(await onHand(s)).toBe("17");
+
+      const count = await adjust(s, "count", "10", "Conteo físico");
+      expect((await json(count)).data).toMatchObject({ balance: "10", delta: "-7" });
+      expect(await onHand(s)).toBe("10");
+
+      expect((await adjust(s, "count", "10")).status).toBe(422); // ya coincide
+      expect((await adjust(s, "count", "-1")).status).toBe(422);
+      expect((await adjust(s, "delta", "5", "ab")).status).toBe(400); // motivo muy corto
+
+      const moves = (
+        await json(await get("/v1/inventory/movements?type=ADJUSTMENT", s.cookie))
+      ).data;
+      expect(moves.map((m: Json) => m.quantity)).toEqual(["-7", "-3"]);
+      expect(moves[0].reason).toBe("Conteo físico");
+    });
+
+    it("emitir una factura descuenta la existencia y enlaza el movimiento con el e-NCF", async () => {
+      const s = await stocked("v6");
+      await receipt(s, "10");
+      const issued = (await json(await sell(s, "3"))).data;
+      expect(issued.encf).toBe("E320000000001");
+      expect(await onHand(s)).toBe("7");
+
+      const [sale] = (
+        await json(await get("/v1/inventory/movements?type=SALE", s.cookie))
+      ).data;
+      expect(sale).toMatchObject({ quantity: "-3", balanceAfter: "7" });
+      expect(sale.document).toMatchObject({ encf: "E320000000001", type: "E32" });
+    });
+
+    it("un borrador no toca el inventario ni un producto sin control genera movimientos", async () => {
+      const s = await stocked("v7");
+      await receipt(s, "10");
+      await createDraft(s, {
+        lines: [{ productId: s.tracked.id, quantity: "4" }],
+        payments: [],
+      });
+      expect(await onHand(s)).toBe("10");
+
+      await issue(s, (await createDraft(s)).id); // línea de "Producto 118", que no controla inventario
+      expect(
+        (await json(await get("/v1/inventory/movements?type=SALE", s.cookie))).total,
+      ).toBe(0);
+    });
+
+    it("por defecto permite vender sin existencia y el saldo queda en negativo", async () => {
+      const s = await stocked("v8");
+      await receipt(s, "2");
+      expect((await sell(s, "5")).status).toBe(200);
+      expect(await onHand(s)).toBe("-3");
+      const row = (await json(await get("/v1/inventory/stock", s.cookie))).data[0];
+      expect(row.status).toBe("OUT");
+    });
+
+    it("si se prohíbe vender sin existencia, la emisión falla sin quemar el e-NCF", async () => {
+      const s = await stocked("v9");
+      expect((await setNegative(s, false)).status).toBe(200);
+      await receipt(s, "2");
+
+      const draft = await createDraft(s, {
+        lines: [{ productId: s.tracked.id, quantity: "5" }],
+        payments: [{ method: "CASH", amount: "500.00" }],
+      });
+      const res = await issue(s, draft.id);
+      expect(res.status).toBe(422);
+      expect(await error(res)).toMatch(
+        /Sin existencia suficiente de "Martillo" \(disponible: 2\)/,
+      );
+      expect(await onHand(s)).toBe("2");
+      expect(
+        (await json(await get(`/v1/documents/${draft.id}`, s.cookie))).data.status,
+      ).toBe("DRAFT");
+
+      // El número del comprobante no se consumió: el siguiente sigue siendo el 1.
+      expect((await json(await sell(s, "2"))).data.encf).toBe("E320000000001");
+      expect(await onHand(s)).toBe("0");
+    });
+
+    it("varias cajas vendiendo la última existencia: solo se emiten las que alcanzan", async () => {
+      const s = await stocked("v10");
+      await setNegative(s, false);
+      await receipt(s, "3");
+      const drafts = await Promise.all(
+        Array.from({ length: 6 }, () =>
+          createDraft(s, {
+            lines: [{ productId: s.tracked.id, quantity: "1" }],
+            payments: [{ method: "CASH", amount: "100.00" }],
+          }),
+        ),
+      );
+      const statuses = (await Promise.all(drafts.map((d) => issue(s, d.id))))
+        .map((r) => r.status)
+        .sort();
+      expect(statuses).toEqual([200, 200, 200, 422, 422, 422]);
+      expect(await onHand(s)).toBe("0");
+      const sales = await json(await get("/v1/inventory/movements?type=SALE", s.cookie));
+      expect(sales.total).toBe(3);
+    });
+
+    it("anular una factura (nota de crédito código 1) devuelve las existencias; otras notas no", async () => {
+      const s = await stocked("v11");
+      await receipt(s, "10");
+      const sale = (await json(await sell(s, "4"))).data;
+      expect(await onHand(s)).toBe("6");
+
+      const partial = await createDraft(s, {
+        type: "E34",
+        referencedDocumentId: sale.id,
+        modificationCode: 3,
+        lines: [
+          { name: "Ajuste de precio", unitPrice: "50.00", tax: "EXENTO", quantity: "1" },
+        ],
+        payments: [],
+      });
+      expect((await issue(s, partial.id)).status).toBe(200);
+      expect(await onHand(s)).toBe("6"); // un ajuste de monto no mueve inventario
+
+      // Ya se acreditaron 50.00: la anulación completa del original no es posible; se prueba con otra venta.
+      const sale2 = (await json(await sell(s, "2"))).data;
+      expect(await onHand(s)).toBe("4");
+      const void2 = await createDraft(s, {
+        type: "E34",
+        referencedDocumentId: sale2.id,
+        modificationCode: 1,
+        lines: [{ name: "Anulación", unitPrice: "200.00", tax: "EXENTO", quantity: "1" }],
+        payments: [],
+      });
+      expect((await issue(s, void2.id)).status).toBe(200);
+      expect(await onHand(s)).toBe("6");
+
+      const ret = (await json(await get("/v1/inventory/movements?type=RETURN", s.cookie)))
+        .data;
+      expect(ret).toHaveLength(1);
+      expect(ret[0]).toMatchObject({ quantity: "2", balanceAfter: "6" });
+      expect(ret[0].reason).toMatch(/Anulación de E32/);
+    });
+
+    it("filtra stock bajo y agotado, y busca por nombre", async () => {
+      const s = await stocked("v12", { min: "5" });
+      const other = (
+        await json(
+          await post(
+            "/v1/products",
+            { name: "Tornillo", price: "1", trackInventory: true, minStock: "10" },
+            s.cookie,
+          ),
+        )
+      ).data;
+      await receipt(s, "20"); // Martillo: 20 > 5, OK
+      await post(
+        "/v1/inventory/receipts",
+        { productId: other.id, branchId: s.branch.id, quantity: "4" },
+        s.cookie,
+      ); // Tornillo: 4 <= 10
+
+      const all = (await json(await get("/v1/inventory/stock", s.cookie))).data;
+      expect(Object.fromEntries(all.map((r: Json) => [r.name, r.status]))).toEqual({
+        Martillo: "OK",
+        Tornillo: "LOW",
+      });
+
+      const low = await json(await get("/v1/inventory/stock?low=true", s.cookie));
+      expect(low.data.map((r: Json) => r.name)).toEqual(["Tornillo"]);
+      expect(low.total).toBe(1);
+      expect(
+        (await json(await get("/v1/inventory/stock?q=marti", s.cookie))).data,
+      ).toHaveLength(1);
+      expect(
+        (await json(await get("/v1/inventory/stock?q=%25", s.cookie))).data,
+      ).toHaveLength(0); // % no es comodín
+    });
+
+    it("suma las sucursales cuando no se indica una", async () => {
+      const s = await stocked("v13");
+      const second = (
+        await json(await post("/v1/branches", { name: "Segunda", code: "S2" }, s.cookie))
+      ).data;
+      await receipt(s, "6");
+      await post(
+        "/v1/inventory/receipts",
+        { productId: s.tracked.id, branchId: second.id, quantity: "4" },
+        s.cookie,
+      );
+
+      expect(
+        (await json(await get("/v1/inventory/stock", s.cookie))).data[0].quantity,
+      ).toBe("10");
+      expect(
+        (await json(await get(`/v1/inventory/stock?branchId=${second.id}`, s.cookie)))
+          .data[0].quantity,
+      ).toBe("4");
+      expect(await onHand(s)).toBe("6");
+    });
+
+    it("la configuración exige datos fiscales y solo la cambian los administradores", async () => {
+      const noProfile = await billing("v14a", { profile: false });
+      expect(
+        (
+          await send(
+            "PATCH",
+            "/v1/inventory/settings",
+            { allowNegativeStock: false },
+            noProfile.cookie,
+          )
+        ).status,
+      ).toBe(422);
+      expect(
+        (await json(await get("/v1/inventory/settings", noProfile.cookie))).data,
+      ).toMatchObject({ configured: false, allowNegativeStock: true });
+
+      const s = await stocked("v14b");
+      const cashier = await signUp("v14c");
+      await prisma.member.create({
+        data: {
+          id: randomUUID(),
+          organizationId: s.orgId,
+          userId: cashier.userId,
+          role: "member",
+        },
+      });
+      const cookie = await setActive(s.orgId, cashier.cookie);
+
+      expect(
+        (
+          await send(
+            "PATCH",
+            "/v1/inventory/settings",
+            { allowNegativeStock: false },
+            cookie,
+          )
+        ).status,
+      ).toBe(403);
+      expect(
+        (
+          await post(
+            "/v1/inventory/receipts",
+            { productId: s.tracked.id, branchId: s.branch.id, quantity: "1" },
+            cookie,
+          )
+        ).status,
+      ).toBe(403);
+      expect(
+        (
+          await post(
+            "/v1/inventory/adjustments",
+            {
+              productId: s.tracked.id,
+              branchId: s.branch.id,
+              mode: "delta",
+              quantity: "1",
+              reason: "intento",
+            },
+            cookie,
+          )
+        ).status,
+      ).toBe(403);
+      // El cajero sí puede consultar las existencias.
+      expect((await get("/v1/inventory/stock", cookie)).status).toBe(200);
+      expect((await get("/v1/inventory/movements", cookie)).status).toBe(200);
+    });
+
+    it("cada empresa ve solo su inventario", async () => {
+      const a = await stocked("v15a");
+      const b = await stocked("v15b");
+      await receipt(a, "9");
+
+      expect((await json(await get("/v1/inventory/movements", b.cookie))).total).toBe(0);
+      expect(await onHand(b)).toBe("0");
+      // No se puede mover el stock de un producto o sucursal ajenos.
+      const steal = await post(
+        "/v1/inventory/receipts",
+        { productId: a.tracked.id, branchId: b.branch.id, quantity: "5" },
+        b.cookie,
+      );
+      expect(steal.status).toBe(422);
+      const stealBranch = await post(
+        "/v1/inventory/receipts",
+        { productId: b.tracked.id, branchId: a.branch.id, quantity: "5" },
+        b.cookie,
+      );
+      expect(stealBranch.status).toBe(422);
+      expect(await onHand(a)).toBe("9");
+    });
+
+    it("sin sesión no se accede al inventario", async () => {
+      for (const path of [
+        "/v1/inventory/stock",
+        "/v1/inventory/movements",
+        "/v1/inventory/settings",
+      ]) {
+        expect((await get(path)).status).toBe(401);
+      }
+    });
+  });
+
   describe("bitácora", () => {
     it("registra cada cambio, de forma atómica con el cambio", async () => {
       const { cookie, orgId } = await owner("log");

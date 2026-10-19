@@ -9,6 +9,7 @@ import { categories } from "./routes/categories";
 import { company } from "./routes/company";
 import { customers } from "./routes/customers";
 import { documents } from "./routes/documents";
+import { inventory } from "./routes/inventory";
 import { products } from "./routes/products";
 import { reports } from "./routes/reports";
 import { sequences } from "./routes/sequences";
@@ -75,6 +76,7 @@ export function createApp(deps: Deps) {
     .route("/v1/sequences", sequences)
     .route("/v1/documents", documents)
     .route("/v1/reports", reports)
+    .route("/v1/inventory", inventory)
     .route("/v1", calculate);
 
   app.onError((err, c) => {

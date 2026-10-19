@@ -2,10 +2,17 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { zv } from "../lib/validator";
 import { z } from "zod";
-import { fromCents, TAX_CODES, toCents } from "@facturacion/core";
+import { fromCents, fromMilli, TAX_CODES, toCents, toMilli } from "@facturacion/core";
 import type { Prisma } from "@facturacion/db";
 import { auditEntry } from "../lib/audit";
-import { listQuery, money, optionalText, pageOf, uuidParam } from "../lib/schemas";
+import {
+  listQuery,
+  money,
+  optionalText,
+  pageOf,
+  quantity,
+  uuidParam,
+} from "../lib/schemas";
 import { requireRole } from "../middleware/tenant";
 import type { AppEnv, TenantTx } from "../types";
 
@@ -24,6 +31,8 @@ export const productDto = (p: ProductRow) => ({
   tax: p.tax,
   unit: p.unit,
   allowsDecimals: p.allowsDecimals,
+  trackInventory: p.trackInventory,
+  minStock: fromMilli(p.minStock),
   active: p.active,
   createdAt: p.createdAt,
   updatedAt: p.updatedAt,
@@ -46,6 +55,8 @@ const fields = {
   tax: z.enum(TAX_CODES),
   unit: z.string().trim().min(1).max(10),
   allowsDecimals: z.boolean(),
+  trackInventory: z.boolean(),
+  minStock: quantity,
 };
 
 // Los valores por defecto se aplican al crear, NO en el esquema: así un PATCH parcial no los pisa.
@@ -60,6 +71,8 @@ const createProduct = z.object({
   tax: fields.tax.default("ITBIS18"),
   unit: fields.unit.default("UND"),
   allowsDecimals: fields.allowsDecimals.default(false),
+  trackInventory: fields.trackInventory.default(false),
+  minStock: fields.minStock.default("0"),
 });
 
 const updateProduct = z
@@ -74,6 +87,8 @@ const updateProduct = z
     tax: fields.tax,
     unit: fields.unit,
     allowsDecimals: fields.allowsDecimals,
+    trackInventory: fields.trackInventory,
+    minStock: fields.minStock,
     active: z.boolean(),
   })
   .partial();
@@ -126,48 +141,70 @@ export const products = new Hono<AppEnv>()
     return c.json({ data: productDto(product) });
   })
   .get("/:id", zv("param", uuidParam), async (c) => {
-    const product = await c.get("db").product.findFirst({ where: { id: c.req.valid("param").id } });
+    const product = await c
+      .get("db")
+      .product.findFirst({ where: { id: c.req.valid("param").id } });
     if (!product) throw new HTTPException(404, { message: "Producto no encontrado" });
     return c.json({ data: productDto(product) });
   })
   .post("/", canWrite, zv("json", createProduct), async (c) => {
-    const { price, ...input } = c.req.valid("json");
+    const { price, minStock, ...input } = c.req.valid("json");
     const product = await c.get("run")(async (tx) => {
       await assertCategory(tx, input.categoryId);
       const created = await tx.product.create({
-        data: { ...input, price: toCents(price), organizationId: c.get("organizationId") },
+        data: {
+          ...input,
+          price: toCents(price),
+          minStock: toMilli(minStock),
+          organizationId: c.get("organizationId"),
+        },
       });
       await tx.auditLog.create({
-        data: auditEntry(c, "product.create", "product", created.id, { name: created.name, price }),
+        data: auditEntry(c, "product.create", "product", created.id, {
+          name: created.name,
+          price,
+        }),
       });
       return created;
     });
     return c.json({ data: productDto(product) }, 201);
   })
-  .patch("/:id", canWrite, zv("param", uuidParam), zv("json", updateProduct), async (c) => {
-    const { id } = c.req.valid("param");
-    const { price, ...input } = c.req.valid("json");
-    const product = await c.get("run")(async (tx) => {
-      await assertCategory(tx, input.categoryId);
-      const updated = await tx.product.update({
-        where: { id },
-        data: { ...input, ...(price === undefined ? {} : { price: toCents(price) }) },
+  .patch(
+    "/:id",
+    canWrite,
+    zv("param", uuidParam),
+    zv("json", updateProduct),
+    async (c) => {
+      const { id } = c.req.valid("param");
+      const { price, minStock, ...input } = c.req.valid("json");
+      const product = await c.get("run")(async (tx) => {
+        await assertCategory(tx, input.categoryId);
+        const updated = await tx.product.update({
+          where: { id },
+          data: {
+            ...input,
+            ...(price === undefined ? {} : { price: toCents(price) }),
+            ...(minStock === undefined ? {} : { minStock: toMilli(minStock) }),
+          },
+        });
+        await tx.auditLog.create({
+          data: auditEntry(c, "product.update", "product", id, {
+            fields: Object.keys(c.req.valid("json")),
+          }),
+        });
+        return updated;
       });
-      await tx.auditLog.create({
-        data: auditEntry(c, "product.update", "product", id, {
-          fields: Object.keys(c.req.valid("json")),
-        }),
-      });
-      return updated;
-    });
-    return c.json({ data: productDto(product) });
-  })
+      return c.json({ data: productDto(product) });
+    },
+  )
   // Un producto facturado no puede desaparecer: DELETE lo desactiva.
   .delete("/:id", canWrite, zv("param", uuidParam), async (c) => {
     const { id } = c.req.valid("param");
     await c.get("run")(async (tx) => {
       await tx.product.update({ where: { id }, data: { active: false } });
-      await tx.auditLog.create({ data: auditEntry(c, "product.deactivate", "product", id) });
+      await tx.auditLog.create({
+        data: auditEntry(c, "product.deactivate", "product", id),
+      });
     });
     return c.body(null, 204);
   });
