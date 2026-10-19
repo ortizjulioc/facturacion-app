@@ -1,7 +1,13 @@
 "use client";
 
 import { useCallback, useState, type FormEvent } from "react";
-import { formatDop, TAX_CODES, TAX_LABELS, toCents, type TaxCode } from "@facturacion/core";
+import {
+  formatDop,
+  TAX_CODES,
+  TAX_LABELS,
+  toCents,
+  type TaxCode,
+} from "@facturacion/core";
 import {
   Badge,
   Button,
@@ -17,6 +23,7 @@ import {
   Textarea,
   tableStyles,
 } from "@/components/ui";
+import { useDialogs } from "@/components/dialogs";
 import { usePanel } from "@/components/panel-context";
 import { api, errorMessage, expectOk, unwrap } from "@/lib/api";
 import { useDebounced, useQuery } from "@/lib/use-query";
@@ -47,6 +54,7 @@ async function loadProducts(params: {
 
 export function ProductosView() {
   const { canManage } = usePanel();
+  const { toast } = useDialogs();
   const [search, setSearch] = useState("");
   const q = useDebounced(search.trim());
   const [page, setPage] = useState(1);
@@ -77,9 +85,13 @@ export function ProductosView() {
         await expectOk(await api.v1.products[":id"].$delete({ param: { id: p.id } }));
       } else {
         await unwrap(
-          await api.v1.products[":id"].$patch({ param: { id: p.id }, json: { active: true } }),
+          await api.v1.products[":id"].$patch({
+            param: { id: p.id },
+            json: { active: true },
+          }),
         );
       }
+      toast(p.active ? "Producto desactivado" : "Producto activado");
       products.reload();
     } catch (e) {
       setActionError(errorMessage(e));
@@ -200,14 +212,21 @@ export function ProductosView() {
         </table>
         {data && data.data.length === 0 && (
           <EmptyState>
-            {q || categoryId ? "Ningún producto coincide con la búsqueda." : "Aún no hay productos."}
+            {q || categoryId
+              ? "Ningún producto coincide con la búsqueda."
+              : "Aún no hay productos."}
           </EmptyState>
         )}
         {!data && !products.error && <EmptyState>Cargando…</EmptyState>}
       </div>
 
       {data && (
-        <Pagination page={data.page} pageSize={data.pageSize} total={data.total} onPage={setPage} />
+        <Pagination
+          page={data.page}
+          pageSize={data.pageSize}
+          total={data.total}
+          onPage={setPage}
+        />
       )}
 
       <Modal
@@ -227,9 +246,16 @@ export function ProductosView() {
         )}
       </Modal>
 
-      <Modal open={categoriesOpen} onClose={() => setCategoriesOpen(false)} title="Categorías">
+      <Modal
+        open={categoriesOpen}
+        onClose={() => setCategoriesOpen(false)}
+        title="Categorías"
+      >
         {categoriesOpen && (
-          <CategoriesManager categories={categories.data ?? []} onChange={categories.reload} />
+          <CategoriesManager
+            categories={categories.data ?? []}
+            onChange={categories.reload}
+          />
         )}
       </Modal>
     </>
@@ -245,6 +271,7 @@ function ProductForm({
   categories: Category[];
   onDone: () => void;
 }) {
+  const { toast } = useDialogs();
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -270,10 +297,13 @@ function ProductForm({
 
     try {
       if (product) {
-        await unwrap(await api.v1.products[":id"].$patch({ param: { id: product.id }, json }));
+        await unwrap(
+          await api.v1.products[":id"].$patch({ param: { id: product.id }, json }),
+        );
       } else {
         await unwrap(await api.v1.products.$post({ json }));
       }
+      toast(product ? "Producto actualizado" : "Producto creado");
       onDone();
     } catch (err) {
       setError(errorMessage(err));
@@ -284,7 +314,13 @@ function ProductForm({
   return (
     <form onSubmit={onSubmit} className="space-y-4">
       <Field label="Nombre">
-        <Input name="name" required maxLength={200} defaultValue={product?.name} autoFocus />
+        <Input
+          name="name"
+          required
+          maxLength={200}
+          defaultValue={product?.name}
+          autoFocus
+        />
       </Field>
       <div className="grid grid-cols-2 gap-4">
         <Field label="Precio (RD$)">
@@ -355,6 +391,7 @@ function CategoriesManager({
   categories: Category[];
   onChange: () => void;
 }) {
+  const { confirm, prompt, toast } = useDialogs();
   const [error, setError] = useState<string | null>(null);
 
   async function run(action: () => Promise<unknown>) {
@@ -387,19 +424,31 @@ function CategoriesManager({
       <ul className="divide-y divide-zinc-200 rounded-md border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-800">
         {categories.length === 0 && <EmptyState>Sin categorías.</EmptyState>}
         {categories.map((c) => (
-          <li key={c.id} className="flex items-center justify-between gap-2 px-4 py-2 text-sm">
+          <li
+            key={c.id}
+            className="flex items-center justify-between gap-2 px-4 py-2 text-sm"
+          >
             <span>{c.name}</span>
             <span className="flex gap-1">
               <Button
                 variant="ghost"
-                onClick={() => {
-                  const name = window.prompt("Nuevo nombre", c.name)?.trim();
+                onClick={async () => {
+                  const name = await prompt({
+                    title: "Renombrar categoría",
+                    label: "Nombre",
+                    initialValue: c.name,
+                    confirmLabel: "Guardar",
+                  });
                   if (name && name !== c.name) {
-                    void run(async () =>
+                    await run(async () =>
                       unwrap(
-                        await api.v1.categories[":id"].$patch({ param: { id: c.id }, json: { name } }),
+                        await api.v1.categories[":id"].$patch({
+                          param: { id: c.id },
+                          json: { name },
+                        }),
                       ),
                     );
+                    toast("Categoría renombrada");
                   }
                 }}
               >
@@ -407,11 +456,20 @@ function CategoriesManager({
               </Button>
               <Button
                 variant="ghost"
-                onClick={() => {
-                  if (window.confirm(`¿Eliminar "${c.name}"? Sus productos quedarán sin categoría.`)) {
-                    void run(async () =>
-                      expectOk(await api.v1.categories[":id"].$delete({ param: { id: c.id } })),
+                onClick={async () => {
+                  const ok = await confirm({
+                    title: `Eliminar "${c.name}"`,
+                    message: "Sus productos quedarán sin categoría.",
+                    confirmLabel: "Eliminar",
+                    danger: true,
+                  });
+                  if (ok) {
+                    await run(async () =>
+                      expectOk(
+                        await api.v1.categories[":id"].$delete({ param: { id: c.id } }),
+                      ),
                     );
+                    toast("Categoría eliminada");
                   }
                 }}
               >

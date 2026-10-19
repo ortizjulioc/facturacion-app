@@ -31,6 +31,7 @@ import {
   Textarea,
   tableStyles,
 } from "@/components/ui";
+import { useDialogs } from "@/components/dialogs";
 import { api, errorMessage, expectOk, unwrap } from "@/lib/api";
 import { money, PAYMENT_LABELS, PAYMENT_METHODS } from "@/lib/format";
 import { useDebounced, useQuery } from "@/lib/use-query";
@@ -38,18 +39,18 @@ import { useDebounced, useQuery } from "@/lib/use-query";
 // ───────────── Datos de apoyo ─────────────
 
 async function loadInit(docId?: string, referencedId?: string) {
-  const [branches, terminals, customers, doc] = await Promise.all([
+  const [branches, terminals, doc] = await Promise.all([
     unwrap(await api.v1.branches.$get()),
     unwrap(await api.v1.terminals.$get({ query: {} })),
-    unwrap(await api.v1.customers.$get({ query: { pageSize: "200", active: "true" } })),
     docId ? unwrap(await api.v1.documents[":id"].$get({ param: { id: docId } })) : null,
   ]);
   const refId = doc?.data.referencedDocumentId ?? referencedId;
-  const referenced = refId ? await unwrap(await api.v1.documents[":id"].$get({ param: { id: refId } })) : null;
+  const referenced = refId
+    ? await unwrap(await api.v1.documents[":id"].$get({ param: { id: refId } }))
+    : null;
   return {
     branches: branches.data.filter((b) => b.active),
     terminals: terminals.data.filter((t) => t.active),
-    customers: customers.data,
     doc: doc?.data ?? null,
     referenced: referenced?.data ?? null,
   };
@@ -124,7 +125,13 @@ function toCoreLine(l: EditorLine): LineInput | null {
       : l.discountKind === "percent"
         ? { type: "percent", bps: Math.round(Number(dv) * 100) }
         : { type: "amount", cents: toCents(dv) };
-    return { unitPrice, quantity, tax: l.tax, priceIncludesTax: l.priceIncludesTax, ...(discount ? { discount } : {}) };
+    return {
+      unitPrice,
+      quantity,
+      tax: l.tax,
+      priceIncludesTax: l.priceIncludesTax,
+      ...(discount ? { discount } : {}),
+    };
   } catch {
     return null;
   }
@@ -153,7 +160,12 @@ export function InvoiceEditor({
   if (init.data.doc && init.data.doc.status !== "DRAFT") {
     return <ErrorNote message="Este comprobante ya fue emitido y no se puede editar." />;
   }
-  const formKey = [session, init.data.doc?.id, init.data.referenced?.id, initialType].join(":");
+  const formKey = [
+    session,
+    init.data.doc?.id,
+    init.data.referenced?.id,
+    initialType,
+  ].join(":");
   return (
     <EditorForm
       key={formKey}
@@ -174,15 +186,27 @@ function EditorForm({
   onSaved: () => void;
 }) {
   const router = useRouter();
+  const { confirm, toast } = useDialogs();
   const { doc, referenced } = init;
 
-  const [type, setType] = useState<EcfType>((doc?.type as EcfType) ?? initialType ?? "E32");
+  const [type, setType] = useState<EcfType>(
+    (doc?.type as EcfType) ?? initialType ?? "E32",
+  );
   const [branchId, setBranchId] = useState(doc?.branchId ?? init.branches[0]?.id ?? "");
   const [terminalId, setTerminalId] = useState(doc?.terminalId ?? "");
   const [customerId, setCustomerId] = useState(doc?.customerId ?? "");
-  const [buyerName, setBuyerName] = useState(doc && !doc.customerId ? (doc.buyerName ?? "") : "");
-  const [buyerDocType, setBuyerDocType] = useState<string>(doc && !doc.customerId ? (doc.buyerDocType ?? "") : "");
-  const [buyerDocNumber, setBuyerDocNumber] = useState(doc && !doc.customerId ? (doc.buyerDocNumber ?? "") : "");
+  const [customerLabel, setCustomerLabel] = useState(
+    doc?.customerId ? (doc.buyerName ?? "") : "",
+  );
+  const [buyerName, setBuyerName] = useState(
+    doc && !doc.customerId ? (doc.buyerName ?? "") : "",
+  );
+  const [buyerDocType, setBuyerDocType] = useState<string>(
+    doc && !doc.customerId ? (doc.buyerDocType ?? "") : "",
+  );
+  const [buyerDocNumber, setBuyerDocNumber] = useState(
+    doc && !doc.customerId ? (doc.buyerDocNumber ?? "") : "",
+  );
   const [currency, setCurrency] = useState(doc?.currency ?? "DOP");
   const [rate, setRate] = useState(doc && doc.currency === "USD" ? doc.exchangeRate : "");
   const [propina, setPropina] = useState(doc?.propinaLegal ?? false);
@@ -190,7 +214,12 @@ function EditorForm({
   const [code, setCode] = useState(String(doc?.modificationCode ?? 3));
   const [lines, setLines] = useState<EditorLine[]>(doc ? linesFromDoc(doc) : []);
   const [payments, setPayments] = useState<EditorPayment[]>(
-    doc?.payments.map((p) => ({ key: nextKey(), method: p.method, amount: p.amount, reference: p.reference ?? "" })) ?? [],
+    doc?.payments.map((p) => ({
+      key: nextKey(),
+      method: p.method,
+      amount: p.amount,
+      reference: p.reference ?? "",
+    })) ?? [],
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -205,7 +234,10 @@ function EditorForm({
     const coreLines = lines.map(toCoreLine);
     if (coreLines.length === 0 || coreLines.some((l) => l === null)) return null;
     try {
-      return calculateDocument({ lines: coreLines as LineInput[], propinaLegal: propina });
+      return calculateDocument({
+        lines: coreLines as LineInput[],
+        propinaLegal: propina,
+      });
     } catch {
       return null;
     }
@@ -256,7 +288,10 @@ function EditorForm({
           ? {
               discount:
                 l.discountKind === "percent"
-                  ? ({ type: "percent", bps: Math.round(Number(num(l.discountValue)) * 100) } as const)
+                  ? ({
+                      type: "percent",
+                      bps: Math.round(Number(num(l.discountValue)) * 100),
+                    } as const)
                   : ({ type: "amount", amount: num(l.discountValue) } as const),
             }
           : {}),
@@ -266,7 +301,8 @@ function EditorForm({
         : payments
             .filter((p) => num(p.amount))
             .map((p) => ({
-              method: p.method as "CASH" | "TRANSFER" | "CHECK" | "CARD" | "CREDIT" | "OTHER",
+              method: p.method as
+                "CASH" | "TRANSFER" | "CHECK" | "CARD" | "CREDIT" | "OTHER",
               amount: num(p.amount),
               reference: p.reference.trim(),
             })),
@@ -279,11 +315,16 @@ function EditorForm({
     try {
       const json = buildPayload();
       const saved = draftId
-        ? await unwrap(await api.v1.documents[":id"].$put({ param: { id: draftId }, json }))
+        ? await unwrap(
+            await api.v1.documents[":id"].$put({ param: { id: draftId }, json }),
+          )
         : await unwrap(await api.v1.documents.$post({ json }));
       const id = saved.data.id;
       setDraftId(id);
-      if (thenIssue) await unwrap(await api.v1.documents[":id"].issue.$post({ param: { id } }));
+      const issued = thenIssue
+        ? await unwrap(await api.v1.documents[":id"].issue.$post({ param: { id } }))
+        : null;
+      toast(issued ? `Comprobante emitido: ${issued.data.encf}` : "Borrador guardado");
       onSaved();
       router.push(`/panel/facturas/${id}`);
     } catch (e) {
@@ -303,7 +344,11 @@ function EditorForm({
     <form onSubmit={onSubmit} className="space-y-6">
       <PageHeader
         title={title}
-        description={modifier && referenced ? `Modifica el comprobante ${referenced.encf}` : undefined}
+        description={
+          modifier && referenced
+            ? `Modifica el comprobante ${referenced.encf}`
+            : undefined
+        }
         actions={
           <Link href="/panel/facturas" className="text-sm underline">
             Cancelar
@@ -367,23 +412,23 @@ function EditorForm({
             </Field>
             {referenced && (
               <p className="text-sm text-zinc-600 md:col-span-2 dark:text-zinc-400">
-                Comprador: <strong>{referenced.buyerName ?? "Consumidor final"}</strong> · Original:{" "}
-                {money(referenced.total, referenced.currency)}
+                Comprador: <strong>{referenced.buyerName ?? "Consumidor final"}</strong> ·
+                Original: {money(referenced.total, referenced.currency)}
               </p>
             )}
           </>
         ) : (
           <>
             <Field label="Cliente" className="md:col-span-2">
-              <Select value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
-                <option value="">{type === "E31" ? "Elige un cliente con RNC" : "Consumidor final"}</option>
-                {init.customers.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                    {c.documentNumber ? ` · ${c.documentType} ${c.documentNumber}` : ""}
-                  </option>
-                ))}
-              </Select>
+              <CustomerPicker
+                value={customerId}
+                label={customerLabel}
+                requireRnc={type === "E31"}
+                onChange={(id, label) => {
+                  setCustomerId(id);
+                  setCustomerLabel(label);
+                }}
+              />
             </Field>
             <Field label="Moneda">
               <Select value={currency} onChange={(e) => setCurrency(e.target.value)}>
@@ -393,16 +438,27 @@ function EditorForm({
             </Field>
             {currency === "USD" && (
               <Field label="Tasa de cambio">
-                <Input value={rate} inputMode="decimal" placeholder="58.50" onChange={(e) => setRate(e.target.value)} />
+                <Input
+                  value={rate}
+                  inputMode="decimal"
+                  placeholder="58.50"
+                  onChange={(e) => setRate(e.target.value)}
+                />
               </Field>
             )}
             {!customerId && type === "E32" && (
               <div className="grid gap-4 md:col-span-4 md:grid-cols-3">
                 <Field label="Nombre del comprador (opcional)">
-                  <Input value={buyerName} onChange={(e) => setBuyerName(e.target.value)} />
+                  <Input
+                    value={buyerName}
+                    onChange={(e) => setBuyerName(e.target.value)}
+                  />
                 </Field>
                 <Field label="Documento (obligatorio desde RD$250,000)">
-                  <Select value={buyerDocType} onChange={(e) => setBuyerDocType(e.target.value)}>
+                  <Select
+                    value={buyerDocType}
+                    onChange={(e) => setBuyerDocType(e.target.value)}
+                  >
                     <option value="">Sin identificar</option>
                     {DOCUMENT_TYPES.map((t) => (
                       <option key={t} value={t}>
@@ -428,7 +484,11 @@ function EditorForm({
       <section className="space-y-3">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <h2 className="text-lg font-medium">Detalle</h2>
-          <Button type="button" variant="secondary" onClick={() => setLines((ls) => [...ls, emptyManual()])}>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => setLines((ls) => [...ls, emptyManual()])}
+          >
             Agregar línea libre
           </Button>
         </div>
@@ -488,7 +548,9 @@ function EditorForm({
                         <input
                           type="checkbox"
                           checked={l.priceIncludesTax}
-                          onChange={(e) => updateLine(l.key, { priceIncludesTax: e.target.checked })}
+                          onChange={(e) =>
+                            updateLine(l.key, { priceIncludesTax: e.target.checked })
+                          }
                         />
                         Precio con impuesto incluido
                       </label>
@@ -514,7 +576,9 @@ function EditorForm({
                       <Select
                         aria-label="Impuesto"
                         value={l.tax}
-                        onChange={(e) => updateLine(l.key, { tax: e.target.value as TaxCode })}
+                        onChange={(e) =>
+                          updateLine(l.key, { tax: e.target.value as TaxCode })
+                        }
                       >
                         {TAX_CODES.map((t) => (
                           <option key={t} value={t}>
@@ -530,13 +594,19 @@ function EditorForm({
                           value={l.discountValue}
                           inputMode="decimal"
                           placeholder="0"
-                          onChange={(e) => updateLine(l.key, { discountValue: e.target.value })}
+                          onChange={(e) =>
+                            updateLine(l.key, { discountValue: e.target.value })
+                          }
                         />
                         <Select
                           aria-label="Tipo de descuento"
                           className="w-16 px-1"
                           value={l.discountKind}
-                          onChange={(e) => updateLine(l.key, { discountKind: e.target.value as "percent" | "amount" })}
+                          onChange={(e) =>
+                            updateLine(l.key, {
+                              discountKind: e.target.value as "percent" | "amount",
+                            })
+                          }
                         >
                           <option value="percent">%</option>
                           <option value="amount">$</option>
@@ -544,14 +614,18 @@ function EditorForm({
                       </div>
                     </td>
                     <td className={`${tableStyles.td} text-right tabular-nums`}>
-                      {lineTotal !== undefined ? money(fromCents(lineTotal), effectiveCurrency) : "—"}
+                      {lineTotal !== undefined
+                        ? money(fromCents(lineTotal), effectiveCurrency)
+                        : "—"}
                     </td>
                     <td className={tableStyles.td}>
                       <button
                         type="button"
                         aria-label="Quitar línea"
                         className="text-zinc-500 hover:text-red-600"
-                        onClick={() => setLines((ls) => ls.filter((x) => x.key !== l.key))}
+                        onClick={() =>
+                          setLines((ls) => ls.filter((x) => x.key !== l.key))
+                        }
                       >
                         ✕
                       </button>
@@ -563,7 +637,9 @@ function EditorForm({
           </table>
           {lines.length === 0 && (
             <p className="px-4 py-8 text-center text-sm text-zinc-500">
-              {modifier ? "Agrega una línea libre con el monto a acreditar o debitar." : "Busca un producto o escanea su código de barras para empezar."}
+              {modifier
+                ? "Agrega una línea libre con el monto a acreditar o debitar."
+                : "Busca un producto o escanea su código de barras para empezar."}
             </p>
           )}
         </div>
@@ -612,7 +688,14 @@ function EditorForm({
                   variant="secondary"
                   disabled={!preview}
                   onClick={() =>
-                    setPayments([{ key: nextKey(), method: "CASH", amount: fromCents(total), reference: "" }])
+                    setPayments([
+                      {
+                        key: nextKey(),
+                        method: "CASH",
+                        amount: fromCents(total),
+                        reference: "",
+                      },
+                    ])
                   }
                 >
                   Pagar el total en efectivo
@@ -620,7 +703,12 @@ function EditorForm({
                 <Button
                   type="button"
                   variant="ghost"
-                  onClick={() => setPayments((ps) => [...ps, { key: nextKey(), method: "CARD", amount: "", reference: "" }])}
+                  onClick={() =>
+                    setPayments((ps) => [
+                      ...ps,
+                      { key: nextKey(), method: "CARD", amount: "", reference: "" },
+                    ])
+                  }
                 >
                   Agregar pago
                 </Button>
@@ -629,7 +717,11 @@ function EditorForm({
                 Pagado {money(fromCents(paid), effectiveCurrency)}
                 {preview && paid !== total && (
                   <span className="ml-2 text-amber-700 dark:text-amber-400">
-                    {paid < total ? "faltan" : "sobran"} {money(fromCents(paid < total ? total - paid : paid - total), effectiveCurrency)}
+                    {paid < total ? "faltan" : "sobran"}{" "}
+                    {money(
+                      fromCents(paid < total ? total - paid : paid - total),
+                      effectiveCurrency,
+                    )}
                   </span>
                 )}
               </p>
@@ -644,11 +736,22 @@ function EditorForm({
         <section className="space-y-2 rounded-lg border border-zinc-200 p-4 text-sm tabular-nums dark:border-zinc-800">
           <Row label="Subtotal" value={preview?.subtotal} currency={effectiveCurrency} />
           {preview && preview.totalDiscount > 0n && (
-            <Row label="Descuentos" value={preview.totalDiscount} currency={effectiveCurrency} />
+            <Row
+              label="Descuentos"
+              value={preview.totalDiscount}
+              currency={effectiveCurrency}
+            />
           )}
           {preview &&
-            TAX_CODES.filter((c) => c.startsWith("ITBIS") && preview.byTax[c].taxAmount > 0n).map((c) => (
-              <Row key={c} label={TAX_LABELS[c]} value={preview.byTax[c].taxAmount} currency={effectiveCurrency} />
+            TAX_CODES.filter(
+              (c) => c.startsWith("ITBIS") && preview.byTax[c].taxAmount > 0n,
+            ).map((c) => (
+              <Row
+                key={c}
+                label={TAX_LABELS[c]}
+                value={preview.byTax[c].taxAmount}
+                currency={effectiveCurrency}
+              />
             ))}
           {!modifier && (
             <div className="py-1">
@@ -660,14 +763,22 @@ function EditorForm({
             </div>
           )}
           {preview && preview.propinaLegal > 0n && (
-            <Row label="Propina legal" value={preview.propinaLegal} currency={effectiveCurrency} />
+            <Row
+              label="Propina legal"
+              value={preview.propinaLegal}
+              currency={effectiveCurrency}
+            />
           )}
           <div className="flex items-baseline justify-between border-t border-zinc-200 pt-3 text-lg font-semibold dark:border-zinc-800">
             <span>Total</span>
-            <span>{preview ? money(fromCents(preview.total), effectiveCurrency) : "—"}</span>
+            <span>
+              {preview ? money(fromCents(preview.total), effectiveCurrency) : "—"}
+            </span>
           </div>
           {!preview && lines.length > 0 && (
-            <p className="text-xs text-amber-700 dark:text-amber-400">Completa precio y cantidad de todas las líneas.</p>
+            <p className="text-xs text-amber-700 dark:text-amber-400">
+              Completa precio y cantidad de todas las líneas.
+            </p>
           )}
         </section>
       </div>
@@ -680,9 +791,17 @@ function EditorForm({
             variant="danger"
             disabled={busy}
             onClick={async () => {
-              if (!window.confirm("¿Eliminar este borrador?")) return;
+              const ok = await confirm({
+                title: "Eliminar borrador",
+                message: "Esta acción no se puede deshacer.",
+                confirmLabel: "Eliminar",
+                danger: true,
+              });
+              if (!ok) return;
               try {
-                await expectOk(await api.v1.documents[":id"].$delete({ param: { id: draftId } }));
+                await expectOk(
+                  await api.v1.documents[":id"].$delete({ param: { id: draftId } }),
+                );
                 onSaved();
                 router.push("/panel/facturas");
               } catch (e) {
@@ -693,10 +812,18 @@ function EditorForm({
             Eliminar borrador
           </Button>
         )}
-        <Button type="submit" variant="secondary" disabled={busy || !preview || !branchId}>
+        <Button
+          type="submit"
+          variant="secondary"
+          disabled={busy || !preview || !branchId}
+        >
           {busy ? "Guardando…" : "Guardar borrador"}
         </Button>
-        <Button type="button" disabled={busy || !preview || !branchId} onClick={() => void save(true)}>
+        <Button
+          type="button"
+          disabled={busy || !preview || !branchId}
+          onClick={() => void save(true)}
+        >
           Guardar y emitir
         </Button>
       </div>
@@ -704,7 +831,15 @@ function EditorForm({
   );
 }
 
-function Row({ label, value, currency }: { label: string; value: bigint | undefined; currency: string }) {
+function Row({
+  label,
+  value,
+  currency,
+}: {
+  label: string;
+  value: bigint | undefined;
+  currency: string;
+}) {
   return (
     <div className="flex justify-between">
       <span className="text-zinc-600 dark:text-zinc-400">{label}</span>
@@ -733,7 +868,13 @@ function ProductPicker({ onPick }: { onPick: (p: PickedProduct) => void }) {
     useMemo(
       () => async () =>
         dq
-          ? (await unwrap(await api.v1.products.$get({ query: { q: dq, pageSize: "8", active: "true" } }))).data
+          ? (
+              await unwrap(
+                await api.v1.products.$get({
+                  query: { q: dq, pageSize: "8", active: "true" },
+                }),
+              )
+            ).data
           : [],
       [dq],
     ),
@@ -791,12 +932,116 @@ function ProductPicker({ onPick }: { onPick: (p: PickedProduct) => void }) {
               >
                 <span>
                   {p.name}
-                  <span className="ml-2 font-mono text-xs text-zinc-500">{p.barcode ?? p.sku ?? ""}</span>
+                  <span className="ml-2 font-mono text-xs text-zinc-500">
+                    {p.barcode ?? p.sku ?? ""}
+                  </span>
                 </span>
-                <span className="tabular-nums text-zinc-600 dark:text-zinc-400">{money(p.price)}</span>
+                <span className="tabular-nums text-zinc-600 dark:text-zinc-400">
+                  {money(p.price)}
+                </span>
               </button>
             </li>
           ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// ───────────── Buscador de clientes ─────────────
+
+function CustomerPicker({
+  value,
+  label,
+  requireRnc,
+  onChange,
+}: {
+  value: string;
+  label: string;
+  /** Factura de crédito fiscal: solo sirven clientes con RNC. */
+  requireRnc: boolean;
+  onChange: (id: string, label: string) => void;
+}) {
+  const [q, setQ] = useState("");
+  const dq = useDebounced(q.trim(), 250);
+
+  const results = useQuery(
+    useMemo(
+      () => async () =>
+        dq
+          ? (
+              await unwrap(
+                await api.v1.customers.$get({
+                  query: { q: dq, pageSize: "8", active: "true" },
+                }),
+              )
+            ).data
+          : [],
+      [dq],
+    ),
+  );
+
+  if (value) {
+    return (
+      <div className="flex items-center justify-between gap-2 rounded-md border border-zinc-300 px-3 py-2 text-sm font-normal dark:border-zinc-700">
+        <span className="truncate">{label}</span>
+        <button
+          type="button"
+          className="shrink-0 text-zinc-500 underline hover:text-foreground"
+          onClick={() => onChange("", "")}
+        >
+          Cambiar
+        </button>
+      </div>
+    );
+  }
+
+  const list = (results.data ?? []).filter(
+    (c) => !requireRnc || c.documentType === "RNC",
+  );
+  return (
+    <div className="relative">
+      <Input
+        type="search"
+        autoComplete="off"
+        placeholder={
+          requireRnc
+            ? "Buscar cliente con RNC…"
+            : "Consumidor final · escribe para buscar un cliente"
+        }
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+      />
+      {q.trim() && (
+        <ul className="absolute z-10 mt-1 w-full overflow-hidden rounded-md border border-zinc-200 bg-background text-sm font-normal shadow-lg dark:border-zinc-800">
+          {list.map((c) => {
+            const doc =
+              c.documentType && c.documentNumber
+                ? `${c.documentType} ${c.documentNumber}`
+                : "";
+            return (
+              <li key={c.id}>
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between gap-4 px-3 py-2 text-left hover:bg-zinc-100 dark:hover:bg-zinc-900"
+                  onClick={() => {
+                    onChange(c.id, doc ? `${c.name} · ${doc}` : c.name);
+                    setQ("");
+                  }}
+                >
+                  <span>{c.name}</span>
+                  <span className="font-mono text-xs text-zinc-500">{doc}</span>
+                </button>
+              </li>
+            );
+          })}
+          {list.length === 0 && !results.loading && (
+            <li className="px-3 py-2 text-zinc-500">
+              {requireRnc
+                ? "Ningún cliente con RNC coincide."
+                : "Ningún cliente coincide."}
+            </li>
+          )}
         </ul>
       )}
     </div>

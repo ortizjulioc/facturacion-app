@@ -3,7 +3,13 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useState } from "react";
-import { ECF_LABELS, ECF_TYPES, formatDocument, type DocumentType, type EcfType } from "@facturacion/core";
+import {
+  ECF_LABELS,
+  ECF_TYPES,
+  formatDocument,
+  type DocumentType,
+  type EcfType,
+} from "@facturacion/core";
 import {
   Badge,
   EmptyState,
@@ -22,13 +28,13 @@ import { useDebounced, useQuery } from "@/lib/use-query";
 const PAGE_SIZE = 20;
 const STATUSES = ["DRAFT", "ISSUED", "SENT", "ACCEPTED", "REJECTED"] as const;
 
-export function FacturasView() {
+export function FacturasView({ initialStatus = "" }: { initialStatus?: string }) {
   const router = useRouter();
   const [search, setSearch] = useState("");
   const q = useDebounced(search.trim());
   const [page, setPage] = useState(1);
   const [type, setType] = useState("");
-  const [status, setStatus] = useState("");
+  const [status, setStatus] = useState(initialStatus);
 
   const fetchDocs = useCallback(
     async () =>
@@ -130,10 +136,14 @@ export function FacturasView() {
                 tabIndex={0}
                 role="link"
                 onClick={() => router.push(`/panel/facturas/${d.id}`)}
-                onKeyDown={(e) => e.key === "Enter" && router.push(`/panel/facturas/${d.id}`)}
+                onKeyDown={(e) =>
+                  e.key === "Enter" && router.push(`/panel/facturas/${d.id}`)
+                }
                 className="cursor-pointer hover:bg-zinc-50 focus:bg-zinc-50 dark:hover:bg-zinc-900 dark:focus:bg-zinc-900"
               >
-                <td className={`${tableStyles.td} font-mono text-xs`}>{d.encf ?? <span className="text-zinc-500">Borrador</span>}</td>
+                <td className={`${tableStyles.td} font-mono text-xs`}>
+                  {d.encf ?? <span className="text-zinc-500">Borrador</span>}
+                </td>
                 <td className={tableStyles.td}>{ECF_LABELS[d.type]}</td>
                 <td className={tableStyles.td}>
                   {d.buyerName ?? <span className="text-zinc-500">Consumidor final</span>}
@@ -143,10 +153,16 @@ export function FacturasView() {
                     </div>
                   )}
                 </td>
-                <td className={`${tableStyles.td} whitespace-nowrap`}>{formatDateTime(d.issuedAt ?? d.createdAt)}</td>
-                <td className={`${tableStyles.td} text-right tabular-nums`}>{money(d.total, d.currency)}</td>
+                <td className={`${tableStyles.td} whitespace-nowrap`}>
+                  {formatDateTime(d.issuedAt ?? d.createdAt)}
+                </td>
+                <td className={`${tableStyles.td} text-right tabular-nums`}>
+                  {money(d.total, d.currency)}
+                </td>
                 <td className={tableStyles.td}>
-                  <Badge tone={statusTone(d.status)}>{STATUS_LABELS[d.status] ?? d.status}</Badge>
+                  <Badge tone={statusTone(d.status)}>
+                    {STATUS_LABELS[d.status] ?? d.status}
+                  </Badge>
                 </td>
               </tr>
             ))}
@@ -154,14 +170,21 @@ export function FacturasView() {
         </table>
         {data && data.data.length === 0 && (
           <EmptyState>
-            {q || type || status ? "Ningún comprobante coincide con los filtros." : "Aún no hay comprobantes."}
+            {q || type || status
+              ? "Ningún comprobante coincide con los filtros."
+              : "Aún no hay comprobantes."}
           </EmptyState>
         )}
         {!data && !docs.error && <EmptyState>Cargando…</EmptyState>}
       </div>
 
       {data && (
-        <Pagination page={data.page} pageSize={data.pageSize} total={data.total} onPage={setPage} />
+        <Pagination
+          page={data.page}
+          pageSize={data.pageSize}
+          total={data.total}
+          onPage={setPage}
+        />
       )}
     </>
   );

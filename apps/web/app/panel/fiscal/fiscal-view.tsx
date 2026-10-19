@@ -14,6 +14,7 @@ import {
   Select,
   tableStyles,
 } from "@/components/ui";
+import { useDialogs } from "@/components/dialogs";
 import { usePanel } from "@/components/panel-context";
 import { api, errorMessage, unwrap } from "@/lib/api";
 import { useQuery } from "@/lib/use-query";
@@ -38,6 +39,7 @@ type Sequence = Loaded["sequences"][number];
 
 export function FiscalView() {
   const { canManage } = usePanel();
+  const { toast } = useDialogs();
   const { data, error, reload } = useQuery(loadFiscal);
   const [sequenceModal, setSequenceModal] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -45,7 +47,12 @@ export function FiscalView() {
   async function toggleSequence(s: Sequence) {
     setActionError(null);
     try {
-      await unwrap(await api.v1.sequences[":id"].$patch({ param: { id: s.id }, json: { active: !s.active } }));
+      await unwrap(
+        await api.v1.sequences[":id"].$patch({
+          param: { id: s.id },
+          json: { active: !s.active },
+        }),
+      );
       reload();
     } catch (e) {
       setActionError(errorMessage(e));
@@ -68,10 +75,13 @@ export function FiscalView() {
         <h2 className="text-lg font-medium">Datos de la empresa</h2>
         {data && !data.company && (
           <p className="rounded-md bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:bg-amber-950 dark:text-amber-200">
-            Aún no has registrado los datos fiscales. Sin ellos no se pueden emitir comprobantes.
+            Aún no has registrado los datos fiscales. Sin ellos no se pueden emitir
+            comprobantes.
           </p>
         )}
-        {data && <CompanyForm company={data.company} canManage={canManage} onSaved={reload} />}
+        {data && (
+          <CompanyForm company={data.company} canManage={canManage} onSaved={reload} />
+        )}
       </section>
 
       <section className="space-y-4">
@@ -82,7 +92,9 @@ export function FiscalView() {
               Cada tipo de comprobante necesita un rango vigente para poder emitirse.
             </p>
           </div>
-          {canManage && <Button onClick={() => setSequenceModal(true)}>Nueva secuencia</Button>}
+          {canManage && (
+            <Button onClick={() => setSequenceModal(true)}>Nueva secuencia</Button>
+          )}
         </div>
 
         <div className={tableStyles.wrapper}>
@@ -102,15 +114,23 @@ export function FiscalView() {
                 const expired = s.expiresAt < today;
                 const exhausted = s.remaining <= 0;
                 return (
-                  <tr key={s.id} className={s.active && !expired && !exhausted ? "" : "opacity-60"}>
+                  <tr
+                    key={s.id}
+                    className={s.active && !expired && !exhausted ? "" : "opacity-60"}
+                  >
                     <td className={tableStyles.td}>
                       <span className="font-medium">{s.ecfType}</span>
-                      <div className="text-xs text-zinc-500">{ECF_LABELS[s.ecfType as EcfType]}</div>
+                      <div className="text-xs text-zinc-500">
+                        {ECF_LABELS[s.ecfType as EcfType]}
+                      </div>
                     </td>
                     <td className={`${tableStyles.td} font-mono text-xs`}>
-                      {s.fromNumber.toLocaleString("en-US")} – {s.toNumber.toLocaleString("en-US")}
+                      {s.fromNumber.toLocaleString("en-US")} –{" "}
+                      {s.toNumber.toLocaleString("en-US")}
                     </td>
-                    <td className={`${tableStyles.td} text-right tabular-nums`}>{s.remaining.toLocaleString("en-US")}</td>
+                    <td className={`${tableStyles.td} text-right tabular-nums`}>
+                      {s.remaining.toLocaleString("en-US")}
+                    </td>
                     <td className={tableStyles.td}>
                       {s.expiresAt}
                       {expired && (
@@ -145,18 +165,25 @@ export function FiscalView() {
             </tbody>
           </table>
           {data && data.sequences.length === 0 && (
-            <EmptyState>Aún no hay secuencias. Registra el rango que te autorizó la DGII.</EmptyState>
+            <EmptyState>
+              Aún no hay secuencias. Registra el rango que te autorizó la DGII.
+            </EmptyState>
           )}
           {!data && !error && <EmptyState>Cargando…</EmptyState>}
         </div>
       </section>
 
-      <Modal open={sequenceModal} onClose={() => setSequenceModal(false)} title="Nueva secuencia">
+      <Modal
+        open={sequenceModal}
+        onClose={() => setSequenceModal(false)}
+        title="Nueva secuencia"
+      >
         {sequenceModal && (
           <SequenceForm
             terminals={data?.terminals.filter((t) => t.active) ?? []}
             onDone={() => {
               setSequenceModal(false);
+              toast("Secuencia registrada");
               reload();
             }}
           />
@@ -175,6 +202,7 @@ function CompanyForm({
   canManage: boolean;
   onSaved: () => void;
 }) {
+  const { toast } = useDialogs();
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -204,6 +232,7 @@ function CompanyForm({
         }),
       );
       setSaved(true);
+      toast("Datos fiscales guardados");
       onSaved();
     } catch (err) {
       setError(errorMessage(err));
@@ -213,17 +242,33 @@ function CompanyForm({
   }
 
   return (
-    <form onSubmit={onSubmit} className="space-y-4 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
+    <form
+      onSubmit={onSubmit}
+      className="space-y-4 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800"
+    >
       <fieldset disabled={!canManage || saving} className="space-y-4">
         <div className="grid gap-4 md:grid-cols-3">
           <Field label="RNC">
-            <Input name="rnc" required defaultValue={company ? formatDocument("RNC", company.rnc) : ""} />
+            <Input
+              name="rnc"
+              required
+              defaultValue={company ? formatDocument("RNC", company.rnc) : ""}
+            />
           </Field>
           <Field label="Razón social" className="md:col-span-2">
-            <Input name="legalName" required maxLength={200} defaultValue={company?.legalName} />
+            <Input
+              name="legalName"
+              required
+              maxLength={200}
+              defaultValue={company?.legalName}
+            />
           </Field>
           <Field label="Nombre comercial" className="md:col-span-2">
-            <Input name="tradeName" maxLength={200} defaultValue={company?.tradeName ?? ""} />
+            <Input
+              name="tradeName"
+              maxLength={200}
+              defaultValue={company?.tradeName ?? ""}
+            />
           </Field>
           <Field label="Ambiente DGII">
             <Select name="environment" defaultValue={company?.environment ?? "TEST"}>
@@ -236,17 +281,34 @@ function CompanyForm({
           </Field>
         </div>
         <Field label="Dirección fiscal">
-          <Input name="address" required maxLength={250} defaultValue={company?.address} />
+          <Input
+            name="address"
+            required
+            maxLength={250}
+            defaultValue={company?.address}
+          />
         </Field>
         <div className="grid gap-4 md:grid-cols-3">
           <Field label="Provincia">
-            <Input name="province" maxLength={100} defaultValue={company?.province ?? ""} />
+            <Input
+              name="province"
+              maxLength={100}
+              defaultValue={company?.province ?? ""}
+            />
           </Field>
           <Field label="Municipio">
-            <Input name="municipality" maxLength={100} defaultValue={company?.municipality ?? ""} />
+            <Input
+              name="municipality"
+              maxLength={100}
+              defaultValue={company?.municipality ?? ""}
+            />
           </Field>
           <Field label="Actividad económica">
-            <Input name="economicActivity" maxLength={200} defaultValue={company?.economicActivity ?? ""} />
+            <Input
+              name="economicActivity"
+              maxLength={200}
+              defaultValue={company?.economicActivity ?? ""}
+            />
           </Field>
           <Field label="Correo">
             <Input name="email" type="email" defaultValue={company?.email ?? ""} />
@@ -263,7 +325,9 @@ function CompanyForm({
           <Button disabled={saving}>{saving ? "Guardando…" : "Guardar datos"}</Button>
         </div>
       ) : (
-        <p className="text-sm text-zinc-500">Solo propietarios y administradores pueden editar estos datos.</p>
+        <p className="text-sm text-zinc-500">
+          Solo propietarios y administradores pueden editar estos datos.
+        </p>
       )}
     </form>
   );
@@ -317,7 +381,14 @@ function SequenceForm({
       </Field>
       <div className="grid grid-cols-2 gap-4">
         <Field label="Desde">
-          <Input name="fromNumber" type="number" min={1} max={9999999999} required defaultValue={1} />
+          <Input
+            name="fromNumber"
+            type="number"
+            min={1}
+            max={9999999999}
+            required
+            defaultValue={1}
+          />
         </Field>
         <Field label="Hasta">
           <Input name="toNumber" type="number" min={1} max={9999999999} required />

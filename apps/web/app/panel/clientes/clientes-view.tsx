@@ -16,6 +16,7 @@ import {
   Select,
   tableStyles,
 } from "@/components/ui";
+import { useDialogs } from "@/components/dialogs";
 import { usePanel } from "@/components/panel-context";
 import { api, errorMessage, unwrap } from "@/lib/api";
 import { useDebounced, useQuery } from "@/lib/use-query";
@@ -44,6 +45,7 @@ type Customer = Awaited<ReturnType<typeof loadCustomers>>["data"][number];
 
 export function ClientesView() {
   const { canManage } = usePanel();
+  const { toast } = useDialogs();
   const [search, setSearch] = useState("");
   const q = useDebounced(search.trim());
   const [page, setPage] = useState(1);
@@ -62,8 +64,12 @@ export function ClientesView() {
     setActionError(null);
     try {
       await unwrap(
-        await api.v1.customers[":id"].$patch({ param: { id: c.id }, json: { active: !c.active } }),
+        await api.v1.customers[":id"].$patch({
+          param: { id: c.id },
+          json: { active: !c.active },
+        }),
       );
+      toast(c.active ? "Cliente desactivado" : "Cliente activado");
       customers.reload();
     } catch (e) {
       setActionError(errorMessage(e));
@@ -159,13 +165,20 @@ export function ClientesView() {
           </tbody>
         </table>
         {data && data.data.length === 0 && (
-          <EmptyState>{q ? "Ningún cliente coincide con la búsqueda." : "Aún no hay clientes."}</EmptyState>
+          <EmptyState>
+            {q ? "Ningún cliente coincide con la búsqueda." : "Aún no hay clientes."}
+          </EmptyState>
         )}
         {!data && !customers.error && <EmptyState>Cargando…</EmptyState>}
       </div>
 
       {data && (
-        <Pagination page={data.page} pageSize={data.pageSize} total={data.total} onPage={setPage} />
+        <Pagination
+          page={data.page}
+          pageSize={data.pageSize}
+          total={data.total}
+          onPage={setPage}
+        />
       )}
 
       <Modal
@@ -187,7 +200,14 @@ export function ClientesView() {
   );
 }
 
-function CustomerForm({ customer, onDone }: { customer: Customer | null; onDone: () => void }) {
+function CustomerForm({
+  customer,
+  onDone,
+}: {
+  customer: Customer | null;
+  onDone: () => void;
+}) {
+  const { toast } = useDialogs();
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -211,10 +231,13 @@ function CustomerForm({ customer, onDone }: { customer: Customer | null; onDone:
 
     try {
       if (customer) {
-        await unwrap(await api.v1.customers[":id"].$patch({ param: { id: customer.id }, json }));
+        await unwrap(
+          await api.v1.customers[":id"].$patch({ param: { id: customer.id }, json }),
+        );
       } else {
         await unwrap(await api.v1.customers.$post({ json }));
       }
+      toast(customer ? "Cliente actualizado" : "Cliente creado");
       onDone();
     } catch (err) {
       setError(errorMessage(err));
@@ -225,7 +248,13 @@ function CustomerForm({ customer, onDone }: { customer: Customer | null; onDone:
   return (
     <form onSubmit={onSubmit} className="space-y-4">
       <Field label="Nombre o razón social">
-        <Input name="name" required maxLength={200} defaultValue={customer?.name} autoFocus />
+        <Input
+          name="name"
+          required
+          maxLength={200}
+          defaultValue={customer?.name}
+          autoFocus
+        />
       </Field>
       <div className="grid grid-cols-2 gap-4">
         <Field label="Tipo de documento">
@@ -243,7 +272,10 @@ function CustomerForm({ customer, onDone }: { customer: Customer | null; onDone:
             name="documentNumber"
             defaultValue={
               customer?.documentType && customer.documentNumber
-                ? formatDocument(customer.documentType as DocumentType, customer.documentNumber)
+                ? formatDocument(
+                    customer.documentType as DocumentType,
+                    customer.documentNumber,
+                  )
                 : ""
             }
           />

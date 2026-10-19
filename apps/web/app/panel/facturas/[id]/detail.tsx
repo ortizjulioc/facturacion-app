@@ -3,10 +3,25 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
-import { ECF_LABELS, formatDocument, TAX_LABELS, type DocumentType, type EcfType, type TaxCode } from "@facturacion/core";
+import {
+  ECF_LABELS,
+  formatDocument,
+  TAX_LABELS,
+  type DocumentType,
+  type EcfType,
+  type TaxCode,
+} from "@facturacion/core";
+import { useDialogs } from "@/components/dialogs";
 import { Badge, Button, ErrorNote, PageHeader, tableStyles } from "@/components/ui";
 import { api, errorMessage, expectOk, unwrap } from "@/lib/api";
-import { formatDateTime, isDebitCredit, money, PAYMENT_LABELS, STATUS_LABELS, statusTone } from "@/lib/format";
+import {
+  formatDateTime,
+  isDebitCredit,
+  money,
+  PAYMENT_LABELS,
+  STATUS_LABELS,
+  statusTone,
+} from "@/lib/format";
 import { useQuery } from "@/lib/use-query";
 
 const linkButton =
@@ -14,6 +29,7 @@ const linkButton =
 
 export function InvoiceDetail({ id }: { id: string }) {
   const router = useRouter();
+  const { confirm, toast } = useDialogs();
   const load = useMemo(
     () => async () => {
       const [doc, company] = await Promise.all([
@@ -74,7 +90,12 @@ export function InvoiceDetail({ id }: { id: string }) {
                     disabled={busy}
                     onClick={() =>
                       run(async () => {
-                        await unwrap(await api.v1.documents[":id"].issue.$post({ param: { id: doc.id } }));
+                        const issued = await unwrap(
+                          await api.v1.documents[":id"].issue.$post({
+                            param: { id: doc.id },
+                          }),
+                        );
+                        toast(`Comprobante emitido: ${issued.data.encf}`);
                         reload();
                       })
                     }
@@ -114,7 +135,9 @@ export function InvoiceDetail({ id }: { id: string }) {
       <article className="space-y-6 rounded-lg border border-zinc-200 p-6 print:border-0 print:p-0 dark:border-zinc-800">
         <header className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <p className="text-lg font-semibold">{company?.tradeName || company?.legalName || "Emisor"}</p>
+            <p className="text-lg font-semibold">
+              {company?.tradeName || company?.legalName || "Emisor"}
+            </p>
             {company && (
               <p className="text-sm text-zinc-600 dark:text-zinc-400">
                 {company.legalName} · RNC {formatDocument("RNC", company.rnc)}
@@ -126,8 +149,12 @@ export function InvoiceDetail({ id }: { id: string }) {
           <div className="text-right text-sm">
             <p className="font-medium">{ECF_LABELS[type]}</p>
             <p className="font-mono">{doc.encf ?? "Sin número (borrador)"}</p>
-            <p className="text-zinc-600 dark:text-zinc-400">{formatDateTime(doc.issuedAt ?? doc.createdAt)}</p>
-            <Badge tone={statusTone(doc.status)}>{STATUS_LABELS[doc.status] ?? doc.status}</Badge>
+            <p className="text-zinc-600 dark:text-zinc-400">
+              {formatDateTime(doc.issuedAt ?? doc.createdAt)}
+            </p>
+            <Badge tone={statusTone(doc.status)}>
+              {STATUS_LABELS[doc.status] ?? doc.status}
+            </Badge>
           </div>
         </header>
 
@@ -136,10 +163,15 @@ export function InvoiceDetail({ id }: { id: string }) {
           <p className="font-medium">{doc.buyerName ?? "Consumidor final"}</p>
           {doc.buyerDocType && doc.buyerDocNumber && (
             <p className="text-zinc-600 dark:text-zinc-400">
-              {doc.buyerDocType} {formatDocument(doc.buyerDocType as DocumentType, doc.buyerDocNumber)}
+              {doc.buyerDocType}{" "}
+              {formatDocument(doc.buyerDocType as DocumentType, doc.buyerDocNumber)}
             </p>
           )}
-          {cur === "USD" && <p className="text-zinc-600 dark:text-zinc-400">Tasa de cambio: {doc.exchangeRate}</p>}
+          {cur === "USD" && (
+            <p className="text-zinc-600 dark:text-zinc-400">
+              Tasa de cambio: {doc.exchangeRate}
+            </p>
+          )}
         </section>
 
         <div className={tableStyles.wrapper}>
@@ -159,15 +191,21 @@ export function InvoiceDetail({ id }: { id: string }) {
                   <td className={tableStyles.td}>
                     {l.name}
                     {Number(l.discount) > 0 && (
-                      <div className="text-xs text-zinc-500">Descuento {money(l.discount, cur)}</div>
+                      <div className="text-xs text-zinc-500">
+                        Descuento {money(l.discount, cur)}
+                      </div>
                     )}
                   </td>
                   <td className={`${tableStyles.td} text-right tabular-nums`}>
                     {l.quantity} <span className="text-xs text-zinc-500">{l.unit}</span>
                   </td>
-                  <td className={`${tableStyles.td} text-right tabular-nums`}>{money(l.unitPrice, cur)}</td>
+                  <td className={`${tableStyles.td} text-right tabular-nums`}>
+                    {money(l.unitPrice, cur)}
+                  </td>
                   <td className={tableStyles.td}>{TAX_LABELS[l.tax as TaxCode]}</td>
-                  <td className={`${tableStyles.td} text-right tabular-nums`}>{money(l.total, cur)}</td>
+                  <td className={`${tableStyles.td} text-right tabular-nums`}>
+                    {money(l.total, cur)}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -183,7 +221,9 @@ export function InvoiceDetail({ id }: { id: string }) {
                   <div key={p.id} className="flex justify-between tabular-nums">
                     <span>
                       {PAYMENT_LABELS[p.method] ?? p.method}
-                      {p.reference && <span className="ml-2 text-zinc-500">{p.reference}</span>}
+                      {p.reference && (
+                        <span className="ml-2 text-zinc-500">{p.reference}</span>
+                      )}
                     </span>
                     <span>{money(p.amount, cur)}</span>
                   </div>
@@ -192,7 +232,9 @@ export function InvoiceDetail({ id }: { id: string }) {
             )}
             {doc.notes && (
               <p className="pt-2 text-zinc-600 dark:text-zinc-400">
-                <span className="text-xs uppercase tracking-wide text-zinc-500">Notas: </span>
+                <span className="text-xs uppercase tracking-wide text-zinc-500">
+                  Notas:{" "}
+                </span>
                 {doc.notes}
               </p>
             )}
@@ -200,14 +242,20 @@ export function InvoiceDetail({ id }: { id: string }) {
 
           <div className="space-y-1.5 text-sm tabular-nums">
             <Line label="Subtotal" value={money(totals.subtotal, cur)} />
-            {Number(totals.discount) > 0 && <Line label="Descuentos incluidos" value={money(totals.discount, cur)} />}
+            {Number(totals.discount) > 0 && (
+              <Line label="Descuentos incluidos" value={money(totals.discount, cur)} />
+            )}
             {taxRows
               .filter(([, v]) => Number(v) > 0)
               .map(([label, v]) => (
                 <Line key={label} label={label} value={money(v, cur)} />
               ))}
-            {Number(totals.baseExempt) > 0 && <Line label="Monto exento" value={money(totals.baseExempt, cur)} />}
-            {Number(totals.propina) > 0 && <Line label="Propina legal 10 %" value={money(totals.propina, cur)} />}
+            {Number(totals.baseExempt) > 0 && (
+              <Line label="Monto exento" value={money(totals.baseExempt, cur)} />
+            )}
+            {Number(totals.propina) > 0 && (
+              <Line label="Propina legal 10 %" value={money(totals.propina, cur)} />
+            )}
             <div className="flex justify-between border-t border-zinc-200 pt-2 text-lg font-semibold dark:border-zinc-800">
               <span>Total</span>
               <span>{money(totals.total, cur)}</span>
@@ -221,13 +269,22 @@ export function InvoiceDetail({ id }: { id: string }) {
           <Button
             variant="danger"
             disabled={busy}
-            onClick={() =>
-              window.confirm("¿Eliminar este borrador?") &&
-              run(async () => {
-                await expectOk(await api.v1.documents[":id"].$delete({ param: { id: doc.id } }));
+            onClick={async () => {
+              const ok = await confirm({
+                title: "Eliminar borrador",
+                message: "Esta acción no se puede deshacer.",
+                confirmLabel: "Eliminar",
+                danger: true,
+              });
+              if (!ok) return;
+              await run(async () => {
+                await expectOk(
+                  await api.v1.documents[":id"].$delete({ param: { id: doc.id } }),
+                );
+                toast("Borrador eliminado");
                 router.push("/panel/facturas");
-              })
-            }
+              });
+            }}
           >
             Eliminar borrador
           </Button>

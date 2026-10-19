@@ -1,7 +1,18 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { Badge, Button, EmptyState, ErrorNote, Field, Input, Modal, PageHeader, Select } from "@/components/ui";
+import { useDialogs } from "@/components/dialogs";
+import {
+  Badge,
+  Button,
+  EmptyState,
+  ErrorNote,
+  Field,
+  Input,
+  Modal,
+  PageHeader,
+  Select,
+} from "@/components/ui";
 import { usePanel } from "@/components/panel-context";
 import { api, errorMessage, unwrap } from "@/lib/api";
 import { useQuery } from "@/lib/use-query";
@@ -20,6 +31,7 @@ type Terminal = Loaded["terminals"][number];
 
 export function SucursalesView() {
   const { canManage } = usePanel();
+  const { toast } = useDialogs();
   const { data, error, reload } = useQuery(loadAll);
   const [branchModal, setBranchModal] = useState(false);
   const [terminalFor, setTerminalFor] = useState<Branch | null>(null);
@@ -37,11 +49,21 @@ export function SucursalesView() {
 
   const toggleBranch = (b: Branch) =>
     run(async () =>
-      unwrap(await api.v1.branches[":id"].$patch({ param: { id: b.id }, json: { active: !b.active } })),
+      unwrap(
+        await api.v1.branches[":id"].$patch({
+          param: { id: b.id },
+          json: { active: !b.active },
+        }),
+      ),
     );
   const toggleTerminal = (t: Terminal) =>
     run(async () =>
-      unwrap(await api.v1.terminals[":id"].$patch({ param: { id: t.id }, json: { active: !t.active } })),
+      unwrap(
+        await api.v1.terminals[":id"].$patch({
+          param: { id: t.id },
+          json: { active: !t.active },
+        }),
+      ),
     );
 
   return (
@@ -49,13 +71,19 @@ export function SucursalesView() {
       <PageHeader
         title="Sucursales y cajas"
         description="Cada local tiene una o más cajas. Las secuencias de comprobantes (e-NCF) se asignan por caja."
-        actions={canManage && <Button onClick={() => setBranchModal(true)}>Nueva sucursal</Button>}
+        actions={
+          canManage && (
+            <Button onClick={() => setBranchModal(true)}>Nueva sucursal</Button>
+          )
+        }
       />
 
       <ErrorNote message={error ?? actionError} />
       {!data && !error && <EmptyState>Cargando…</EmptyState>}
       {data && data.branches.length === 0 && (
-        <EmptyState>Aún no hay sucursales. Crea la primera para poder registrar cajas.</EmptyState>
+        <EmptyState>
+          Aún no hay sucursales. Crea la primera para poder registrar cajas.
+        </EmptyState>
       )}
 
       <div className="space-y-4">
@@ -69,14 +97,21 @@ export function SucursalesView() {
               <header className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
                 <div>
                   <h2 className="font-semibold">
-                    {b.name} <span className="font-mono text-sm font-normal text-zinc-500">{b.code}</span>
+                    {b.name}{" "}
+                    <span className="font-mono text-sm font-normal text-zinc-500">
+                      {b.code}
+                    </span>
                     {!b.active && (
                       <span className="ml-2">
                         <Badge tone="warning">Inactiva</Badge>
                       </span>
                     )}
                   </h2>
-                  {b.address && <p className="text-sm text-zinc-600 dark:text-zinc-400">{b.address}</p>}
+                  {b.address && (
+                    <p className="text-sm text-zinc-600 dark:text-zinc-400">
+                      {b.address}
+                    </p>
+                  )}
                 </div>
                 {canManage && (
                   <div className="flex gap-1">
@@ -101,7 +136,8 @@ export function SucursalesView() {
                     className={`flex items-center justify-between px-4 py-2.5 text-sm ${t.active ? "" : "opacity-60"}`}
                   >
                     <span>
-                      {t.name} <span className="font-mono text-xs text-zinc-500">{t.code}</span>
+                      {t.name}{" "}
+                      <span className="font-mono text-xs text-zinc-500">{t.code}</span>
                       {!t.active && (
                         <span className="ml-2">
                           <Badge tone="warning">Inactiva</Badge>
@@ -121,11 +157,16 @@ export function SucursalesView() {
         })}
       </div>
 
-      <Modal open={branchModal} onClose={() => setBranchModal(false)} title="Nueva sucursal">
+      <Modal
+        open={branchModal}
+        onClose={() => setBranchModal(false)}
+        title="Nueva sucursal"
+      >
         {branchModal && (
           <BranchForm
             onDone={() => {
               setBranchModal(false);
+              toast("Sucursal creada");
               reload();
             }}
           />
@@ -143,6 +184,7 @@ export function SucursalesView() {
             branches={data?.branches.filter((b) => b.active) ?? []}
             onDone={() => {
               setTerminalFor(null);
+              toast("Caja creada");
               reload();
             }}
           />
@@ -246,7 +288,14 @@ function TerminalForm({
       </Field>
       <div className="grid grid-cols-3 gap-4">
         <Field label="Nombre" className="col-span-2">
-          <Input name="name" required minLength={2} maxLength={120} placeholder="Caja 1" autoFocus />
+          <Input
+            name="name"
+            required
+            minLength={2}
+            maxLength={120}
+            placeholder="Caja 1"
+            autoFocus
+          />
         </Field>
         <Field label="Código" hint="Ej: C01">
           <Input name="code" required maxLength={20} />
