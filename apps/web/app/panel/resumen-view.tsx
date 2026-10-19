@@ -14,21 +14,27 @@ export function ResumenView() {
 
   const load = useCallback(async () => {
     const today = todayLocal();
-    const [products, customers, branches, terminals, drafts, sales] = await Promise.all([
-      unwrap(await api.v1.products.$get({ query: { pageSize: "1", active: "true" } })),
-      unwrap(await api.v1.customers.$get({ query: { pageSize: "1", active: "true" } })),
-      unwrap(await api.v1.branches.$get()),
-      unwrap(await api.v1.terminals.$get({ query: {} })),
-      unwrap(await api.v1.documents.$get({ query: { status: "DRAFT", pageSize: "1" } })),
-      // Los reportes son solo para propietarios y administradores.
-      canManage
-        ? unwrap(
-            await api.v1.reports.sales.$get({
-              query: { from: monthStartLocal(), to: today, groupBy: "day" },
-            }),
-          )
-        : null,
-    ]);
+    const [products, customers, branches, terminals, drafts, lowStock, sales] =
+      await Promise.all([
+        unwrap(await api.v1.products.$get({ query: { pageSize: "1", active: "true" } })),
+        unwrap(await api.v1.customers.$get({ query: { pageSize: "1", active: "true" } })),
+        unwrap(await api.v1.branches.$get()),
+        unwrap(await api.v1.terminals.$get({ query: {} })),
+        unwrap(
+          await api.v1.documents.$get({ query: { status: "DRAFT", pageSize: "1" } }),
+        ),
+        unwrap(
+          await api.v1.inventory.stock.$get({ query: { low: "true", pageSize: "1" } }),
+        ),
+        // Los reportes son solo para propietarios y administradores.
+        canManage
+          ? unwrap(
+              await api.v1.reports.sales.$get({
+                query: { from: monthStartLocal(), to: today, groupBy: "day" },
+              }),
+            )
+          : null,
+      ]);
     const todayRow = sales?.data.series.find((r) => r.period === today);
     return {
       products: products.total,
@@ -36,6 +42,7 @@ export function ResumenView() {
       branches: branches.data.length,
       terminals: terminals.data.length,
       drafts: drafts.total,
+      lowStock: lowStock.total,
       sales: sales?.data ?? null,
       todayTotal: todayRow?.total ?? "0.00",
       todayCount: todayRow?.count ?? 0,
@@ -127,6 +134,19 @@ export function ResumenView() {
           </Link>
         ))}
       </section>
+
+      {data && data.lowStock > 0 && (
+        <Link
+          href="/panel/inventario?stock=bajo"
+          className="block rounded-md bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:bg-amber-950 dark:text-amber-200"
+        >
+          {data.lowStock}{" "}
+          {data.lowStock === 1
+            ? "producto con stock bajo o agotado"
+            : "productos con stock bajo o agotado"}
+          . <span className="font-medium underline">Ver inventario</span>
+        </Link>
+      )}
 
       {data && data.branches === 0 && (
         <p className="rounded-md bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:bg-amber-950 dark:text-amber-200">

@@ -12,6 +12,7 @@ const NAV: { href: string; label: string; adminOnly?: boolean }[] = [
   { href: "/panel/facturas", label: "Facturas" },
   { href: "/panel/reportes", label: "Reportes", adminOnly: true },
   { href: "/panel/productos", label: "Productos" },
+  { href: "/panel/inventario", label: "Inventario" },
   { href: "/panel/clientes", label: "Clientes" },
   { href: "/panel/sucursales", label: "Sucursales y cajas" },
   { href: "/panel/fiscal", label: "Configuración fiscal" },

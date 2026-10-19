@@ -188,6 +188,11 @@ export function ProductosView() {
                 <td className={tableStyles.td}>{categoryName(p.categoryId)}</td>
                 <td className={tableStyles.td}>
                   <Badge>{TAX_LABELS[p.tax as TaxCode]}</Badge>
+                  {p.trackInventory && (
+                    <span className="ml-1">
+                      <Badge tone="success">Inventario</Badge>
+                    </span>
+                  )}
                 </td>
                 <td className={`${tableStyles.td} text-right tabular-nums`}>
                   {formatDop(toCents(p.price))}
@@ -274,6 +279,7 @@ function ProductForm({
   const { toast } = useDialogs();
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [track, setTrack] = useState(product?.trackInventory ?? false);
 
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -293,6 +299,8 @@ function ProductForm({
       unit: text("unit") || "UND",
       priceIncludesTax: f.get("priceIncludesTax") === "on",
       allowsDecimals: f.get("allowsDecimals") === "on",
+      trackInventory: track,
+      minStock: track ? text("minStock").replace(",", ".") || "0" : "0",
     };
 
     try {
@@ -373,6 +381,25 @@ function ProductForm({
         label="Se vende por peso o fracciones (acepta decimales)"
         defaultChecked={product?.allowsDecimals ?? false}
       />
+      <div className="space-y-3 rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
+        <Checkbox
+          label="Controlar inventario (se descuenta al emitir una factura)"
+          checked={track}
+          onChange={(e) => setTrack(e.target.checked)}
+        />
+        {track && (
+          <Field
+            label="Existencia mínima"
+            hint="Se avisa cuando la existencia llegue a esta cantidad"
+          >
+            <Input
+              name="minStock"
+              inputMode="decimal"
+              defaultValue={product?.minStock ?? "0"}
+            />
+          </Field>
+        )}
+      </div>
       <Field label="Descripción">
         <Textarea name="description" rows={2} defaultValue={product?.description ?? ""} />
       </Field>
