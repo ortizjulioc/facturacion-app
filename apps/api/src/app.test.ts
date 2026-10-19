@@ -14,7 +14,12 @@ type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-ex
 describe.skipIf(!hasDb)("API de punta a punta", () => {
   const env = loadEnv({ ...process.env, NODE_ENV: "test", LOG_LEVEL: "error" });
   const prisma = createPrisma({ connectionString: env.DATABASE_URL, max: 3 });
-  const app = createApp({ env, prisma, auth: createAuth(prisma, env), logger: createLogger(env) });
+  const app = createApp({
+    env,
+    prisma,
+    auth: createAuth(prisma, env),
+    logger: createLogger(env),
+  });
   const origin = env.WEB_ORIGIN.split(",")[0]!;
   const tag = randomUUID().slice(0, 8);
   const createdOrgs: string[] = [];
@@ -36,8 +41,10 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
   };
   const send = (method: string, path: string, body: unknown, cookie?: string) =>
     call(path, { method, body: JSON.stringify(body), cookie });
-  const post = (path: string, body: unknown, cookie?: string) => send("POST", path, body, cookie);
-  const patch = (path: string, body: unknown, cookie?: string) => send("PATCH", path, body, cookie);
+  const post = (path: string, body: unknown, cookie?: string) =>
+    send("POST", path, body, cookie);
+  const patch = (path: string, body: unknown, cookie?: string) =>
+    send("PATCH", path, body, cookie);
   const get = (path: string, cookie?: string) => call(path, { cookie });
   const json = async (res: Response) => (await res.json()) as Json;
 
@@ -73,7 +80,11 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
   }
 
   async function setActive(orgId: string, cookie: string) {
-    const res = await post("/api/auth/organization/set-active", { organizationId: orgId }, cookie);
+    const res = await post(
+      "/api/auth/organization/set-active",
+      { organizationId: orgId },
+      cookie,
+    );
     expect(res.status).toBe(200);
     const refreshed = cookiesOf(res);
     return refreshed || cookie;
@@ -111,24 +122,41 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       const a = await owner("sa");
       const b = await owner("sb");
 
-      const created = await post("/v1/branches", { name: "Tienda Centro", code: "CEN-1" }, a.cookie);
+      const created = await post(
+        "/v1/branches",
+        { name: "Tienda Centro", code: "CEN-1" },
+        a.cookie,
+      );
       expect(created.status).toBe(201);
       const branch = (await json(created)).data;
 
-      expect((await json(await get("/v1/branches", a.cookie))).data.map((x: Json) => x.code)).toEqual([
-        "CEN-1",
-      ]);
+      expect(
+        (await json(await get("/v1/branches", a.cookie))).data.map((x: Json) => x.code),
+      ).toEqual(["CEN-1"]);
       expect((await json(await get("/v1/branches", b.cookie))).data).toEqual([]);
 
       // El mismo código sirve en otra empresa, pero no se repite dentro de la misma.
-      expect((await post("/v1/branches", { name: "Otra", code: "CEN-1" }, b.cookie)).status).toBe(201);
-      expect((await post("/v1/branches", { name: "Dup", code: "CEN-1" }, a.cookie)).status).toBe(409);
+      expect(
+        (await post("/v1/branches", { name: "Otra", code: "CEN-1" }, b.cookie)).status,
+      ).toBe(201);
+      expect(
+        (await post("/v1/branches", { name: "Dup", code: "CEN-1" }, a.cookie)).status,
+      ).toBe(409);
 
-      const edited = await patch(`/v1/branches/${branch.id}`, { name: "Centro Plaza" }, a.cookie);
-      expect((await json(edited)).data).toMatchObject({ name: "Centro Plaza", code: "CEN-1" });
+      const edited = await patch(
+        `/v1/branches/${branch.id}`,
+        { name: "Centro Plaza" },
+        a.cookie,
+      );
+      expect((await json(edited)).data).toMatchObject({
+        name: "Centro Plaza",
+        code: "CEN-1",
+      });
 
       // Otra empresa no puede editarla: para ella no existe.
-      expect((await patch(`/v1/branches/${branch.id}`, { name: "x1" }, b.cookie)).status).toBe(404);
+      expect(
+        (await patch(`/v1/branches/${branch.id}`, { name: "x1" }, b.cookie)).status,
+      ).toBe(404);
     });
 
     it("valida la entrada con mensajes claros", async () => {
@@ -143,15 +171,32 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     it("las cajas solo se crean en sucursales propias", async () => {
       const a = await owner("ta");
       const b = await owner("tb");
-      const branchA = (await json(await post("/v1/branches", { name: "Matriz", code: "M1" }, a.cookie)))
-        .data;
+      const branchA = (
+        await json(await post("/v1/branches", { name: "Matriz", code: "M1" }, a.cookie))
+      ).data;
 
-      const ok = await post("/v1/terminals", { branchId: branchA.id, name: "Caja 1", code: "C1" }, a.cookie);
+      const ok = await post(
+        "/v1/terminals",
+        { branchId: branchA.id, name: "Caja 1", code: "C1" },
+        a.cookie,
+      );
       expect(ok.status).toBe(201);
-      expect((await post("/v1/terminals", { branchId: branchA.id, name: "Caja 1", code: "C1" }, a.cookie)).status).toBe(409);
+      expect(
+        (
+          await post(
+            "/v1/terminals",
+            { branchId: branchA.id, name: "Caja 1", code: "C1" },
+            a.cookie,
+          )
+        ).status,
+      ).toBe(409);
 
       // La sucursal de A no existe para B (RLS).
-      const cross = await post("/v1/terminals", { branchId: branchA.id, name: "Caja X", code: "CX" }, b.cookie);
+      const cross = await post(
+        "/v1/terminals",
+        { branchId: branchA.id, name: "Caja X", code: "CX" },
+        b.cookie,
+      );
       expect(cross.status).toBe(422);
       expect((await json(await get("/v1/terminals", b.cookie))).data).toEqual([]);
     });
@@ -160,7 +205,11 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
   describe("productos y categorías", () => {
     it("crea productos con valores por defecto y devuelve el precio como texto", async () => {
       const { cookie } = await owner("p1");
-      const res = await post("/v1/products", { name: "Agua 500ml", price: "35.50", barcode: "7461234" }, cookie);
+      const res = await post(
+        "/v1/products",
+        { name: "Agua 500ml", price: "35.50", barcode: "7461234" },
+        cookie,
+      );
       expect(res.status).toBe(201);
       expect((await json(res)).data).toMatchObject({
         name: "Agua 500ml",
@@ -177,26 +226,58 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     it("PATCH parcial no pisa los demás campos", async () => {
       const { cookie } = await owner("p2");
       const created = (
-        await json(await post("/v1/products", { name: "Arroz", price: "60", tax: "EXENTO", unit: "LB" }, cookie))
+        await json(
+          await post(
+            "/v1/products",
+            { name: "Arroz", price: "60", tax: "EXENTO", unit: "LB" },
+            cookie,
+          ),
+        )
       ).data;
-      const updated = (await json(await patch(`/v1/products/${created.id}`, { price: "65.25" }, cookie))).data;
-      expect(updated).toMatchObject({ price: "65.25", tax: "EXENTO", unit: "LB", name: "Arroz" });
+      const updated = (
+        await json(await patch(`/v1/products/${created.id}`, { price: "65.25" }, cookie))
+      ).data;
+      expect(updated).toMatchObject({
+        price: "65.25",
+        tax: "EXENTO",
+        unit: "LB",
+        name: "Arroz",
+      });
     });
 
     it("rechaza precios inválidos y códigos duplicados", async () => {
       const { cookie } = await owner("p3");
-      expect((await post("/v1/products", { name: "Malo", price: "12.345" }, cookie)).status).toBe(400);
-      expect((await post("/v1/products", { name: "Malo", price: "-5" }, cookie)).status).toBe(400);
+      expect(
+        (await post("/v1/products", { name: "Malo", price: "12.345" }, cookie)).status,
+      ).toBe(400);
+      expect(
+        (await post("/v1/products", { name: "Malo", price: "-5" }, cookie)).status,
+      ).toBe(400);
 
-      await post("/v1/products", { name: "A", price: "1", sku: "SKU-1", barcode: "111111" }, cookie);
-      expect((await post("/v1/products", { name: "B", price: "1", sku: "SKU-1" }, cookie)).status).toBe(409);
-      expect((await post("/v1/products", { name: "C", price: "1", barcode: "111111" }, cookie)).status).toBe(409);
+      await post(
+        "/v1/products",
+        { name: "A", price: "1", sku: "SKU-1", barcode: "111111" },
+        cookie,
+      );
+      expect(
+        (await post("/v1/products", { name: "B", price: "1", sku: "SKU-1" }, cookie))
+          .status,
+      ).toBe(409);
+      expect(
+        (await post("/v1/products", { name: "C", price: "1", barcode: "111111" }, cookie))
+          .status,
+      ).toBe(409);
     });
 
     it("busca por texto, por categoría y por código de barras", async () => {
       const { cookie } = await owner("p4");
-      const cat = (await json(await post("/v1/categories", { name: "Bebidas" }, cookie))).data;
-      await post("/v1/products", { name: "Coca Cola 2L", price: "120", categoryId: cat.id, barcode: "0001" }, cookie);
+      const cat = (await json(await post("/v1/categories", { name: "Bebidas" }, cookie)))
+        .data;
+      await post(
+        "/v1/products",
+        { name: "Coca Cola 2L", price: "120", categoryId: cat.id, barcode: "0001" },
+        cookie,
+      );
       await post("/v1/products", { name: "Pan", price: "10", barcode: "0002" }, cookie);
 
       const byText = await json(await get("/v1/products?q=coca", cookie));
@@ -213,7 +294,8 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
 
     it("pagina resultados", async () => {
       const { cookie } = await owner("p5");
-      for (const n of ["a", "b", "c"]) await post("/v1/products", { name: `Prod ${n}`, price: "1" }, cookie);
+      for (const n of ["a", "b", "c"])
+        await post("/v1/products", { name: `Prod ${n}`, price: "1" }, cookie);
       const page2 = await json(await get("/v1/products?pageSize=2&page=2", cookie));
       expect(page2).toMatchObject({ total: 3, page: 2, pageSize: 2 });
       expect(page2.data).toHaveLength(1);
@@ -221,56 +303,121 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
 
     it("desactivar no borra: el producto deja de salir en la caja", async () => {
       const { cookie } = await owner("p6");
-      const p = (await json(await post("/v1/products", { name: "Viejo", price: "5", barcode: "0099" }, cookie))).data;
-      expect((await call(`/v1/products/${p.id}`, { method: "DELETE", cookie })).status).toBe(204);
+      const p = (
+        await json(
+          await post(
+            "/v1/products",
+            { name: "Viejo", price: "5", barcode: "0099" },
+            cookie,
+          ),
+        )
+      ).data;
+      expect(
+        (await call(`/v1/products/${p.id}`, { method: "DELETE", cookie })).status,
+      ).toBe(204);
       expect((await get("/v1/products/by-barcode/0099", cookie)).status).toBe(404);
-      expect((await json(await get(`/v1/products/${p.id}`, cookie))).data.active).toBe(false);
+      expect((await json(await get(`/v1/products/${p.id}`, cookie))).data.active).toBe(
+        false,
+      );
       expect((await json(await get("/v1/products?active=true", cookie))).total).toBe(0);
     });
 
     it("aísla productos y categorías entre empresas", async () => {
       const a = await owner("p7a");
       const b = await owner("p7b");
-      const cat = (await json(await post("/v1/categories", { name: "Privada" }, a.cookie))).data;
-      const prod = (await json(await post("/v1/products", { name: "Secreto", price: "9" }, a.cookie))).data;
+      const cat = (
+        await json(await post("/v1/categories", { name: "Privada" }, a.cookie))
+      ).data;
+      const prod = (
+        await json(await post("/v1/products", { name: "Secreto", price: "9" }, a.cookie))
+      ).data;
 
       expect((await get(`/v1/products/${prod.id}`, b.cookie)).status).toBe(404);
-      expect((await patch(`/v1/products/${prod.id}`, { price: "1" }, b.cookie)).status).toBe(404);
-      expect((await call(`/v1/products/${prod.id}`, { method: "DELETE", cookie: b.cookie })).status).toBe(404);
+      expect(
+        (await patch(`/v1/products/${prod.id}`, { price: "1" }, b.cookie)).status,
+      ).toBe(404);
+      expect(
+        (await call(`/v1/products/${prod.id}`, { method: "DELETE", cookie: b.cookie }))
+          .status,
+      ).toBe(404);
       expect((await json(await get("/v1/products", b.cookie))).total).toBe(0);
 
       // No se puede asignar una categoría ajena.
-      const steal = await post("/v1/products", { name: "Robo", price: "1", categoryId: cat.id }, b.cookie);
+      const steal = await post(
+        "/v1/products",
+        { name: "Robo", price: "1", categoryId: cat.id },
+        b.cookie,
+      );
       expect(steal.status).toBe(422);
     });
 
     it("borrar una categoría deja los productos sin categoría", async () => {
       const { cookie } = await owner("p8");
-      const cat = (await json(await post("/v1/categories", { name: "Temporal" }, cookie))).data;
-      const p = (await json(await post("/v1/products", { name: "X", price: "1", categoryId: cat.id }, cookie))).data;
-      expect((await call(`/v1/categories/${cat.id}`, { method: "DELETE", cookie })).status).toBe(204);
-      expect((await json(await get(`/v1/products/${p.id}`, cookie))).data.categoryId).toBeNull();
+      const cat = (await json(await post("/v1/categories", { name: "Temporal" }, cookie)))
+        .data;
+      const p = (
+        await json(
+          await post(
+            "/v1/products",
+            { name: "X", price: "1", categoryId: cat.id },
+            cookie,
+          ),
+        )
+      ).data;
+      expect(
+        (await call(`/v1/categories/${cat.id}`, { method: "DELETE", cookie })).status,
+      ).toBe(204);
+      expect(
+        (await json(await get(`/v1/products/${p.id}`, cookie))).data.categoryId,
+      ).toBeNull();
     });
   });
 
   describe("clientes", () => {
     it("normaliza el RNC y la cédula", async () => {
       const { cookie } = await owner("c1");
-      const rnc = await post("/v1/customers", { name: "Acme SRL", documentType: "RNC", documentNumber: "1-01-00157-7" }, cookie);
+      const rnc = await post(
+        "/v1/customers",
+        { name: "Acme SRL", documentType: "RNC", documentNumber: "1-01-00157-7" },
+        cookie,
+      );
       expect(rnc.status).toBe(201);
-      expect((await json(rnc)).data).toMatchObject({ documentType: "RNC", documentNumber: "101001577" });
+      expect((await json(rnc)).data).toMatchObject({
+        documentType: "RNC",
+        documentNumber: "101001577",
+      });
 
-      const ced = await post("/v1/customers", { name: "Juan", documentType: "CEDULA", documentNumber: "001-1234567-8" }, cookie);
+      const ced = await post(
+        "/v1/customers",
+        { name: "Juan", documentType: "CEDULA", documentNumber: "001-1234567-8" },
+        cookie,
+      );
       expect((await json(ced)).data.documentNumber).toBe("00112345678");
     });
 
     it("exige tipo y número juntos, y formato válido", async () => {
       const { cookie } = await owner("c2");
-      expect((await post("/v1/customers", { name: "A", documentType: "RNC" }, cookie)).status).toBe(422);
-      expect((await post("/v1/customers", { name: "A", documentNumber: "123" }, cookie)).status).toBe(422);
-      expect((await post("/v1/customers", { name: "A", documentType: "RNC", documentNumber: "123" }, cookie)).status).toBe(422);
+      expect(
+        (await post("/v1/customers", { name: "A", documentType: "RNC" }, cookie)).status,
+      ).toBe(422);
+      expect(
+        (await post("/v1/customers", { name: "A", documentNumber: "123" }, cookie))
+          .status,
+      ).toBe(422);
+      expect(
+        (
+          await post(
+            "/v1/customers",
+            { name: "A", documentType: "RNC", documentNumber: "123" },
+            cookie,
+          )
+        ).status,
+      ).toBe(422);
       expect((await post("/v1/customers", { name: "Sin doc" }, cookie)).status).toBe(201);
-      expect((await post("/v1/customers", { name: "Mal correo", email: "nope" }, cookie)).status).toBe(400);
+      expect(
+        (await post("/v1/customers", { name: "Mal correo", email: "nope" }, cookie))
+          .status,
+      ).toBe(400);
     });
 
     it("no repite documentos dentro de la empresa, pero sí entre empresas", async () => {
@@ -285,19 +432,33 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     it("busca por nombre o documento y edita sin tocar el documento", async () => {
       const { cookie } = await owner("c4");
       const c = (
-        await json(await post("/v1/customers", { name: "Ferretería Lopez", documentType: "RNC", documentNumber: "101234567" }, cookie))
+        await json(
+          await post(
+            "/v1/customers",
+            {
+              name: "Ferretería Lopez",
+              documentType: "RNC",
+              documentNumber: "101234567",
+            },
+            cookie,
+          ),
+        )
       ).data;
       expect((await json(await get("/v1/customers?q=lopez", cookie))).total).toBe(1);
       expect((await json(await get("/v1/customers?q=1-01-23456", cookie))).total).toBe(1);
 
       const upd = await patch(`/v1/customers/${c.id}`, { phone: "809-555-0100" }, cookie);
-      expect((await json(upd)).data).toMatchObject({ phone: "809-555-0100", documentNumber: "101234567" });
+      expect((await json(upd)).data).toMatchObject({
+        phone: "809-555-0100",
+        documentNumber: "101234567",
+      });
     });
 
     it("aísla clientes entre empresas", async () => {
       const a = await owner("c5a");
       const b = await owner("c5b");
-      const c = (await json(await post("/v1/customers", { name: "Privado" }, a.cookie))).data;
+      const c = (await json(await post("/v1/customers", { name: "Privado" }, a.cookie)))
+        .data;
       expect((await get(`/v1/customers/${c.id}`, b.cookie)).status).toBe(404);
       expect((await json(await get("/v1/customers", b.cookie))).total).toBe(0);
     });
@@ -308,16 +469,27 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       const boss = await owner("r1");
       const worker = await signUp("r1w");
       await prisma.member.create({
-        data: { id: randomUUID(), organizationId: boss.orgId, userId: worker.userId, role: "member" },
+        data: {
+          id: randomUUID(),
+          organizationId: boss.orgId,
+          userId: worker.userId,
+          role: "member",
+        },
       });
       const cookie = await setActive(boss.orgId, worker.cookie);
 
       await post("/v1/products", { name: "Visible", price: "5" }, boss.cookie);
       expect((await json(await get("/v1/products", cookie))).total).toBe(1);
 
-      expect((await post("/v1/products", { name: "Nuevo", price: "5" }, cookie)).status).toBe(403);
-      expect((await post("/v1/branches", { name: "Otra", code: "O1" }, cookie)).status).toBe(403);
-      expect((await post("/v1/customers", { name: "Cliente de caja" }, cookie)).status).toBe(201);
+      expect(
+        (await post("/v1/products", { name: "Nuevo", price: "5" }, cookie)).status,
+      ).toBe(403);
+      expect(
+        (await post("/v1/branches", { name: "Otra", code: "O1" }, cookie)).status,
+      ).toBe(403);
+      expect(
+        (await post("/v1/customers", { name: "Cliente de caja" }, cookie)).status,
+      ).toBe(201);
     });
   });
 
@@ -325,7 +497,12 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     it("lista los códigos de impuesto", async () => {
       const { cookie } = await owner("k1");
       const body = await json(await get("/v1/tax-codes", cookie));
-      expect(body.data.map((t: Json) => t.code)).toEqual(["ITBIS18", "ITBIS16", "ITBIS0", "EXENTO"]);
+      expect(body.data.map((t: Json) => t.code)).toEqual([
+        "ITBIS18",
+        "ITBIS16",
+        "ITBIS0",
+        "EXENTO",
+      ]);
       expect(body.data[0].rateBps).toBe(1800);
     });
 
@@ -356,7 +533,11 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
 
     it("rechaza líneas inválidas", async () => {
       const { cookie } = await owner("k3");
-      const bad = await post("/v1/calculate", { lines: [{ unitPrice: "1", quantity: "1.5555", tax: "ITBIS18" }] }, cookie);
+      const bad = await post(
+        "/v1/calculate",
+        { lines: [{ unitPrice: "1", quantity: "1.5555", tax: "ITBIS18" }] },
+        cookie,
+      );
       expect(bad.status).toBe(400);
       expect((await post("/v1/calculate", { lines: [] }, cookie)).status).toBe(400);
     });
@@ -370,7 +551,12 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     address: "Calle Principal 1, Santo Domingo",
     environment: "TEST",
   };
-  const seqBody = (ecfType: string, fromNumber: number, toNumber: number, extra: object = {}) => ({
+  const seqBody = (
+    ecfType: string,
+    fromNumber: number,
+    toNumber: number,
+    extra: object = {},
+  ) => ({
     ecfType,
     fromNumber,
     toNumber,
@@ -379,17 +565,30 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
   });
 
   /** Empresa con sucursal, un producto de RD$118.00 (ITBIS incluido) y, opcionalmente, datos fiscales y secuencias. */
-  async function billing(label: string, opts: { profile?: boolean; seqs?: [string, number, number][] } = {}) {
+  async function billing(
+    label: string,
+    opts: { profile?: boolean; seqs?: [string, number, number][] } = {},
+  ) {
     const o = await owner(label);
-    const branch = (await json(await post("/v1/branches", { name: "Principal", code: "P1" }, o.cookie))).data;
+    const branch = (
+      await json(await post("/v1/branches", { name: "Principal", code: "P1" }, o.cookie))
+    ).data;
     const product = (
-      await json(await post("/v1/products", { name: "Producto 118", price: "118.00", tax: "ITBIS18" }, o.cookie))
+      await json(
+        await post(
+          "/v1/products",
+          { name: "Producto 118", price: "118.00", tax: "ITBIS18" },
+          o.cookie,
+        ),
+      )
     ).data;
     if (opts.profile !== false) {
       expect((await send("PUT", "/v1/company", profileBody, o.cookie)).status).toBe(200);
     }
     for (const [type, from, to] of opts.seqs ?? []) {
-      expect((await post("/v1/sequences", seqBody(type, from, to), o.cookie)).status).toBe(201);
+      expect(
+        (await post("/v1/sequences", seqBody(type, from, to), o.cookie)).status,
+      ).toBe(201);
     }
     return { ...o, branch, product };
   }
@@ -407,7 +606,8 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     expect(res.status, JSON.stringify(await res.clone().json())).toBe(201);
     return (await json(res)).data as Json;
   };
-  const issue = (b: Billing, id: string) => post(`/v1/documents/${id}/issue`, {}, b.cookie);
+  const issue = (b: Billing, id: string) =>
+    post(`/v1/documents/${id}/issue`, {}, b.cookie);
   const error = async (res: Response) => (await json(res)).error as string;
 
   describe("datos fiscales y secuencias", () => {
@@ -415,13 +615,26 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       const b = await billing("f1", { profile: false });
       expect((await json(await get("/v1/company", b.cookie))).data).toBeNull();
 
-      const bad = await send("PUT", "/v1/company", { ...profileBody, rnc: "123" }, b.cookie);
+      const bad = await send(
+        "PUT",
+        "/v1/company",
+        { ...profileBody, rnc: "123" },
+        b.cookie,
+      );
       expect(bad.status).toBe(422);
 
       const ok = await send("PUT", "/v1/company", profileBody, b.cookie);
-      expect((await json(ok)).data).toMatchObject({ rnc: "101001577", environment: "TEST" });
+      expect((await json(ok)).data).toMatchObject({
+        rnc: "101001577",
+        environment: "TEST",
+      });
       // Es idempotente: una segunda llamada actualiza, no duplica.
-      const again = await send("PUT", "/v1/company", { ...profileBody, tradeName: "Mi Colmado" }, b.cookie);
+      const again = await send(
+        "PUT",
+        "/v1/company",
+        { ...profileBody, tradeName: "Mi Colmado" },
+        b.cookie,
+      );
       expect((await json(again)).data.tradeName).toBe("Mi Colmado");
     });
 
@@ -429,12 +642,31 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       const b = await billing("f2");
       const created = await post("/v1/sequences", seqBody("E32", 1, 100), b.cookie);
       expect(created.status).toBe(201);
-      expect((await json(created)).data).toMatchObject({ fromNumber: 1, toNumber: 100, nextNumber: 1, remaining: 100 });
+      expect((await json(created)).data).toMatchObject({
+        fromNumber: 1,
+        toNumber: 100,
+        nextNumber: 1,
+        remaining: 100,
+      });
 
-      expect((await post("/v1/sequences", seqBody("E32", 50, 150), b.cookie)).status).toBe(409);
-      expect((await post("/v1/sequences", seqBody("E31", 50, 150), b.cookie)).status).toBe(201); // otro tipo: sin conflicto
-      expect((await post("/v1/sequences", seqBody("E32", 200, 100), b.cookie)).status).toBe(400);
-      expect((await post("/v1/sequences", seqBody("E32", 101, 200, { terminalId: randomUUID() }), b.cookie)).status).toBe(422);
+      expect(
+        (await post("/v1/sequences", seqBody("E32", 50, 150), b.cookie)).status,
+      ).toBe(409);
+      expect(
+        (await post("/v1/sequences", seqBody("E31", 50, 150), b.cookie)).status,
+      ).toBe(201); // otro tipo: sin conflicto
+      expect(
+        (await post("/v1/sequences", seqBody("E32", 200, 100), b.cookie)).status,
+      ).toBe(400);
+      expect(
+        (
+          await post(
+            "/v1/sequences",
+            seqBody("E32", 101, 200, { terminalId: randomUUID() }),
+            b.cookie,
+          )
+        ).status,
+      ).toBe(422);
     });
 
     it("permite ampliar el rango pero no recortarlo por debajo de lo emitido", async () => {
@@ -444,21 +676,34 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
 
       const seq = (await json(await get("/v1/sequences", b.cookie))).data[0];
       expect(seq).toMatchObject({ nextNumber: 2, remaining: 9 });
-      expect((await patch(`/v1/sequences/${seq.id}`, { toNumber: 50 }, b.cookie)).status).toBe(200);
-      expect((await patch(`/v1/sequences/${seq.id}`, { toNumber: 0 }, b.cookie)).status).toBe(400);
-      expect((await patch(`/v1/sequences/${seq.id}`, { active: false }, b.cookie)).status).toBe(200);
+      expect(
+        (await patch(`/v1/sequences/${seq.id}`, { toNumber: 50 }, b.cookie)).status,
+      ).toBe(200);
+      expect(
+        (await patch(`/v1/sequences/${seq.id}`, { toNumber: 0 }, b.cookie)).status,
+      ).toBe(400);
+      expect(
+        (await patch(`/v1/sequences/${seq.id}`, { active: false }, b.cookie)).status,
+      ).toBe(200);
     });
 
     it("el cajero (member) no puede cambiar datos fiscales ni secuencias", async () => {
       const b = await billing("f4");
       const cashier = await signUp("f4c");
       await prisma.member.create({
-        data: { id: randomUUID(), organizationId: b.orgId, userId: cashier.userId, role: "member" },
+        data: {
+          id: randomUUID(),
+          organizationId: b.orgId,
+          userId: cashier.userId,
+          role: "member",
+        },
       });
       const cookie = await setActive(b.orgId, cashier.cookie);
 
       expect((await send("PUT", "/v1/company", profileBody, cookie)).status).toBe(403);
-      expect((await post("/v1/sequences", seqBody("E32", 1, 10), cookie)).status).toBe(403);
+      expect((await post("/v1/sequences", seqBody("E32", 1, 10), cookie)).status).toBe(
+        403,
+      );
       expect((await get("/v1/company", cookie)).status).toBe(200); // puede leerlos
     });
   });
@@ -469,23 +714,47 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       const d = await createDraft(b, { total: "1.00", totals: { total: "1.00" } });
       expect(d.status).toBe("DRAFT");
       expect(d.encf).toBeNull();
-      expect(d.totals).toMatchObject({ base18: "200.00", tax18: "36.00", tax: "36.00", total: "236.00" });
-      expect(d.lines[0]).toMatchObject({ name: "Producto 118", quantity: "2", unitPrice: "118.00", total: "236.00" });
+      expect(d.totals).toMatchObject({
+        base18: "200.00",
+        tax18: "36.00",
+        tax: "36.00",
+        total: "236.00",
+      });
+      expect(d.lines[0]).toMatchObject({
+        name: "Producto 118",
+        quantity: "2",
+        unitPrice: "118.00",
+        total: "236.00",
+      });
     });
 
     it("aplica descuentos antes del impuesto", async () => {
       const b = await billing("d2");
       const d = await createDraft(b, {
-        lines: [{ productId: b.product.id, quantity: "2", discount: { type: "percent", bps: 1000 } }],
+        lines: [
+          {
+            productId: b.product.id,
+            quantity: "2",
+            discount: { type: "percent", bps: 1000 },
+          },
+        ],
         payments: [],
       });
-      expect(d.totals).toMatchObject({ discount: "23.60", total: "212.40", tax: "32.40" });
+      expect(d.totals).toMatchObject({
+        discount: "23.60",
+        total: "212.40",
+        tax: "32.40",
+      });
     });
 
     it("copia los datos del producto: cambiar el precio después no altera el comprobante", async () => {
       const b = await billing("d3");
       const d = await createDraft(b);
-      await patch(`/v1/products/${b.product.id}`, { price: "999.00", name: "Renombrado" }, b.cookie);
+      await patch(
+        `/v1/products/${b.product.id}`,
+        { price: "999.00", name: "Renombrado" },
+        b.cookie,
+      );
       const again = (await json(await get(`/v1/documents/${d.id}`, b.cookie))).data;
       expect(again.lines[0]).toMatchObject({ name: "Producto 118", unitPrice: "118.00" });
       expect(again.totals.total).toBe("236.00");
@@ -493,35 +762,66 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
 
     it("valida las líneas", async () => {
       const b = await billing("d4");
-      const lines = (l: Json[]) => post("/v1/documents", draftBody(b, { lines: l, payments: [] }), b.cookie);
+      const lines = (l: Json[]) =>
+        post("/v1/documents", draftBody(b, { lines: l, payments: [] }), b.cookie);
 
       // Sin producto, hay que dar nombre, precio e impuesto.
       expect((await lines([{ quantity: "1", name: "Servicio" }])).status).toBe(422);
-      const manual = await lines([{ quantity: "1", name: "Servicio", unitPrice: "100.00", tax: "ITBIS18" }]);
+      const manual = await lines([
+        { quantity: "1", name: "Servicio", unitPrice: "100.00", tax: "ITBIS18" },
+      ]);
       expect(manual.status).toBe(201);
       expect((await json(manual)).data.totals.total).toBe("118.00");
 
-      expect((await lines([{ productId: randomUUID(), quantity: "1" }])).status).toBe(422);
-      expect((await lines([{ productId: b.product.id, quantity: "1.5" }])).status).toBe(422); // no admite decimales
-      expect((await lines([{ productId: b.product.id, quantity: "0" }])).status).toBe(422);
+      expect((await lines([{ productId: randomUUID(), quantity: "1" }])).status).toBe(
+        422,
+      );
+      expect((await lines([{ productId: b.product.id, quantity: "1.5" }])).status).toBe(
+        422,
+      ); // no admite decimales
+      expect((await lines([{ productId: b.product.id, quantity: "0" }])).status).toBe(
+        422,
+      );
       expect((await lines([])).status).toBe(400);
       expect(
-        (await lines([{ productId: b.product.id, quantity: "1", discount: { type: "amount", amount: "500.00" } }])).status,
+        (
+          await lines([
+            {
+              productId: b.product.id,
+              quantity: "1",
+              discount: { type: "amount", amount: "500.00" },
+            },
+          ])
+        ).status,
       ).toBe(422); // descuento mayor que la línea
 
       await call(`/v1/products/${b.product.id}`, { method: "DELETE", cookie: b.cookie });
-      expect((await lines([{ productId: b.product.id, quantity: "1" }])).status).toBe(422); // producto inactivo
+      expect((await lines([{ productId: b.product.id, quantity: "1" }])).status).toBe(
+        422,
+      ); // producto inactivo
     });
 
     it("exige tasa de cambio solo en dólares", async () => {
       const b = await billing("d5");
       const usd = (rate: string) =>
-        post("/v1/documents", draftBody(b, { currency: "USD", exchangeRate: rate, payments: [] }), b.cookie);
+        post(
+          "/v1/documents",
+          draftBody(b, { currency: "USD", exchangeRate: rate, payments: [] }),
+          b.cookie,
+        );
       expect((await usd("1")).status).toBe(400);
       const ok = await usd("58.75");
       expect(ok.status).toBe(201);
       expect((await json(ok)).data.exchangeRate).toBe("58.75");
-      expect((await post("/v1/documents", draftBody(b, { exchangeRate: "58.75", payments: [] }), b.cookie)).status).toBe(400);
+      expect(
+        (
+          await post(
+            "/v1/documents",
+            draftBody(b, { exchangeRate: "58.75", payments: [] }),
+            b.cookie,
+          )
+        ).status,
+      ).toBe(400);
     });
 
     it("se puede reemplazar y eliminar mientras es borrador", async () => {
@@ -530,7 +830,10 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       const put = await send(
         "PUT",
         `/v1/documents/${d.id}`,
-        draftBody(b, { lines: [{ productId: b.product.id, quantity: "1" }], payments: [] }),
+        draftBody(b, {
+          lines: [{ productId: b.product.id, quantity: "1" }],
+          payments: [],
+        }),
         b.cookie,
       );
       expect(put.status).toBe(200);
@@ -539,18 +842,31 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       expect(updated.totals.total).toBe("118.00");
       expect(updated.payments).toHaveLength(0);
 
-      expect((await call(`/v1/documents/${d.id}`, { method: "DELETE", cookie: b.cookie })).status).toBe(204);
+      expect(
+        (await call(`/v1/documents/${d.id}`, { method: "DELETE", cookie: b.cookie }))
+          .status,
+      ).toBe(204);
       expect((await get(`/v1/documents/${d.id}`, b.cookie)).status).toBe(404);
     });
 
     it("rechaza sucursales, cajas y clientes de otra empresa", async () => {
       const a = await billing("d7a");
       const other = await billing("d7b");
-      const customer = (await json(await post("/v1/customers", { name: "De A" }, a.cookie))).data;
+      const customer = (
+        await json(await post("/v1/customers", { name: "De A" }, a.cookie))
+      ).data;
 
-      const forBranch = await post("/v1/documents", draftBody(other, { branchId: a.branch.id }), other.cookie);
+      const forBranch = await post(
+        "/v1/documents",
+        draftBody(other, { branchId: a.branch.id }),
+        other.cookie,
+      );
       expect(forBranch.status).toBe(422);
-      const forCustomer = await post("/v1/documents", draftBody(other, { customerId: customer.id }), other.cookie);
+      const forCustomer = await post(
+        "/v1/documents",
+        draftBody(other, { customerId: customer.id }),
+        other.cookie,
+      );
       expect(forCustomer.status).toBe(422);
     });
   });
@@ -572,7 +888,11 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       expect(await error(none)).toMatch(/secuencia/i);
 
       // Una secuencia vencida no sirve.
-      await post("/v1/sequences", seqBody("E32", 1, 10, { expiresAt: "2020-01-01" }), b.cookie);
+      await post(
+        "/v1/sequences",
+        seqBody("E32", 1, 10, { expiresAt: "2020-01-01" }),
+        b.cookie,
+      );
       expect((await issue(b, d.id)).status).toBe(422);
       // Una de otro tipo tampoco.
       await post("/v1/sequences", seqBody("E31", 1, 10), b.cookie);
@@ -592,21 +912,30 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       expect(doc).toMatchObject({ status: "ISSUED", encf: "E320000000001" });
       expect(doc.issuedAt).toBeTruthy();
 
-      expect((await json(await issue(b, (await createDraft(b)).id))).data.encf).toBe("E320000000002");
+      expect((await json(await issue(b, (await createDraft(b)).id))).data.encf).toBe(
+        "E320000000002",
+      );
 
       // Rango agotado.
       const third = await issue(b, (await createDraft(b)).id);
       expect(third.status).toBe(422);
 
       // Un comprobante emitido no se modifica, no se elimina ni se vuelve a emitir.
-      expect((await send("PUT", `/v1/documents/${doc.id}`, draftBody(b), b.cookie)).status).toBe(409);
-      expect((await call(`/v1/documents/${doc.id}`, { method: "DELETE", cookie: b.cookie })).status).toBe(409);
+      expect(
+        (await send("PUT", `/v1/documents/${doc.id}`, draftBody(b), b.cookie)).status,
+      ).toBe(409);
+      expect(
+        (await call(`/v1/documents/${doc.id}`, { method: "DELETE", cookie: b.cookie }))
+          .status,
+      ).toBe(409);
       expect((await issue(b, doc.id)).status).toBe(409);
     });
 
     it("exige que los pagos sumen el total", async () => {
       const b = await billing("e4", { seqs: [["E32", 1, 10]] });
-      const short = await createDraft(b, { payments: [{ method: "CASH", amount: "100.00" }] });
+      const short = await createDraft(b, {
+        payments: [{ method: "CASH", amount: "100.00" }],
+      });
       const res = await issue(b, short.id);
       expect(res.status).toBe(422);
       expect(await error(res)).toMatch(/pagos/i);
@@ -626,12 +955,28 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     it("prefiere la secuencia de la caja sobre la general", async () => {
       const b = await billing("e5", { seqs: [["E32", 1, 100]] });
       const terminal = (
-        await json(await post("/v1/terminals", { branchId: b.branch.id, name: "Caja 1", code: "C1" }, b.cookie))
+        await json(
+          await post(
+            "/v1/terminals",
+            { branchId: b.branch.id, name: "Caja 1", code: "C1" },
+            b.cookie,
+          ),
+        )
       ).data;
-      expect((await post("/v1/sequences", seqBody("E32", 500, 510, { terminalId: terminal.id }), b.cookie)).status).toBe(201);
+      expect(
+        (
+          await post(
+            "/v1/sequences",
+            seqBody("E32", 500, 510, { terminalId: terminal.id }),
+            b.cookie,
+          )
+        ).status,
+      ).toBe(201);
 
       const withTerminal = await createDraft(b, { terminalId: terminal.id });
-      expect((await json(await issue(b, withTerminal.id))).data.encf).toBe("E320000000500");
+      expect((await json(await issue(b, withTerminal.id))).data.encf).toBe(
+        "E320000000500",
+      );
       const without = await createDraft(b);
       expect((await json(await issue(b, without.id))).data.encf).toBe("E320000000001");
     });
@@ -642,15 +987,37 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       const results = await Promise.all(drafts.map((d) => issue(b, d.id)));
       expect(results.map((r) => r.status)).toEqual(Array(8).fill(200));
 
-      const encfs = (await Promise.all(results.map(async (r) => (await json(r)).data.encf as string))).sort();
-      expect(encfs).toEqual(Array.from({ length: 8 }, (_, i) => `E32${String(i + 1).padStart(10, "0")}`));
-      expect((await json(await get("/v1/sequences", b.cookie))).data[0].nextNumber).toBe(9);
+      const encfs = (
+        await Promise.all(results.map(async (r) => (await json(r)).data.encf as string))
+      ).sort();
+      expect(encfs).toEqual(
+        Array.from({ length: 8 }, (_, i) => `E32${String(i + 1).padStart(10, "0")}`),
+      );
+      expect((await json(await get("/v1/sequences", b.cookie))).data[0].nextNumber).toBe(
+        9,
+      );
     });
 
     it("la factura de crédito fiscal (E31) exige un cliente con RNC", async () => {
       const b = await billing("e7", { seqs: [["E31", 1, 10]] });
-      const consumer = (await json(await post("/v1/customers", { name: "Juan", documentType: "CEDULA", documentNumber: "00112345678" }, b.cookie))).data;
-      const company = (await json(await post("/v1/customers", { name: "Acme SRL", documentType: "RNC", documentNumber: "131246796" }, b.cookie))).data;
+      const consumer = (
+        await json(
+          await post(
+            "/v1/customers",
+            { name: "Juan", documentType: "CEDULA", documentNumber: "00112345678" },
+            b.cookie,
+          ),
+        )
+      ).data;
+      const company = (
+        await json(
+          await post(
+            "/v1/customers",
+            { name: "Acme SRL", documentType: "RNC", documentNumber: "131246796" },
+            b.cookie,
+          ),
+        )
+      ).data;
 
       const noCustomer = await createDraft(b, { type: "E31" });
       expect(await error(await issue(b, noCustomer.id))).toMatch(/RNC/);
@@ -659,7 +1026,12 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
 
       const ok = await createDraft(b, { type: "E31", customerId: company.id });
       const issued = (await json(await issue(b, ok.id))).data;
-      expect(issued).toMatchObject({ encf: "E310000000001", buyerName: "Acme SRL", buyerDocType: "RNC", buyerDocNumber: "131246796" });
+      expect(issued).toMatchObject({
+        encf: "E310000000001",
+        buyerName: "Acme SRL",
+        buyerDocType: "RNC",
+        buyerDocNumber: "131246796",
+      });
     });
 
     it("las facturas de consumo desde RD$250,000 exigen identificar al comprador", async () => {
@@ -673,7 +1045,10 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       expect(res.status).toBe(422);
       expect(await error(res)).toMatch(/250,000/);
 
-      const identified = await createDraft(b, { ...big, buyer: { name: "Juan Pérez", docType: "CEDULA", docNumber: "001-1234567-8" } });
+      const identified = await createDraft(b, {
+        ...big,
+        buyer: { name: "Juan Pérez", docType: "CEDULA", docNumber: "001-1234567-8" },
+      });
       const issued = (await json(await issue(b, identified.id))).data;
       expect(issued).toMatchObject({ status: "ISSUED", buyerDocNumber: "00112345678" });
 
@@ -684,23 +1059,45 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
 
     it("toma el comprador de la ficha del cliente al momento de emitir", async () => {
       const b = await billing("e9", { seqs: [["E32", 1, 10]] });
-      const customer = (await json(await post("/v1/customers", { name: "Nombre Viejo" }, b.cookie))).data;
+      const customer = (
+        await json(await post("/v1/customers", { name: "Nombre Viejo" }, b.cookie))
+      ).data;
       const d = await createDraft(b, { customerId: customer.id });
       expect(d.buyerName).toBe("Nombre Viejo");
       await patch(`/v1/customers/${customer.id}`, { name: "Nombre Nuevo" }, b.cookie);
       expect((await json(await issue(b, d.id))).data.buyerName).toBe("Nombre Nuevo");
       // Después de emitido, la ficha puede cambiar sin tocar el comprobante.
       await patch(`/v1/customers/${customer.id}`, { name: "Otro más" }, b.cookie);
-      expect((await json(await get(`/v1/documents/${d.id}`, b.cookie))).data.buyerName).toBe("Nombre Nuevo");
+      expect(
+        (await json(await get(`/v1/documents/${d.id}`, b.cookie))).data.buyerName,
+      ).toBe("Nombre Nuevo");
     });
   });
 
   describe("notas de crédito y débito", () => {
     /** Factura de consumo emitida por RD$236.00 lista para ser modificada. */
     async function issuedInvoice(label: string) {
-      const b = await billing(label, { seqs: [["E32", 1, 20], ["E34", 1, 20], ["E33", 1, 20]] });
-      const customer = (await json(await post("/v1/customers", { name: "Cliente Nota", documentType: "RNC", documentNumber: "101001577" }, b.cookie))).data;
-      const invoice = await createDraft(b, { customerId: customer.id, currency: "USD", exchangeRate: "58.50" });
+      const b = await billing(label, {
+        seqs: [
+          ["E32", 1, 20],
+          ["E34", 1, 20],
+          ["E33", 1, 20],
+        ],
+      });
+      const customer = (
+        await json(
+          await post(
+            "/v1/customers",
+            { name: "Cliente Nota", documentType: "RNC", documentNumber: "101001577" },
+            b.cookie,
+          ),
+        )
+      ).data;
+      const invoice = await createDraft(b, {
+        customerId: customer.id,
+        currency: "USD",
+        exchangeRate: "58.50",
+      });
       const original = (await json(await issue(b, invoice.id))).data as Json;
       return { b, original };
     }
@@ -758,21 +1155,43 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     });
 
     it("exige un comprobante emitido y los datos de modificación", async () => {
-      const b = await billing("n5", { seqs: [["E32", 1, 5], ["E34", 1, 5]] });
+      const b = await billing("n5", {
+        seqs: [
+          ["E32", 1, 5],
+          ["E34", 1, 5],
+        ],
+      });
       const draft = await createDraft(b);
 
       const body = (over: Json) =>
         post(
           "/v1/documents",
-          draftBody(b, { type: "E34", lines: [{ name: "x", unitPrice: "10", tax: "EXENTO", quantity: "1" }], payments: [], ...over }),
+          draftBody(b, {
+            type: "E34",
+            lines: [{ name: "x", unitPrice: "10", tax: "EXENTO", quantity: "1" }],
+            payments: [],
+            ...over,
+          }),
           b.cookie,
         );
       expect((await body({})).status).toBe(400); // sin referencia
-      expect((await body({ referencedDocumentId: draft.id, modificationCode: 3 })).status).toBe(422); // aún es borrador
-      expect((await body({ referencedDocumentId: randomUUID(), modificationCode: 3 })).status).toBe(422);
+      expect(
+        (await body({ referencedDocumentId: draft.id, modificationCode: 3 })).status,
+      ).toBe(422); // aún es borrador
+      expect(
+        (await body({ referencedDocumentId: randomUUID(), modificationCode: 3 })).status,
+      ).toBe(422);
       expect((await body({ referencedDocumentId: draft.id })).status).toBe(400); // sin código
       // Un comprobante normal no puede traer referencia.
-      expect((await post("/v1/documents", draftBody(b, { referencedDocumentId: draft.id, modificationCode: 3 }), b.cookie)).status).toBe(400);
+      expect(
+        (
+          await post(
+            "/v1/documents",
+            draftBody(b, { referencedDocumentId: draft.id, modificationCode: 3 }),
+            b.cookie,
+          )
+        ).status,
+      ).toBe(400);
     });
 
     it("no se pueden referenciar comprobantes de otra empresa", async () => {
@@ -795,8 +1214,25 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
 
   describe("consulta, aislamiento y roles", () => {
     it("lista y filtra comprobantes", async () => {
-      const b = await billing("l1", { seqs: [["E32", 1, 10], ["E31", 1, 10]] });
-      const customer = (await json(await post("/v1/customers", { name: "Distribuidora Norte", documentType: "RNC", documentNumber: "131246796" }, b.cookie))).data;
+      const b = await billing("l1", {
+        seqs: [
+          ["E32", 1, 10],
+          ["E31", 1, 10],
+        ],
+      });
+      const customer = (
+        await json(
+          await post(
+            "/v1/customers",
+            {
+              name: "Distribuidora Norte",
+              documentType: "RNC",
+              documentNumber: "131246796",
+            },
+            b.cookie,
+          ),
+        )
+      ).data;
       await createDraft(b); // borrador
       const e32 = await createDraft(b);
       await issue(b, e32.id);
@@ -807,7 +1243,10 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       expect(all.total).toBe(3);
       expect(all.data[0].total).toBe("236.00");
 
-      const ids = async (qs: string) => (await json(await get(`/v1/documents?${qs}`, b.cookie))).data.map((d: Json) => d.id);
+      const ids = async (qs: string) =>
+        (await json(await get(`/v1/documents?${qs}`, b.cookie))).data.map(
+          (d: Json) => d.id,
+        );
       expect(await ids("status=DRAFT")).toHaveLength(1);
       expect(await ids("type=E31")).toEqual([e31.id]);
       expect(await ids("q=E310000000001")).toEqual([e31.id]);
@@ -828,19 +1267,31 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       for (const id of [draft.id, issued.id]) {
         expect((await get(`/v1/documents/${id}`, b.cookie)).status).toBe(404);
         expect((await issue(b, id)).status).toBe(404);
-        expect((await call(`/v1/documents/${id}`, { method: "DELETE", cookie: b.cookie })).status).toBe(404);
-        expect((await send("PUT", `/v1/documents/${id}`, draftBody(b), b.cookie)).status).toBe(404);
+        expect(
+          (await call(`/v1/documents/${id}`, { method: "DELETE", cookie: b.cookie }))
+            .status,
+        ).toBe(404);
+        expect(
+          (await send("PUT", `/v1/documents/${id}`, draftBody(b), b.cookie)).status,
+        ).toBe(404);
       }
       expect((await json(await get("/v1/documents", b.cookie))).total).toBe(0);
       // Cada empresa usa su propia numeración.
-      expect((await json(await issue(b, (await createDraft(b)).id))).data.encf).toBe("E320000000001");
+      expect((await json(await issue(b, (await createDraft(b)).id))).data.encf).toBe(
+        "E320000000001",
+      );
     });
 
     it("el cajero puede crear y emitir, y todo queda en la bitácora", async () => {
       const boss = await billing("rl1", { seqs: [["E32", 1, 10]] });
       const cashier = await signUp("rl1c");
       await prisma.member.create({
-        data: { id: randomUUID(), organizationId: boss.orgId, userId: cashier.userId, role: "member" },
+        data: {
+          id: randomUUID(),
+          organizationId: boss.orgId,
+          userId: cashier.userId,
+          role: "member",
+        },
       });
       const cookie = await setActive(boss.orgId, cashier.cookie);
 
@@ -864,17 +1315,369 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     });
   });
 
+  describe("equipo e invitaciones", () => {
+    const invite = (cookie: string, email: string, role = "member") =>
+      post("/api/auth/organization/invite-member", { email, role }, cookie);
+    const accept = (cookie: string, invitationId: string) =>
+      post("/api/auth/organization/accept-invitation", { invitationId }, cookie);
+
+    /** Dueño + una persona que ya tiene cuenta (con su propia empresa vacía) lista para ser invitada. */
+    async function team(label: string) {
+      const boss = await billing(label, { seqs: [["E32", 1, 20]] });
+      const guest = await signUp(`${label}g`);
+      const email = `${label}g-${tag}@example.com`;
+      return { boss, guest, email };
+    }
+
+    it("el dueño invita a un cajero, que acepta y trabaja con permisos limitados", async () => {
+      const { boss, guest, email } = await team("q1");
+      const res = await invite(boss.cookie, email);
+      expect(res.status).toBe(200);
+      const invitation = await json(res);
+      expect(invitation).toMatchObject({ email, role: "member", status: "pending" });
+
+      // Aún sin aceptar no tiene acceso.
+      expect((await get("/v1/documents", guest.cookie)).status).toBe(409);
+
+      expect((await accept(guest.cookie, invitation.id)).status).toBe(200);
+      const cookie = await setActive(boss.orgId, guest.cookie);
+
+      const draft = await post("/v1/documents", draftBody(boss), cookie);
+      expect(draft.status).toBe(201);
+      expect(
+        (await post(`/v1/documents/${(await json(draft)).data.id}/issue`, {}, cookie))
+          .status,
+      ).toBe(200);
+      expect((await post("/v1/sequences", seqBody("E31", 1, 5), cookie)).status).toBe(
+        403,
+      );
+      expect((await invite(cookie, `otro-${tag}@example.com`)).status).toBe(403);
+
+      const members = await json(
+        await get(
+          `/api/auth/organization/list-members?organizationId=${boss.orgId}`,
+          boss.cookie,
+        ),
+      );
+      expect(members.members.map((m: Json) => m.role).sort()).toEqual([
+        "member",
+        "owner",
+      ]);
+    });
+
+    it("solo puede aceptar quien recibió la invitación", async () => {
+      const { boss, email } = await team("q2");
+      const stranger = await signUp("q2x");
+      const invitation = await json(await invite(boss.cookie, email));
+      expect((await accept(stranger.cookie, invitation.id)).status).toBe(403);
+    });
+
+    it("una invitación cancelada ya no se puede aceptar", async () => {
+      const { boss, guest, email } = await team("q3");
+      const invitation = await json(await invite(boss.cookie, email));
+
+      const pending = await json(
+        await get(
+          `/api/auth/organization/list-invitations?organizationId=${boss.orgId}`,
+          boss.cookie,
+        ),
+      );
+      expect(pending.map((i: Json) => i.id)).toContain(invitation.id);
+
+      expect(
+        (
+          await post(
+            "/api/auth/organization/cancel-invitation",
+            { invitationId: invitation.id },
+            boss.cookie,
+          )
+        ).status,
+      ).toBe(200);
+      expect((await accept(guest.cookie, invitation.id)).status).not.toBe(200);
+    });
+
+    it("cambiar el rol a administrador le da acceso a la configuración fiscal", async () => {
+      const { boss, guest, email } = await team("q4");
+      const invitation = await json(await invite(boss.cookie, email));
+      await accept(guest.cookie, invitation.id);
+      const cookie = await setActive(boss.orgId, guest.cookie);
+      expect((await post("/v1/sequences", seqBody("E31", 1, 5), cookie)).status).toBe(
+        403,
+      );
+
+      const members = await json(
+        await get(
+          `/api/auth/organization/list-members?organizationId=${boss.orgId}`,
+          boss.cookie,
+        ),
+      );
+      const member = members.members.find((m: Json) => m.role === "member");
+      const upd = await post(
+        "/api/auth/organization/update-member-role",
+        { memberId: member.id, role: "admin" },
+        boss.cookie,
+      );
+      expect(upd.status).toBe(200);
+
+      expect((await post("/v1/sequences", seqBody("E31", 1, 5), cookie)).status).toBe(
+        201,
+      );
+    });
+
+    it("al quitar a un miembro pierde el acceso de inmediato", async () => {
+      const { boss, guest, email } = await team("q5");
+      const invitation = await json(await invite(boss.cookie, email));
+      await accept(guest.cookie, invitation.id);
+      const cookie = await setActive(boss.orgId, guest.cookie);
+      expect((await get("/v1/documents", cookie)).status).toBe(200);
+
+      const rm = await post(
+        "/api/auth/organization/remove-member",
+        { memberIdOrEmail: email },
+        boss.cookie,
+      );
+      expect(rm.status).toBe(200);
+      expect((await get("/v1/documents", cookie)).status).toBe(403);
+      expect((await get("/v1/branches", cookie)).status).toBe(403);
+    });
+
+    it("no se puede invitar a quien ya es miembro, ni quitar al único dueño", async () => {
+      const { boss, guest, email } = await team("q6");
+      const invitation = await json(await invite(boss.cookie, email));
+      await accept(guest.cookie, invitation.id);
+      expect((await invite(boss.cookie, email)).status).toBe(400);
+
+      const bossEmail = `q6-${tag}@example.com`;
+      const rm = await post(
+        "/api/auth/organization/remove-member",
+        { memberIdOrEmail: bossEmail },
+        boss.cookie,
+      );
+      expect(rm.status).not.toBe(200);
+    });
+  });
+
+  describe("reportes de ventas", () => {
+    const today = new Intl.DateTimeFormat("sv-SE", {
+      timeZone: "America/Santo_Domingo",
+    }).format(new Date());
+    const range = (from = today, to = today, extra = "") =>
+      `from=${from}&to=${to}${extra}`;
+
+    /** Escenario: 2 facturas en pesos, 1 en dólares, 1 nota de crédito y 1 borrador. */
+    async function scenario(label: string) {
+      const b = await billing(label, {
+        seqs: [
+          ["E32", 1, 50],
+          ["E34", 1, 50],
+        ],
+      });
+      const first = await issue(b, (await createDraft(b)).id); // 2 × 118.00 con ITBIS = 236.00 (ITBIS 36.00)
+      const original = (await json(first)).data as Json;
+      await issue(
+        b,
+        (
+          await createDraft(b, {
+            lines: [
+              {
+                name: "Servicio de flete",
+                unitPrice: "100.00",
+                tax: "EXENTO",
+                quantity: "1",
+              },
+            ],
+            payments: [{ method: "TRANSFER", amount: "100.00" }],
+          })
+        ).id,
+      );
+      await issue(
+        b,
+        (
+          await createDraft(b, {
+            currency: "USD",
+            exchangeRate: "60",
+            lines: [
+              {
+                name: "Servicio en dólares",
+                unitPrice: "10.00",
+                tax: "EXENTO",
+                quantity: "1",
+              },
+            ],
+            payments: [{ method: "CARD", amount: "10.00" }],
+          })
+        ).id,
+      ); // US$10.00 × 60 = RD$600.00
+      await issue(
+        b,
+        (
+          await createDraft(b, {
+            type: "E34",
+            referencedDocumentId: original.id,
+            modificationCode: 3,
+            lines: [{ name: "Ajuste", unitPrice: "50.00", tax: "EXENTO", quantity: "1" }],
+            payments: [],
+          })
+        ).id,
+      );
+      await createDraft(b); // el borrador no cuenta
+      return b;
+    }
+
+    it("suma lo emitido, resta las notas de crédito y convierte los dólares a pesos", async () => {
+      const b = await scenario("s1");
+      const res = await get(`/v1/reports/sales?${range()}`, b.cookie);
+      expect(res.status).toBe(200);
+      const { data } = await json(res);
+
+      // 236.00 + 100.00 + 600.00 − 50.00
+      expect(data.totals).toMatchObject({
+        documents: 4,
+        net: "886.00",
+        tax: "36.00",
+        propina: "0.00",
+      });
+      expect(data.series).toHaveLength(1);
+      expect(data.series[0]).toMatchObject({ period: today, count: 4, total: "886.00" });
+
+      const type = (t: string) => data.byType.find((r: Json) => r.type === t);
+      expect(type("E32")).toMatchObject({ count: 3, total: "936.00", tax: "36.00" });
+      expect(type("E34")).toMatchObject({ count: 1, total: "50.00" });
+    });
+
+    it("desglosa el ITBIS por tasa y las ventas por forma de pago", async () => {
+      const b = await scenario("s2");
+      const { data } = await json(await get(`/v1/reports/sales?${range()}`, b.cookie));
+      // Base 200.00 con ITBIS 18 %; exentos: 100.00 + 600.00 − 50.00 de la nota.
+      expect(data.taxes).toMatchObject({
+        base18: "200.00",
+        tax18: "36.00",
+        base16: "0.00",
+        exempt: "650.00",
+      });
+      const pay = Object.fromEntries(
+        data.payments.map((p: Json) => [p.method, p.amount]),
+      );
+      expect(pay).toEqual({ CARD: "600.00", CASH: "236.00", TRANSFER: "100.00" });
+    });
+
+    it("lista los productos más vendidos sin contar las notas de crédito", async () => {
+      const b = await scenario("s3");
+      const { data } = await json(await get(`/v1/reports/sales?${range()}`, b.cookie));
+      expect(data.topProducts[0]).toMatchObject({
+        name: "Servicio en dólares",
+        total: "600.00",
+      });
+      const normal = data.topProducts.find((p: Json) => p.name === "Producto 118");
+      expect(normal).toMatchObject({ quantity: "2", total: "236.00" });
+      expect(data.topProducts.some((p: Json) => p.name === "Ajuste")).toBe(false);
+    });
+
+    it("respeta el rango de fechas y agrupa por mes", async () => {
+      const b = await scenario("s4");
+      const past = await json(
+        await get(`/v1/reports/sales?${range("2020-01-01", "2020-12-31")}`, b.cookie),
+      );
+      expect(past.data.totals).toMatchObject({ documents: 0, net: "0.00" });
+      expect(past.data.series).toEqual([]);
+
+      const month = await json(
+        await get(
+          `/v1/reports/sales?${range(`${today.slice(0, 7)}-01`, today, "&groupBy=month")}`,
+          b.cookie,
+        ),
+      );
+      expect(month.data.series).toHaveLength(1);
+      expect(month.data.series[0]).toMatchObject({
+        period: `${today.slice(0, 7)}-01`,
+        count: 4,
+      });
+    });
+
+    it("valida el rango", async () => {
+      const b = await billing("s5");
+      expect(
+        (await get(`/v1/reports/sales?${range("2026-02-01", "2026-01-01")}`, b.cookie))
+          .status,
+      ).toBe(400);
+      expect(
+        (await get(`/v1/reports/sales?${range("2024-01-01", "2026-01-01")}`, b.cookie))
+          .status,
+      ).toBe(400);
+      expect((await get("/v1/reports/sales?from=hoy&to=mañana", b.cookie)).status).toBe(
+        400,
+      );
+    });
+
+    it("exporta un CSV con los comprobantes emitidos", async () => {
+      const b = await scenario("s6");
+      const res = await get(`/v1/reports/sales.csv?${range()}`, b.cookie);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("text/csv");
+      expect(res.headers.get("content-disposition")).toContain(
+        `ventas-${today}_${today}.csv`,
+      );
+
+      const lines = (await res.text()).replace("﻿", "").trim().split("\r\n");
+      expect(lines[0]).toContain("e-NCF");
+      expect(lines).toHaveLength(1 + 4); // encabezado + 4 emitidos (el borrador no sale)
+      expect(
+        lines.some((l) => l.includes("E340000000001") && l.includes("E320000000001")),
+      ).toBe(true);
+      expect(lines.some((l) => l.includes("USD") && l.includes("60"))).toBe(true);
+    });
+
+    it("neutraliza fórmulas en el CSV", async () => {
+      const b = await billing("s7", { seqs: [["E32", 1, 5]] });
+      const d = await createDraft(b, { buyer: { name: '=HYPERLINK("http://x")' } });
+      await issue(b, d.id);
+      const csv = await (await get(`/v1/reports/sales.csv?${range()}`, b.cookie)).text();
+      expect(csv).toContain("'=HYPERLINK");
+      expect(csv).not.toMatch(/,=HYPERLINK/);
+    });
+
+    it("solo propietarios y administradores, y cada empresa ve lo suyo", async () => {
+      const a = await scenario("s8a");
+      const other = await billing("s8b");
+      const cashier = await signUp("s8c");
+      await prisma.member.create({
+        data: {
+          id: randomUUID(),
+          organizationId: a.orgId,
+          userId: cashier.userId,
+          role: "member",
+        },
+      });
+      const cookie = await setActive(a.orgId, cashier.cookie);
+
+      expect((await get(`/v1/reports/sales?${range()}`, cookie)).status).toBe(403);
+      expect((await get(`/v1/reports/sales.csv?${range()}`, cookie)).status).toBe(403);
+      expect((await get(`/v1/reports/sales?${range()}`)).status).toBe(401);
+
+      const mine = await json(await get(`/v1/reports/sales?${range()}`, other.cookie));
+      expect(mine.data.totals.documents).toBe(0);
+    });
+  });
+
   describe("bitácora", () => {
     it("registra cada cambio, de forma atómica con el cambio", async () => {
       const { cookie, orgId } = await owner("log");
-      const p = (await json(await post("/v1/products", { name: "Auditado", price: "10" }, cookie))).data;
+      const p = (
+        await json(await post("/v1/products", { name: "Auditado", price: "10" }, cookie))
+      ).data;
       await patch(`/v1/products/${p.id}`, { price: "11" }, cookie);
       await post("/v1/branches", { name: "Sucursal Log", code: "LOG-1" }, cookie);
       // Una operación fallida no debe dejar rastro en la bitácora.
       await post("/v1/branches", { name: "Duplicada", code: "LOG-1" }, cookie);
 
-      const logs = await withTenant(prisma, orgId).auditLog.findMany({ orderBy: { createdAt: "asc" } });
-      expect(logs.map((l) => l.action).sort()).toEqual(["branch.create", "product.create", "product.update"]);
+      const logs = await withTenant(prisma, orgId).auditLog.findMany({
+        orderBy: { createdAt: "asc" },
+      });
+      expect(logs.map((l) => l.action).sort()).toEqual([
+        "branch.create",
+        "product.create",
+        "product.update",
+      ]);
       expect(logs.every((l) => l.actorUserId)).toBe(true);
     });
   });

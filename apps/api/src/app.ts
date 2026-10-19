@@ -10,6 +10,7 @@ import { company } from "./routes/company";
 import { customers } from "./routes/customers";
 import { documents } from "./routes/documents";
 import { products } from "./routes/products";
+import { reports } from "./routes/reports";
 import { sequences } from "./routes/sequences";
 import { terminals } from "./routes/terminals";
 import { requireTenant } from "./middleware/tenant";
@@ -73,6 +74,7 @@ export function createApp(deps: Deps) {
     .route("/v1/company", company)
     .route("/v1/sequences", sequences)
     .route("/v1/documents", documents)
+    .route("/v1/reports", reports)
     .route("/v1", calculate);
 
   app.onError((err, c) => {
@@ -80,7 +82,13 @@ export function createApp(deps: Deps) {
     if (err instanceof Prisma.PrismaClientKnownRequestError) {
       // P2002 = violación de unicidad, P2025 = registro inexistente (o de otra empresa: RLS lo oculta).
       if (err.code === "P2002") {
-        return c.json({ error: "Ya existe un registro con esos datos (código, SKU o documento repetido)" }, 409);
+        return c.json(
+          {
+            error:
+              "Ya existe un registro con esos datos (código, SKU o documento repetido)",
+          },
+          409,
+        );
       }
       if (err.code === "P2025") return c.json({ error: "No encontrado" }, 404);
     }
