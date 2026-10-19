@@ -6,7 +6,7 @@ Sistema de facturación y punto de venta **multiempresa y multigiro** (tienda, r
 
 ## 0. Estado actual y cómo continuar
 
-> **Última actualización:** 2026-10-16 · **Repositorio:** `github.com/ortizjulioc/facturacion-app` (rama `main`)
+> **Última actualización:** 2026-10-19 · **Repositorio:** `github.com/ortizjulioc/facturacion-app` (rama `main`)
 > **Regla del proyecto:** el despliegue en Dokploy se hace **cuando el producto esté terminado y pulido**, no antes. Mientras tanto se desarrolla y prueba todo en local.
 
 ### 0.1 Resumen en una mirada
@@ -14,10 +14,11 @@ Sistema de facturación y punto de venta **multiempresa y multigiro** (tienda, r
 | Fase | Estado |
 |---|---|
 | 0 · Fundamentos (monorepo, BD, auth, CI, Dockerfiles) | ✅ hecha en local · ⏸ despliegue de prueba en Dokploy **aplazado a propósito** |
-| 1 · Núcleo de negocio | 🔶 **~60 %**: catálogo, clientes, sucursales/cajas y motor de cálculo listos; **faltan facturas, empresa fiscal, secuencias y prototipo e-CF** |
-| 2 – 8 | ⬜ sin empezar |
+| 1 · Núcleo de negocio | 🔶 **~85 %**: catálogo, clientes, cajas, motor de cálculo, **datos fiscales, secuencias e-NCF y facturas (E31/E32/E33/E34) emitibles y congeladas**; **falta `packages/ecf` y el prototipo contra TesteCF**, invitar usuarios y validar RNC |
+| 2 · Facturación en la web | 🔶 emisión desde el back-office **hecha** (sin enviar a la DGII); faltan PDF con QR, envío por correo y workers |
+| 3 – 8 | ⬜ sin empezar |
 
-Calidad actual (todo en verde): `lint`, `typecheck`, `build` y **67 pruebas** (35 `core` + 8 RLS en `db` + 24 de la API contra Postgres real). Verificado además a mano en el navegador: registro → empresa → sucursal → caja → categoría → productos → clientes.
+Calidad actual (todo en verde): `lint`, `typecheck`, `build` y **114 pruebas** (46 `core` + 14 de BD: RLS, inmutabilidad y secuencias + 54 de la API contra Postgres real). Verificado además a mano en el navegador: registro → datos fiscales → secuencias → factura con código de barras → emisión → nota de crédito → factura de crédito fiscal con RNC.
 
 ### 0.2 Retomar el trabajo en otra PC
 
@@ -90,9 +91,9 @@ pnpm db:deploy && pnpm exec prisma generate
 - Better Auth: registro, login, **organizaciones = empresas**, sesión por cookie, roles `owner` / `admin` / `member`.
 - Dockerfiles arm64 (`docker/Dockerfile.api`, `Dockerfile.web`), `docker-compose.dev.yml` (Postgres + MinIO), workflows de CI y de despliegue (`.github/workflows`) y guía [DESPLIEGUE.md](DESPLIEGUE.md). **Los Dockerfiles y el workflow de despliegue nunca se han ejecutado** (la PC de desarrollo no tiene Docker).
 
-**`packages/core`** (lógica fiscal pura, sin frameworks): dinero en centavos `bigint`, cantidades en milésimas, impuestos `ITBIS18 / ITBIS16 / ITBIS0 / EXENTO` con etiquetas, `calculateLine` y `calculateDocument` (precio con o sin ITBIS, descuentos por % o monto, redondeo mitad-arriba **por línea**, totales agrupados por tasa como en el e-CF, propina legal 10 %) y normalización/formato de RNC, cédula y pasaporte (solo formato; sin dígito verificador a propósito).
+**`packages/core`** (lógica fiscal pura, sin frameworks): dinero en centavos `bigint`, cantidades en milésimas, impuestos `ITBIS18 / ITBIS16 / ITBIS0 / EXENTO` con etiquetas, `calculateLine` y `calculateDocument` (precio con o sin ITBIS, descuentos por % o monto, redondeo mitad-arriba **por línea**, totales agrupados por tasa como en el e-CF, propina legal 10 %) normalización/formato de RNC, cédula y pasaporte (solo formato; sin dígito verificador a propósito) y **`ecf.ts`**: tipos E31/E32/E33/E34, formato y lectura del **e-NCF** (`E` + tipo + 10 dígitos), umbral de RD$250,000 para identificar al comprador, reglas del comprador por tipo, códigos de modificación de las notas y cálculo de lo que queda por acreditar.
 
-**`packages/db`**: tablas `user/session/account/verification/organization/member/invitation` (Better Auth), `branch`, `terminal`, `category`, `product`, `customer`, `audit_log`; enums `TaxCode` y `DocumentType`; 3 migraciones.
+**`packages/db`**: tablas `user/session/account/verification/organization/member/invitation` (Better Auth), `branch`, `terminal`, `category`, `product`, `customer`, `audit_log`, y las fiscales **`company_profile`, `sequence`, `document`, `document_line`, `payment`**; enums `TaxCode`, `DocumentType`, `EcfType`, `DocumentStatus`, `PaymentMethod`, `EcfEnvironment`; 6 migraciones. La base de datos **impide por sí misma** modificar o borrar un comprobante emitido (triggers), que una secuencia retroceda o que se reescriba un rango en uso, y valida el formato del e-NCF y que su tipo coincida con el del documento.
 
 **`apps/api`** (Hono, JSON con montos como **texto decimal** `"19.99"`, errores `{ error, issues? }`):
 
@@ -106,24 +107,37 @@ pnpm db:deploy && pnpm exec prisma generate
 | `/v1/categories` | GET, POST, PATCH `/:id`, DELETE `/:id` | owner/admin |
 | `/v1/products` | GET (`q, categoryId, active, page, pageSize`), GET `/:id`, GET `/by-barcode/:code`, POST, PATCH `/:id`, DELETE `/:id` (**desactiva**) | owner/admin |
 | `/v1/customers` | GET (`q, active, page`), GET `/:id`, POST, PATCH `/:id` | owner/admin/**member** |
+| `/v1/company` | GET, PUT (datos fiscales del emisor, ambiente DGII) | owner/admin |
+| `/v1/sequences` | GET, POST, PATCH `/:id` (rangos de e-NCF; no se solapan; no se borran) | owner/admin |
+| `/v1/documents` | GET (`q, type, status, customerId, branchId, from, to, page`), GET `/:id`, POST (borrador), PUT `/:id` (reemplaza un borrador), DELETE `/:id` (solo borrador), POST `/:id/issue` | **cualquier miembro** (incluido el cajero) |
 | `/v1/tax-codes` | GET | — |
 | `/v1/calculate` | POST (mismo motor que usará la facturación) | — |
 
 Cada cambio escribe en `audit_log` **dentro de la misma transacción** (si falla el cambio, no queda rastro).
 
-**`apps/web`** (Next 16): `/registro`, `/login` y el panel `/panel` con **Resumen**, **Productos** (búsqueda, filtros, paginación, categorías, alta/edición/desactivar), **Clientes** (RNC/cédula con formato) y **Sucursales y cajas**. Cliente tipado de la API con Hono RPC (`apps/web/lib/api.ts`), componentes propios en `apps/web/components/ui.tsx`.
+**Emisión (`POST /v1/documents/:id/issue`)**, en una sola transacción: exige datos fiscales y total > 0 · refresca el comprador desde la ficha del cliente · aplica las reglas del comprador (E31 exige RNC; E32 ≥ RD$250,000 exige identificarlo) · exige que los pagos sumen el total (E31/E32) · en notas de crédito bloquea el original y verifica que no se exceda lo acreditable (código 1 = anular exige el total) · **asigna el e-NCF de forma atómica** (`UPDATE … WHERE id = (SELECT … FOR UPDATE)`; prefiere la secuencia de la caja, luego la general; ignora rangos vencidos, agotados o inactivos) · congela el comprobante. Los totales siempre se recalculan en el servidor con `core`.
+
+**`apps/web`** (Next 16): `/registro`, `/login` y el panel `/panel` con **Resumen**, **Facturas** (listado con filtros, **editor** con buscador de productos y lector de códigos de barras, totales en vivo con el mismo motor fiscal, pagos mixtos, descuentos, propina legal, notas de crédito/débito, **detalle imprimible**), **Productos** (búsqueda, filtros, paginación, categorías, alta/edición/desactivar), **Clientes** (RNC/cédula con formato), **Sucursales y cajas** y **Configuración fiscal** (datos del emisor y secuencias). Cliente tipado de la API con Hono RPC (`apps/web/lib/api.ts`), componentes propios en `apps/web/components/ui.tsx`.
 
 ### 0.5 Lo que falta (backlog en orden de prioridad)
 
 **A. Terminar la Fase 1 (siguiente trabajo inmediato)**
 
-1. **Datos fiscales de la empresa** (tabla `company_profile`): RNC, razón social, nombre comercial, dirección, provincia/municipio, actividad económica, ambiente (`TesteCF` / `CerteCF` / `eCF`) y certificado digital `.p12` (cifrado). Pantalla de configuración.
-2. **Modelo de documentos**: `document` (tipo E31/E32/E33/E34, estado, e-NCF, sucursal, caja, cliente, fecha, moneda y tasa, totales por tasa en `BigInt`), `document_line` (**copia** de nombre, precio, cantidad, impuesto y descuento: nunca depender del producto actual) y `payment` (efectivo, tarjeta, transferencia, mixto). Reglas: el servidor **recalcula siempre** con `core.calculateDocument` (no confía en el cliente); un documento emitido es **inmutable** (se corrige con nota de crédito/débito); E31 exige cliente con RNC; E32 ≥ RD$250,000 exige identificar al comprador.
-3. **Secuencias e-NCF** (`sequence`): tipo, desde/hasta, actual, fecha de vencimiento, asignación por caja. Asignación **atómica** (`UPDATE … RETURNING`) y `unique(organizationId, encf)`.
+1. ✅ ~~Datos fiscales de la empresa~~ (falta solo el certificado digital `.p12`, que llega con `packages/ecf`).
+2. ✅ ~~Modelo y API de documentos~~ con líneas copiadas del producto, pagos, totales recalculados en el servidor e inmutabilidad en la BD.
+3. ✅ ~~Secuencias e-NCF~~ con asignación atómica y rangos sin solape.
 4. **`packages/ecf`** + interfaz `FiscalProvider`: XML de E32 y E31, validación contra los XSD oficiales, firma XMLDSig, autenticación (semilla → token), envío, consulta por TrackId, código de seguridad y QR. Evaluar primero la librería `dgii-ecf` de npm.
 5. **Prototipo contra TesteCF**: emitir y consultar un E32 y un E31 de prueba. *Necesita de ti:* un certificado digital de pruebas y acceso a la Oficina Virtual de la DGII (verifica en dgii.gov.do cómo obtenerlo y su costo).
 6. **Invitar usuarios** a la empresa y gestionar miembros (hoy solo hay owner y un `member` que se crea por BD). Define el rol de cajero.
 7. **Validar RNC contra el padrón de la DGII** (archivo público) y autocompletar el nombre del cliente.
+
+**A-bis. Facturación pendiente (Fase 2)**
+
+- PDF / representación impresa con **código QR y código de seguridad** (hoy el detalle se imprime con el navegador, sin QR).
+- Envío del comprobante por correo y *workers* (pg-boss) para enviar a la DGII con reintentos.
+- E32 de menos de RD$250,000: **resumen RFCE**. Estados `SIGNED/SENT/ACCEPTED/REJECTED` (ya existen en el enum, nada los usa todavía).
+- Selector de cliente con búsqueda (hoy es una lista de los primeros 200) y ficha rápida de cliente desde el editor.
+- Devoluciones desde la caja, anulación de rangos (ANECF) y reportes de ventas.
 
 **B. Pulido antes de desplegar** (requisito tuyo: "terminado y pulido")
 
@@ -168,6 +182,10 @@ Cada cambio escribe en `audit_log` **dentro de la misma transacción** (si falla
 - **Los miembros no se pueden invitar todavía**: las pruebas de roles insertan el `member` directo en BD.
 - **El panel del navegador integrado puede estar oculto**: ahí fallan las capturas de pantalla; se verifica con texto/JS.
 - **Docker no está instalado** en la PC de desarrollo original: nada de `docker build` se ha probado.
+- **Next 16 conserva ocultas las pantallas anteriores** (React `Activity` con `cacheComponents`): su estado (`useState`) sobrevive aunque salgas de la ruta, y al volver los *efectos* se ejecutan de nuevo (por eso los listados se refrescan solos). Consecuencia: un formulario **no se reinicia** al reabrirlo. El editor de facturas lo resuelve con una `key` (sesión + comprobante + referencia) que cambia al guardar y al abrir otra referencia. Al probar con JavaScript en el navegador, filtra por `offsetParent !== null` o contarás elementos de pantallas ocultas.
+- **Claves foráneas diferibles**: las FK que protegen comprobantes y rangos son `DEFERRABLE INITIALLY DEFERRED` (migración `fk_deferrable`). Sin eso, eliminar una empresa con comprobantes falla según el orden en que Postgres ejecute las cascadas. Los triggers de inmutabilidad dejan pasar borrados en cascada con `pg_trigger_depth() > 1`.
+- **Notas de crédito concurrentes**: se serializan bloqueando el comprobante original (`SELECT … FOR UPDATE`) antes de sumar lo ya acreditado.
+- **El shell rechaza a veces heredocs grandes** (`unexpected EOF`): para archivos largos usa la herramienta de escritura de archivos en vez de `cat <<EOF`.
 
 ---
 
@@ -353,7 +371,7 @@ facturacion/
 - [x] Script `pnpm db:bootstrap` para preparar la BD local.
 - [ ] ⏸ Desplegar un "hola mundo" de `web` y `api` en Dokploy (`app.` / `api.`) — **aplazado hasta que el producto esté pulido** (ver §0.5-C).
 
-### Fase 1 – Núcleo de negocio + prototipo fiscal (3–4 semanas) · 🔶 ~60 %
+### Fase 1 – Núcleo de negocio + prototipo fiscal (3–4 semanas) · 🔶 ~85 %
 **Hecho**
 - [x] `packages/core`: motor de cálculo (ITBIS 18/16/0/exento, precio con o sin impuesto, descuentos, propina legal, redondeo por línea) con 35 pruebas, más normalización de RNC/cédula/pasaporte.
 - [x] Schema y RLS de sucursales, cajas, categorías, productos y clientes; bitácora inmutable.
@@ -361,15 +379,15 @@ facturacion/
 - [x] Panel web: resumen, productos, clientes, sucursales y cajas.
 
 **Pendiente** (detalle en §0.5-A)
-- [ ] Datos fiscales de la empresa + certificado `.p12`.
-- [ ] Modelo y API de documentos (E31, E32, E33, E34) con líneas, pagos y totales recalculados en el servidor.
-- [ ] Secuencias e-NCF con asignación atómica.
+- [x] Datos fiscales de la empresa *(falta el certificado `.p12`)*.
+- [x] Modelo y API de documentos (E31, E32, E33, E34) con líneas, pagos y totales recalculados en el servidor; emisión con e-NCF atómico e inmutabilidad en la BD.
+- [x] Secuencias e-NCF con asignación atómica.
 - [ ] `packages/ecf` y `FiscalProvider`; **prototipo contra TesteCF** (E32 y E31: generar, firmar, enviar, consultar TrackId).
 - [ ] **Decisión:** proveedor certificado o conexión directa con la DGII (ver §7).
 - [ ] Invitar usuarios y gestionar miembros; validar RNC contra el padrón de la DGII.
 
-### Fase 2 – Facturación en la web (3 semanas)
-- Emisión desde el back-office: E31, E32, E34, E33 con pagos y multimoneda (DOP/USD).
+### Fase 2 – Facturación en la web (3 semanas) · 🔶 emisión hecha, falta el envío a la DGII
+- [x] Emisión desde el back-office: E31, E32, E34, E33 con pagos y multimoneda (DOP/USD).
 - Workers: envío, reintentos, consulta de estado, RFCE para consumo < RD$250,000.
 - Representación impresa: PDF (A4) con QR y código de seguridad.
 - Envío al cliente por correo.
