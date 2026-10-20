@@ -80,27 +80,29 @@ model Verification {
 }
 
 model Organization {
-  id             String          @id
-  name           String
-  slug           String          @unique
-  logo           String?
-  createdAt      DateTime        @default(now())
-  metadata       String?
-  members        Member[]
-  invitations    Invitation[]
-  branches       Branch[]
-  terminals      Terminal[]
-  categories     Category[]
-  products       Product[]
-  customers      Customer[]
-  companyProfile CompanyProfile?
-  sequences      Sequence[]
-  documents      Document[]
-  auditLogs      AuditLog[]
-  stockLevels    StockLevel[]
-  stockMovements StockMovement[]
-  suppliers      Supplier[]
-  purchases      Purchase[]
+  id               String            @id
+  name             String
+  slug             String            @unique
+  logo             String?
+  createdAt        DateTime          @default(now())
+  metadata         String?
+  members          Member[]
+  invitations      Invitation[]
+  branches         Branch[]
+  terminals        Terminal[]
+  categories       Category[]
+  products         Product[]
+  customers        Customer[]
+  companyProfile   CompanyProfile?
+  sequences        Sequence[]
+  documents        Document[]
+  auditLogs        AuditLog[]
+  stockLevels      StockLevel[]
+  stockMovements   StockMovement[]
+  suppliers        Supplier[]
+  purchases        Purchase[]
+  diningTables     DiningTable[]
+  restaurantOrders RestaurantOrder[]
 
   @@map("organization")
 }
@@ -139,20 +141,22 @@ model Invitation {
 
 /// Sucursal / local de la empresa. Las cajas (terminales) cuelgan de aquí en la Fase 1.
 model Branch {
-  id             String          @id @default(uuid(7)) @db.Uuid
-  organizationId String
-  name           String
-  code           String
-  address        String?
-  active         Boolean         @default(true)
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
-  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  terminals      Terminal[]
-  documents      Document[]
-  stockLevels    StockLevel[]
-  stockMovements StockMovement[]
-  purchases      Purchase[]
+  id               String            @id @default(uuid(7)) @db.Uuid
+  organizationId   String
+  name             String
+  code             String
+  address          String?
+  active           Boolean           @default(true)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  organization     Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  terminals        Terminal[]
+  documents        Document[]
+  stockLevels      StockLevel[]
+  stockMovements   StockMovement[]
+  purchases        Purchase[]
+  diningTables     DiningTable[]
+  restaurantOrders RestaurantOrder[]
 
   @@unique([organizationId, code])
   @@map("branch")
@@ -228,6 +232,8 @@ model Product {
   trackInventory   Boolean         @default(false)
   /// Existencia mínima (milésimas) por sucursal; por debajo se avisa de stock bajo.
   minStock         BigInt          @default(0)
+  /// Restaurante: dónde se prepara. Los productos NONE (p. ej. una botella) no pasan por la cocina.
+  prepStation      PrepStation     @default(NONE)
   active           Boolean         @default(true)
   createdAt        DateTime        @default(now())
   updatedAt        DateTime        @updatedAt
@@ -239,6 +245,7 @@ model Product {
   stockLevels      StockLevel[]
   stockMovements   StockMovement[]
   purchaseLines    PurchaseLine[]
+  orderItems       OrderItem[]
 
   @@unique([organizationId, sku])
   @@unique([organizationId, barcode])
@@ -356,49 +363,52 @@ model Sequence {
 
 /// Comprobante. Editable solo en DRAFT; después una función de BD impide cambiar importes o líneas.
 model Document {
-  id                   String          @id @default(uuid(7)) @db.Uuid
+  id                   String           @id @default(uuid(7)) @db.Uuid
   organizationId       String
   type                 EcfType
-  status               DocumentStatus  @default(DRAFT)
+  status               DocumentStatus   @default(DRAFT)
   /// Se asigna al emitir.
   encf                 String?
-  branchId             String          @db.Uuid
-  terminalId           String?         @db.Uuid
-  customerId           String?         @db.Uuid
+  branchId             String           @db.Uuid
+  terminalId           String?          @db.Uuid
+  customerId           String?          @db.Uuid
   /// Copia del comprador al emitir (el cliente puede cambiar después).
   buyerName            String?
   buyerDocType         DocumentType?
   buyerDocNumber       String?
-  currency             String          @default("DOP")
-  exchangeRate         Decimal         @default(1) @db.Decimal(14, 4)
-  propinaLegal         Boolean         @default(false)
+  currency             String           @default("DOP")
+  exchangeRate         Decimal          @default(1) @db.Decimal(14, 4)
+  propinaLegal         Boolean          @default(false)
   notes                String?
   /// Solo notas de crédito/débito.
-  referencedDocumentId String?         @db.Uuid
+  referencedDocumentId String?          @db.Uuid
   referencedEncf       String?
   modificationCode     Int?
   // Totales en centavos, calculados SIEMPRE en el servidor con @facturacion/core.
-  totalDiscount        BigInt          @default(0)
-  subtotal             BigInt          @default(0)
-  base18               BigInt          @default(0)
-  tax18                BigInt          @default(0)
-  base16               BigInt          @default(0)
-  tax16                BigInt          @default(0)
-  base0                BigInt          @default(0)
-  baseExempt           BigInt          @default(0)
-  totalTax             BigInt          @default(0)
-  propinaAmount        BigInt          @default(0)
-  total                BigInt          @default(0)
+  totalDiscount        BigInt           @default(0)
+  subtotal             BigInt           @default(0)
+  base18               BigInt           @default(0)
+  tax18                BigInt           @default(0)
+  base16               BigInt           @default(0)
+  tax16                BigInt           @default(0)
+  base0                BigInt           @default(0)
+  baseExempt           BigInt           @default(0)
+  totalTax             BigInt           @default(0)
+  propinaAmount        BigInt           @default(0)
+  total                BigInt           @default(0)
   issuedAt             DateTime?
   createdById          String
-  createdAt            DateTime        @default(now())
-  updatedAt            DateTime        @updatedAt
-  organization         Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  branch               Branch          @relation(fields: [branchId], references: [id], onDelete: NoAction)
-  terminal             Terminal?       @relation(fields: [terminalId], references: [id], onDelete: NoAction)
-  customer             Customer?       @relation(fields: [customerId], references: [id], onDelete: NoAction)
-  referencedDocument   Document?       @relation("Modifies", fields: [referencedDocumentId], references: [id], onDelete: NoAction)
-  modifiedBy           Document[]      @relation("Modifies")
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+  organization         Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch               Branch           @relation(fields: [branchId], references: [id], onDelete: NoAction)
+  terminal             Terminal?        @relation(fields: [terminalId], references: [id], onDelete: NoAction)
+  customer             Customer?        @relation(fields: [customerId], references: [id], onDelete: NoAction)
+  /// Si nació del cobro de una mesa del restaurante.
+  orderId              String?          @db.Uuid
+  order                RestaurantOrder? @relation(fields: [orderId], references: [id], onDelete: NoAction)
+  referencedDocument   Document?        @relation("Modifies", fields: [referencedDocumentId], references: [id], onDelete: NoAction)
+  modifiedBy           Document[]       @relation("Modifies")
   lines                DocumentLine[]
   payments             Payment[]
   stockMovements       StockMovement[]
@@ -574,6 +584,110 @@ model PurchaseLine {
   @@unique([purchaseId, lineNumber])
   @@index([productId])
   @@map("purchase_line")
+}
+
+// ───────────── Restaurante: mesas y comandas ─────────────
+
+enum PrepStation {
+  NONE
+  KITCHEN
+  BAR
+}
+
+enum OrderStatus {
+  OPEN
+  /// Todo lo consumido ya se cobró.
+  CLOSED
+  CANCELLED
+}
+
+enum OrderItemStatus {
+  /// Anotado, aún no enviado a cocina/bar.
+  PENDING
+  SENT
+  READY
+  VOID
+}
+
+model DiningTable {
+  id             String            @id @default(uuid(7)) @db.Uuid
+  organizationId String
+  branchId       String            @db.Uuid
+  name           String
+  /// Salón, terraza, barra…
+  zone           String?
+  seats          Int               @default(4)
+  active         Boolean           @default(true)
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch         Branch            @relation(fields: [branchId], references: [id], onDelete: NoAction)
+  orders         RestaurantOrder[]
+
+  @@unique([branchId, name])
+  @@index([organizationId, branchId])
+  @@map("dining_table")
+}
+
+/// Comanda de una mesa. Una mesa tiene a lo sumo UNA comanda abierta (índice parcial en la BD).
+model RestaurantOrder {
+  id             String       @id @default(uuid(7)) @db.Uuid
+  organizationId String
+  branchId       String       @db.Uuid
+  tableId        String       @db.Uuid
+  /// Consecutivo por empresa (el que se ve en la comanda de cocina).
+  number         Int
+  status         OrderStatus  @default(OPEN)
+  covers         Int?
+  notes          String?
+  openedById     String
+  openedAt       DateTime     @default(now())
+  closedAt       DateTime?
+  cancelReason   String?
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch         Branch       @relation(fields: [branchId], references: [id], onDelete: NoAction)
+  table          DiningTable  @relation(fields: [tableId], references: [id], onDelete: NoAction)
+  items          OrderItem[]
+  documents      Document[]
+
+  @@unique([organizationId, number])
+  @@index([organizationId, status])
+  @@index([tableId])
+  @@map("restaurant_order")
+}
+
+model OrderItem {
+  id               String          @id @default(uuid(7)) @db.Uuid
+  organizationId   String
+  orderId          String          @db.Uuid
+  productId        String?         @db.Uuid
+  /// Copia del producto al momento de anotarlo (el precio no cambia si luego se edita el producto).
+  name             String
+  unit             String          @default("UND")
+  /// Milésimas (1000 = 1.000).
+  quantity         BigInt
+  unitPrice        BigInt
+  priceIncludesTax Boolean
+  tax              TaxCode
+  /// Modificadores: "sin cebolla", "término medio"…
+  notes            String?
+  station          PrepStation     @default(NONE)
+  status           OrderItemStatus @default(PENDING)
+  sentAt           DateTime?
+  readyAt          DateTime?
+  voidReason       String?
+  /// Cuánto ya se cobró (para dividir la cuenta). 0 ≤ billedQuantity ≤ quantity.
+  billedQuantity   BigInt          @default(0)
+  createdById      String
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  order            RestaurantOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product          Product?        @relation(fields: [productId], references: [id], onDelete: NoAction)
+
+  @@index([orderId])
+  @@index([organizationId, status, station])
+  @@map("order_item")
 }
 
 enum StockMovementType {

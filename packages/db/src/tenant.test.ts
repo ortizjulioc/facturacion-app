@@ -661,6 +661,125 @@ describe.skipIf(!process.env.DATABASE_URL)("RLS multiempresa", () => {
     });
   });
 
+  describe("restaurante", () => {
+    let seq = 0;
+    const setup = async (org: string) => {
+      const as = withTenant(prisma, org);
+      const branch = await as.branch.findFirstOrThrow();
+      const table = await as.diningTable.create({
+        data: { organizationId: org, branchId: branch.id, name: `Mesa ${randomUUID().slice(0, 6)}` },
+      });
+      const order = (over: object = {}, tableId = table.id) =>
+        as.restaurantOrder.create({
+          data: {
+            organizationId: org,
+            branchId: branch.id,
+            tableId,
+            number: 1_000_000 + Math.floor(Math.random() * 1_000_000_000) + ++seq,
+            openedById: "test-user",
+            ...over,
+          },
+        });
+      const item = (orderId: string, over: object = {}) =>
+        as.orderItem.create({
+          data: {
+            organizationId: org,
+            orderId,
+            name: "Pollo",
+            quantity: 2_000n,
+            unitPrice: 35_000n,
+            priceIncludesTax: true,
+            tax: "ITBIS18",
+            createdById: "test-user",
+            ...over,
+          },
+        });
+      return { as, branch, table, order, item };
+    };
+
+    it("mesas, comandas y productos anotados están aislados por empresa", async () => {
+      const a = await setup(orgA);
+      const b = await setup(orgB);
+      const o = await a.order();
+      await a.item(o.id);
+
+      for (const model of ["diningTable", "restaurantOrder", "orderItem"] as const) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect(await (a.as[model] as any).count(), `${model} visible para su dueño`).toBeGreaterThan(0);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect(await (b.as[model] as any).count({ where: { organizationId: orgA } }), `${model} oculto`).toBe(0);
+      }
+      await expect(
+        b.as.restaurantOrder.create({
+          data: { organizationId: orgA, branchId: b.branch.id, tableId: b.table.id, number: 1, openedById: "x" },
+        }),
+      ).rejects.toThrow();
+    });
+
+    it("una mesa solo puede tener una comanda abierta", async () => {
+      const { table, order, as } = await setup(orgA);
+      const first = await order();
+      await expect(order()).rejects.toThrow(/restaurant_order_one_open_per_table|unique/i);
+      // Al cerrar la primera, la mesa vuelve a estar disponible.
+      await as.restaurantOrder.update({ where: { id: first.id }, data: { status: "CLOSED", closedAt: new Date() } });
+      const second = await order();
+      expect(second.tableId).toBe(table.id);
+    });
+
+    it("valida los datos de mesas y comandas", async () => {
+      const { as, branch, order } = await setup(orgA);
+      await expect(
+        as.diningTable.create({ data: { organizationId: orgA, branchId: branch.id, name: "Mesa 0", seats: 0 } }),
+      ).rejects.toThrow();
+      const t = await as.diningTable.create({ data: { organizationId: orgA, branchId: branch.id, name: `Dup ${randomUUID().slice(0, 6)}` } });
+      await expect(
+        as.diningTable.create({ data: { organizationId: orgA, branchId: branch.id, name: t.name } }),
+      ).rejects.toThrow();
+      await expect(order({ covers: 0 }, t.id)).rejects.toThrow();
+      await expect(order({ number: 0 }, t.id)).rejects.toThrow();
+      // Cerrada sin fecha de cierre / abierta con fecha / cancelada sin motivo.
+      await expect(order({ status: "CLOSED" }, t.id)).rejects.toThrow();
+      await expect(order({ closedAt: new Date() }, t.id)).rejects.toThrow();
+      await expect(order({ status: "CANCELLED", closedAt: new Date() }, t.id)).rejects.toThrow();
+    });
+
+    it("una comanda cerrada o cancelada queda congelada y no se borra", async () => {
+      const { as, order, item } = await setup(orgA);
+      const o = await order();
+      const i = await item(o.id);
+
+      await expect(as.restaurantOrder.delete({ where: { id: o.id } })).rejects.toThrow();
+      await as.restaurantOrder.update({ where: { id: o.id }, data: { status: "CLOSED", closedAt: new Date() } });
+
+      await expect(as.restaurantOrder.update({ where: { id: o.id }, data: { notes: "tarde" } })).rejects.toThrow();
+      await expect(as.restaurantOrder.delete({ where: { id: o.id } })).rejects.toThrow();
+      await expect(item(o.id)).rejects.toThrow();
+      await expect(as.orderItem.update({ where: { id: i.id }, data: { quantity: 9_000n } })).rejects.toThrow();
+      await expect(as.orderItem.delete({ where: { id: i.id } })).rejects.toThrow();
+    });
+
+    it("reglas de los productos anotados", async () => {
+      const { as, order, item } = await setup(orgA);
+      const o = await order();
+
+      await expect(item(o.id, { quantity: 0n })).rejects.toThrow();
+      await expect(item(o.id, { unitPrice: -1n })).rejects.toThrow();
+      await expect(item(o.id, { billedQuantity: 3_000n })).rejects.toThrow(); // más de lo anotado
+      await expect(item(o.id, { status: "VOID" })).rejects.toThrow(); // anular exige motivo
+
+      // Anulado con motivo: no se reactiva.
+      const voided = await item(o.id, { status: "VOID", voidReason: "Error" });
+      await expect(as.orderItem.update({ where: { id: voided.id }, data: { status: "PENDING" } })).rejects.toThrow();
+
+      // Lo ya cobrado no se puede quitar, pero lo no cobrado sí.
+      const billed = await item(o.id, { billedQuantity: 1_000n });
+      await expect(as.orderItem.delete({ where: { id: billed.id } })).rejects.toThrow();
+      const free = await item(o.id);
+      await as.orderItem.delete({ where: { id: free.id } });
+      expect(await as.orderItem.findUnique({ where: { id: free.id } })).toBeNull();
+    });
+  });
+
   it("la bitácora es inmutable para el rol de la app", async () => {
     const asA = withTenant(prisma, orgA);
     const log = await asA.auditLog.create({
