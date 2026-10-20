@@ -35,12 +35,19 @@ export const formatDateTime = (iso: string | Date | null | undefined) =>
       }).format(new Date(iso))
     : "—";
 
-export const formatDate = (iso: string | Date | null | undefined) =>
-  iso
-    ? new Intl.DateTimeFormat("es-DO", { dateStyle: "medium", timeZone: TZ }).format(
-        new Date(iso),
-      )
-    : "—";
+/**
+ * Fecha para mostrar. Un texto "AAAA-MM-DD" es un DÍA de calendario (fecha de un comprobante, vencimiento…),
+ * no un instante: se muestra tal cual, sin pasarlo por la zona horaria (si no, retrocede un día).
+ */
+export const formatDate = (iso: string | Date | null | undefined) => {
+  if (!iso) return "—";
+  if (typeof iso === "string" && /^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+    return new Intl.DateTimeFormat("es-DO", { dateStyle: "medium", timeZone: "UTC" }).format(
+      new Date(`${iso}T00:00:00Z`),
+    );
+  }
+  return new Intl.DateTimeFormat("es-DO", { dateStyle: "medium", timeZone: TZ }).format(new Date(iso));
+};
 
 /** La API devuelve montos como texto decimal; se formatean con el mismo código que el motor fiscal. */
 export function money(value: string, currency = "DOP") {

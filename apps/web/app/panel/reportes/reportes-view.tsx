@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { TAX_LABELS } from "@facturacion/core";
 import { BarChart } from "@/components/bar-chart";
+import { ReportTabs } from "@/components/report-tabs";
 import {
   Button,
   EmptyState,
@@ -82,6 +83,8 @@ export function ReportesView() {
           </Button>
         }
       />
+
+      <ReportTabs active="ventas" />
 
       <div className="flex flex-wrap items-end gap-3">
         <Field label="Desde" className="w-44">

@@ -200,6 +200,11 @@ export function ProductosView() {
                   <div className="text-xs text-zinc-500">
                     {p.priceIncludesTax ? "con impuesto" : "sin impuesto"}
                   </div>
+                  {p.lastCost && (
+                    <div className="text-xs text-zinc-500">
+                      costo {formatDop(toCents(p.lastCost))}
+                    </div>
+                  )}
                 </td>
                 {canManage && (
                   <td className={`${tableStyles.td} whitespace-nowrap text-right`}>

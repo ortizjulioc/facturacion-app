@@ -850,7 +850,7 @@ function Row({
 
 // ───────────── Buscador de productos / lector de códigos ─────────────
 
-type PickedProduct = {
+export type PickedProduct = {
   id: string;
   name: string;
   unit: string;
@@ -859,7 +859,7 @@ type PickedProduct = {
   priceIncludesTax: boolean;
 };
 
-function ProductPicker({ onPick }: { onPick: (p: PickedProduct) => void }) {
+export function ProductPicker({ onPick }: { onPick: (p: PickedProduct) => void }) {
   const [q, setQ] = useState("");
   const dq = useDebounced(q.trim(), 250);
   const [scanError, setScanError] = useState<string | null>(null);

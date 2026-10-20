@@ -1,7 +1,12 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { ECF_LABELS, ECF_TYPES, formatDocument, type EcfType } from "@facturacion/core";
+import {
+  ALL_ECF_LABELS,
+  ALL_ECF_TYPES,
+  formatDocument,
+  type AnyEcfType,
+} from "@facturacion/core";
 import {
   Badge,
   Button,
@@ -121,7 +126,7 @@ export function FiscalView() {
                     <td className={tableStyles.td}>
                       <span className="font-medium">{s.ecfType}</span>
                       <div className="text-xs text-zinc-500">
-                        {ECF_LABELS[s.ecfType as EcfType]}
+                        {ALL_ECF_LABELS[s.ecfType as AnyEcfType]}
                       </div>
                     </td>
                     <td className={`${tableStyles.td} font-mono text-xs`}>
@@ -353,7 +358,7 @@ function SequenceForm({
       await unwrap(
         await api.v1.sequences.$post({
           json: {
-            ecfType: String(f.get("ecfType")) as EcfType,
+            ecfType: String(f.get("ecfType")) as AnyEcfType,
             fromNumber: Number(f.get("fromNumber")),
             toNumber: Number(f.get("toNumber")),
             expiresAt: String(f.get("expiresAt")),
@@ -372,9 +377,9 @@ function SequenceForm({
     <form onSubmit={onSubmit} className="space-y-4">
       <Field label="Tipo de comprobante">
         <Select name="ecfType" defaultValue="E32">
-          {ECF_TYPES.map((t) => (
+          {ALL_ECF_TYPES.map((t) => (
             <option key={t} value={t}>
-              {t} · {ECF_LABELS[t]}
+              {t} · {ALL_ECF_LABELS[t]}
             </option>
           ))}
         </Select>
