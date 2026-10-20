@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { useCallback, useState } from "react";
-import { Button, EmptyState, ErrorNote, PageHeader } from "@/components/ui";
+import { Badge, Button, EmptyState, ErrorNote, PageHeader } from "@/components/ui";
+import { COURSE_LABELS } from "@/lib/format";
 import { api, errorMessage, expectOk, unwrap } from "@/lib/api";
 import { useInterval } from "@/lib/use-interval";
 import { useQuery } from "@/lib/use-query";
@@ -109,6 +110,15 @@ export function CocinaView() {
                   <li key={i.id} className="flex items-start justify-between gap-2">
                     <div className="text-sm">
                       <span className="font-semibold tabular-nums">{i.quantity}×</span> {i.name}
+                      {i.combo && <span className="text-xs text-zinc-500"> · {i.combo}</span>}
+                      {g.items.some((x) => x.course !== g.items[0]?.course) && (
+                        <span className="ml-1">
+                          <Badge>{COURSE_LABELS[i.course] ?? `Curso ${i.course}`}</Badge>
+                        </span>
+                      )}
+                      {i.modifiers.length > 0 && (
+                        <p className="text-xs font-medium">{i.modifiers.map((m) => m.name).join(", ")}</p>
+                      )}
                       {i.notes && (
                         <p className="text-xs font-medium text-amber-700 dark:text-amber-400">
                           {i.notes}

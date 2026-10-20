@@ -26,7 +26,9 @@ import {
 import { useDialogs } from "@/components/dialogs";
 import { usePanel } from "@/components/panel-context";
 import { api, errorMessage, expectOk, unwrap } from "@/lib/api";
+import { COURSE_LABELS, COURSES } from "@/lib/format";
 import { useDebounced, useQuery } from "@/lib/use-query";
+import { ModifierGroupsManager } from "./modifier-groups";
 
 const PAGE_SIZE = 20;
 
@@ -62,6 +64,7 @@ export function ProductosView() {
   const [showInactive, setShowInactive] = useState(false);
   const [editing, setEditing] = useState<Product | "new" | null>(null);
   const [categoriesOpen, setCategoriesOpen] = useState(false);
+  const [modifiersOpen, setModifiersOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const fetchProducts = useCallback(
@@ -110,6 +113,9 @@ export function ProductosView() {
             <>
               <Button variant="secondary" onClick={() => setCategoriesOpen(true)}>
                 Categorías
+              </Button>
+              <Button variant="secondary" onClick={() => setModifiersOpen(true)}>
+                Modificadores
               </Button>
               <Button onClick={() => setEditing("new")}>Nuevo producto</Button>
             </>
@@ -257,6 +263,14 @@ export function ProductosView() {
       </Modal>
 
       <Modal
+        open={modifiersOpen}
+        onClose={() => setModifiersOpen(false)}
+        title="Modificadores"
+      >
+        {modifiersOpen && <ModifierGroupsManager />}
+      </Modal>
+
+      <Modal
         open={categoriesOpen}
         onClose={() => setCategoriesOpen(false)}
         title="Categorías"
@@ -272,19 +286,65 @@ export function ProductosView() {
   );
 }
 
-function ProductForm({
+type MenuConfig = {
+  isCombo: boolean;
+  modifierGroupIds: string[];
+  components: { productId: string; name: string; quantity: number }[];
+};
+const EMPTY_MENU: MenuConfig = { isCombo: false, modifierGroupIds: [], components: [] };
+
+/** Carga la configuración de restaurante del producto (modificadores y combo) antes de mostrar el formulario. */
+function ProductForm(props: { product: Product | null; categories: Category[]; onDone: () => void }) {
+  const id = props.product?.id;
+  const config = useQuery(
+    useCallback(
+      async (): Promise<MenuConfig> =>
+        id
+          ? (await unwrap(await api.v1.restaurant.products[":id"].menu.$get({ param: { id } }))).data
+          : EMPTY_MENU,
+      [id],
+    ),
+  );
+  if (config.error) return <ErrorNote message={config.error} />;
+  if (!config.data) return <EmptyState>Cargando…</EmptyState>;
+  return <ProductFormBody {...props} menu={config.data} />;
+}
+
+function ProductFormBody({
   product,
   categories,
+  menu,
   onDone,
 }: {
   product: Product | null;
   categories: Category[];
+  menu: MenuConfig;
   onDone: () => void;
 }) {
   const { toast } = useDialogs();
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [track, setTrack] = useState(product?.trackInventory ?? false);
+  const [groupIds, setGroupIds] = useState<string[]>(menu.modifierGroupIds);
+  const [components, setComponents] = useState(menu.components);
+  // Si el producto se guardó pero la configuración falló, al reintentar se actualiza en vez de crear otro.
+  const [savedId, setSavedId] = useState<string | null>(product?.id ?? null);
+  const groups = useQuery(
+    useCallback(
+      async () =>
+        (await unwrap(await api.v1.restaurant["modifier-groups"].$get({ query: {} }))).data,
+      [],
+    ),
+  );
+  const candidates = useQuery(
+    useCallback(
+      async () =>
+        (await unwrap(await api.v1.products.$get({ query: { active: "true", pageSize: "200" } }))).data.filter(
+          (p) => !p.isCombo && !p.allowsDecimals && p.id !== product?.id,
+        ),
+      [product?.id],
+    ),
+  );
 
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -305,17 +365,34 @@ function ProductForm({
       priceIncludesTax: f.get("priceIncludesTax") === "on",
       allowsDecimals: f.get("allowsDecimals") === "on",
       prepStation: text("prepStation") as "NONE" | "KITCHEN" | "BAR",
+      course: Number(text("course")) || 1,
       trackInventory: track,
       minStock: track ? text("minStock").replace(",", ".") || "0" : "0",
     };
 
     try {
-      if (product) {
-        await unwrap(
-          await api.v1.products[":id"].$patch({ param: { id: product.id }, json }),
-        );
+      let id = savedId;
+      if (id) {
+        await unwrap(await api.v1.products[":id"].$patch({ param: { id }, json }));
       } else {
-        await unwrap(await api.v1.products.$post({ json }));
+        id = (await unwrap(await api.v1.products.$post({ json }))).data.id;
+        setSavedId(id);
+      }
+      // Modificadores y combo: solo se envían si cambiaron (o si es un producto nuevo con configuración).
+      const same =
+        sameSet(groupIds, menu.modifierGroupIds) &&
+        JSON.stringify(components.map((k) => [k.productId, k.quantity])) ===
+          JSON.stringify(menu.components.map((k) => [k.productId, k.quantity]));
+      if (!same) {
+        await expectOk(
+          await api.v1.restaurant.products[":id"].menu.$put({
+            param: { id },
+            json: {
+              modifierGroupIds: groupIds,
+              components: components.map((k) => ({ productId: k.productId, quantity: k.quantity })),
+            },
+          }),
+        );
       }
       toast(product ? "Producto actualizado" : "Producto creado");
       onDone();
@@ -406,16 +483,98 @@ function ProductForm({
           </Field>
         )}
       </div>
-      <Field
-        label="Estación de preparación"
-        hint="En restaurantes: a dónde se envía el pedido al anotarlo en una mesa"
-      >
-        <Select name="prepStation" defaultValue={product?.prepStation ?? "NONE"}>
-          <option value="NONE">No se prepara (sale directo)</option>
-          <option value="KITCHEN">Cocina</option>
-          <option value="BAR">Bar</option>
-        </Select>
-      </Field>
+      <div className="space-y-3 rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
+        <p className="text-sm font-medium">Restaurante</p>
+        <div className="grid grid-cols-2 gap-4">
+          <Field label="Estación de preparación" hint="A dónde va el pedido al enviarlo">
+            <Select name="prepStation" defaultValue={product?.prepStation ?? "NONE"}>
+              <option value="NONE">No se prepara (sale directo)</option>
+              <option value="KITCHEN">Cocina</option>
+              <option value="BAR">Bar</option>
+            </Select>
+          </Field>
+          <Field label="Curso" hint="Cuándo sale en una comida por tiempos">
+            <Select name="course" defaultValue={product?.course ?? 1}>
+              {COURSES.map((c) => (
+                <option key={c} value={c}>
+                  {c} · {COURSE_LABELS[c]}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        </div>
+
+        {components.length === 0 && (groups.data?.length ?? 0) > 0 && (
+          <fieldset className="space-y-1.5">
+            <legend className="text-sm font-medium">Modificadores</legend>
+            {groups.data?.map((g) => (
+              <Checkbox
+                key={g.id}
+                label={`${g.name} (${g.modifiers.map((m) => m.name).join(", ")})`}
+                checked={groupIds.includes(g.id)}
+                onChange={(e) =>
+                  setGroupIds((ids) => (e.target.checked ? [...ids, g.id] : ids.filter((x) => x !== g.id)))
+                }
+              />
+            ))}
+          </fieldset>
+        )}
+
+        {groupIds.length === 0 && (
+          <fieldset className="space-y-2">
+            <legend className="text-sm font-medium">Combo</legend>
+            <p className="text-xs text-zinc-500">
+              Si agregas componentes, este producto se vende como combo: se cobra a su precio y cada componente va a su
+              estación (y descuenta su inventario).
+            </p>
+            {components.map((k) => (
+              <div key={k.productId} className="flex items-center gap-2 text-sm">
+                <span className="flex-1">{k.name}</span>
+                <Input
+                  aria-label={`Cantidad de ${k.name}`}
+                  type="number"
+                  min={1}
+                  max={999}
+                  className="w-20"
+                  value={k.quantity}
+                  onChange={(e) =>
+                    setComponents((cs) =>
+                      cs.map((x) =>
+                        x.productId === k.productId ? { ...x, quantity: Math.max(1, Number(e.target.value) || 1) } : x,
+                      ),
+                    )
+                  }
+                />
+                <button
+                  type="button"
+                  aria-label={`Quitar ${k.name}`}
+                  className="text-zinc-500 hover:text-red-600"
+                  onClick={() => setComponents((cs) => cs.filter((x) => x.productId !== k.productId))}
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+            <Select
+              aria-label="Agregar componente"
+              value=""
+              onChange={(e) => {
+                const p = candidates.data?.find((x) => x.id === e.target.value);
+                if (p) setComponents((cs) => [...cs, { productId: p.id, name: p.name, quantity: 1 }]);
+              }}
+            >
+              <option value="">Agregar componente…</option>
+              {candidates.data
+                ?.filter((p) => !components.some((k) => k.productId === p.id))
+                .map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+            </Select>
+          </fieldset>
+        )}
+      </div>
       <Field label="Descripción">
         <Textarea name="description" rows={2} defaultValue={product?.description ?? ""} />
       </Field>
@@ -525,3 +684,5 @@ function CategoriesManager({
     </div>
   );
 }
+
+const sameSet = (a: string[], b: string[]) => a.length === b.length && a.every((x) => b.includes(x));

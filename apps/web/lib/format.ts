@@ -62,3 +62,13 @@ export const todayLocal = () =>
   new Intl.DateTimeFormat("sv-SE", { timeZone: TZ }).format(new Date());
 
 export const monthStartLocal = () => `${todayLocal().slice(0, 7)}-01`;
+
+/** Cursos del servicio en mesa (se muestran solo cuando el restaurante usa más de uno). */
+export const COURSE_LABELS: Record<number, string> = {
+  1: "Entrada",
+  2: "Plato fuerte",
+  3: "Postre",
+  4: "Curso 4",
+  5: "Curso 5",
+};
+export const COURSES = [1, 2, 3, 4, 5];

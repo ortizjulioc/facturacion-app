@@ -24,11 +24,16 @@ import {
   Select,
 } from "@/components/ui";
 import { api, errorMessage, expectOk, unwrap } from "@/lib/api";
-import { formatDateTime, money, PAYMENT_LABELS, PAYMENT_METHODS } from "@/lib/format";
+import { COURSE_LABELS, COURSES, formatDateTime, money, PAYMENT_LABELS, PAYMENT_METHODS } from "@/lib/format";
 import { useDebounced, useQuery } from "@/lib/use-query";
 
 type Order = Awaited<ReturnType<typeof loadOrder>>;
 type Item = Order["items"][number];
+type MenuProduct = Awaited<ReturnType<typeof loadMenu>>[number];
+
+async function loadMenu() {
+  return (await unwrap(await api.v1.restaurant.menu.$get({ query: {} }))).data;
+}
 
 async function loadOrder(id: string) {
   return (await unwrap(await api.v1.restaurant.orders[":id"].$get({ param: { id } }))).data;
@@ -52,6 +57,8 @@ export function ComandaView({ id }: { id: string }) {
   const [busy, setBusy] = useState(false);
   const [billing, setBilling] = useState(false);
   const [transferring, setTransferring] = useState(false);
+  const [configuring, setConfiguring] = useState<MenuProduct | null>(null);
+  const menu = useQuery(useCallback(() => loadMenu(), []));
 
   /** Ejecuta una operación sobre la comanda y refresca; los errores se muestran arriba. */
   async function run(action: () => Promise<unknown>, done?: string) {
@@ -70,16 +77,31 @@ export function ComandaView({ id }: { id: string }) {
 
   const o = order.data;
   const open = o?.status === "OPEN";
-  const pending = o?.items.filter((i) => i.status === "PENDING").length ?? 0;
+  const top = o?.items.filter((i) => !i.parentItemId) ?? [];
+  const pending = top.filter((i) => i.status === "PENDING").length;
+  // Los cursos solo se muestran si el restaurante los usa (algún producto o pedido fuera del curso 1).
+  const showCourses = top.some((i) => i.course > 1) || (menu.data?.some((p) => p.course > 1) ?? false);
+  const pendingCourses = [...new Set(top.filter((i) => i.status === "PENDING").map((i) => i.course))].sort();
   const toCharge = o?.items.filter((i) => Number(i.remaining) > 0).length ?? 0;
 
   const param = { id };
-  const add = (productId: string) =>
+  const add = (productId: string, extra: { modifierIds?: string[]; notes?: string } = {}) =>
     run(async () =>
       unwrap(
         await api.v1.restaurant.orders[":id"].items.$post({
           param,
-          json: { productId, quantity: "1" },
+          json: { productId, quantity: "1", modifierIds: extra.modifierIds ?? [], notes: extra.notes },
+        }),
+      ),
+    );
+  const pick = (p: MenuProduct) => (p.modifierGroups.length > 0 ? setConfiguring(p) : add(p.id));
+
+  const changeCourse = (item: Item, course: number) =>
+    run(async () =>
+      unwrap(
+        await api.v1.restaurant.orders[":id"].items[":itemId"].$patch({
+          param: { ...param, itemId: item.id },
+          json: { course },
         }),
       ),
     );
@@ -142,11 +164,13 @@ export function ComandaView({ id }: { id: string }) {
     );
   }
 
-  async function send() {
+  async function send(course?: number) {
     setError(null);
     setBusy(true);
     try {
-      const res = await unwrap(await api.v1.restaurant.orders[":id"].send.$post({ param }));
+      const res = await unwrap(
+        await api.v1.restaurant.orders[":id"].send.$post({ param, json: course ? { course } : {} }),
+      );
       const count = res.data.ticket.stations.reduce((n, s) => n + s.items.length, 0);
       toast(`${count} producto${count === 1 ? "" : "s"} enviado${count === 1 ? "" : "s"} a preparación`);
     } catch (e) {
@@ -215,23 +239,33 @@ export function ComandaView({ id }: { id: string }) {
 
       {o && (
         <div className="grid gap-6 lg:grid-cols-[1fr_22rem]">
-          {open ? <ProductPicker onPick={add} disabled={busy} /> : <div />}
+          {open ? (
+            <ProductPicker menu={menu.data} error={menu.error} onPick={pick} disabled={busy} />
+          ) : (
+            <div />
+          )}
 
           <section className="space-y-4">
             <ul className="divide-y divide-zinc-200 rounded-md border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-800">
-              {o.items.length === 0 && <EmptyState>Aún no hay productos.</EmptyState>}
-              {o.items.map((i) => (
-                <ItemRow
-                  key={i.id}
-                  item={i}
-                  editable={open}
-                  disabled={busy}
-                  onDelta={(d) => changeQuantity(i, d)}
-                  onNotes={() => editNotes(i)}
-                  onRemove={() => removeItem(i)}
-                  onVoid={() => voidSent(i)}
-                />
-              ))}
+              {top.length === 0 && <EmptyState>Aún no hay productos.</EmptyState>}
+              {[...top]
+                .sort((a, b) => (showCourses ? a.course - b.course : 0))
+                .map((i, idx, list) => (
+                  <ItemRow
+                    key={i.id}
+                    item={i}
+                    parts={o.items.filter((p) => p.parentItemId === i.id)}
+                    courseHeader={showCourses && (idx === 0 || list[idx - 1]!.course !== i.course) ? i.course : null}
+                    showCourse={showCourses}
+                    editable={open}
+                    disabled={busy}
+                    onDelta={(d) => changeQuantity(i, d)}
+                    onNotes={() => editNotes(i)}
+                    onRemove={() => removeItem(i)}
+                    onVoid={() => voidSent(i)}
+                    onCourse={(course) => changeCourse(i, course)}
+                  />
+                ))}
             </ul>
 
             <dl className="space-y-1 rounded-md border border-zinc-200 p-3 text-sm dark:border-zinc-800">
@@ -244,9 +278,15 @@ export function ComandaView({ id }: { id: string }) {
 
             {open && (
               <div className="flex flex-wrap gap-2">
-                <Button variant="secondary" disabled={busy || pending === 0} onClick={send}>
+                <Button variant="secondary" disabled={busy || pending === 0} onClick={() => send()}>
                   Enviar a cocina{pending > 0 ? ` (${pending})` : ""}
                 </Button>
+                {pendingCourses.length > 1 &&
+                  pendingCourses.map((course) => (
+                    <Button key={course} variant="ghost" disabled={busy} onClick={() => send(course)}>
+                      Solo {COURSE_LABELS[course]?.toLowerCase()}
+                    </Button>
+                  ))}
                 <Button disabled={busy || toCharge === 0} onClick={() => setBilling(true)}>
                   Cobrar
                 </Button>
@@ -262,6 +302,23 @@ export function ComandaView({ id }: { id: string }) {
             order={o}
             onClose={() => setBilling(false)}
             onBilled={order.reload}
+          />
+        )}
+      </Modal>
+
+      <Modal
+        open={configuring !== null}
+        onClose={() => setConfiguring(null)}
+        title={configuring?.name ?? ""}
+      >
+        {configuring && (
+          <ModifierDialog
+            product={configuring}
+            onAdd={async (modifierIds, notes) => {
+              const p = configuring;
+              setConfiguring(null);
+              await add(p.id, { modifierIds, notes });
+            }}
           />
         )}
       </Modal>
@@ -294,32 +351,62 @@ function Row({ label, value, strong }: { label: string; value: string; strong?: 
 
 function ItemRow({
   item: i,
+  parts,
+  courseHeader,
+  showCourse,
   editable,
   disabled,
   onDelta,
   onNotes,
   onRemove,
   onVoid,
+  onCourse,
 }: {
   item: Item;
+  parts: Item[];
+  courseHeader: number | null;
+  showCourse: boolean;
   editable: boolean;
   disabled: boolean;
   onDelta: (delta: number) => void;
   onNotes: () => void;
   onRemove: () => void;
   onVoid: () => void;
+  onCourse: (course: number) => void;
 }) {
   const status = ITEM_STATUS[i.status] ?? ITEM_STATUS.PENDING!;
   const billed = Number(i.billedQuantity) > 0;
   const voided = i.status === "VOID";
   return (
     <li className={`space-y-1 px-3 py-2.5 text-sm ${voided ? "opacity-50" : ""}`}>
+      {courseHeader !== null && (
+        <p className="-mt-0.5 pb-1 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+          {courseHeader} · {COURSE_LABELS[courseHeader]}
+        </p>
+      )}
       <div className="flex items-start justify-between gap-2">
         <span className={voided ? "line-through" : "font-medium"}>
           {i.quantity}× {i.name}
         </span>
         <span className="tabular-nums">{money(i.pendingTotal)}</span>
       </div>
+      {i.modifiers.length > 0 && (
+        <p className="text-xs text-zinc-600 dark:text-zinc-400">
+          {i.modifiers.map((m) => (Number(m.price) > 0 ? `${m.name} (+${money(m.price)})` : m.name)).join(", ")}
+        </p>
+      )}
+      {parts.length > 0 && (
+        <ul className="space-y-0.5 text-xs text-zinc-600 dark:text-zinc-400">
+          {parts.map((p) => (
+            <li key={p.id} className="flex justify-between gap-2">
+              <span>
+                · {p.quantity}× {p.name}
+              </span>
+              <span>{ITEM_STATUS[p.status]?.label}</span>
+            </li>
+          ))}
+        </ul>
+      )}
       <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
         <Badge tone={status.tone}>{status.label}</Badge>
         {billed && !voided && <span>cobrado {i.billedQuantity}</span>}
@@ -339,6 +426,21 @@ function ItemRow({
               <Button variant="ghost" className="px-2.5 py-1" disabled={disabled} onClick={onNotes}>
                 Nota
               </Button>
+              {showCourse && (
+                <Select
+                  aria-label="Curso"
+                  className="w-auto py-1 text-xs"
+                  value={i.course}
+                  disabled={disabled}
+                  onChange={(e) => onCourse(Number(e.target.value))}
+                >
+                  {COURSES.map((c) => (
+                    <option key={c} value={c}>
+                      {c} · {COURSE_LABELS[c]}
+                    </option>
+                  ))}
+                </Select>
+              )}
               <Button variant="ghost" className="px-2.5 py-1" disabled={disabled} onClick={onRemove}>
                 Quitar
               </Button>
@@ -355,31 +457,26 @@ function ItemRow({
   );
 }
 
-function ProductPicker({ onPick, disabled }: { onPick: (productId: string) => void; disabled: boolean }) {
+function ProductPicker({
+  menu,
+  error,
+  onPick,
+  disabled,
+}: {
+  menu: MenuProduct[] | undefined;
+  error: string | null;
+  onPick: (product: MenuProduct) => void;
+  disabled: boolean;
+}) {
   const [search, setSearch] = useState("");
-  const q = useDebounced(search.trim(), 250);
   const [categoryId, setCategoryId] = useState("");
 
   const categories = useQuery(
     useCallback(async () => (await unwrap(await api.v1.categories.$get())).data, []),
   );
-  const products = useQuery(
-    useCallback(
-      async () =>
-        (
-          await unwrap(
-            await api.v1.products.$get({
-              query: {
-                active: "true",
-                pageSize: "60",
-                ...(q ? { q } : {}),
-                ...(categoryId ? { categoryId } : {}),
-              },
-            }),
-          )
-        ).data,
-      [q, categoryId],
-    ),
+  const q = search.trim().toLowerCase();
+  const list = (menu ?? []).filter(
+    (p) => (!categoryId || p.categoryId === categoryId) && (!q || p.name.toLowerCase().includes(q)),
   );
 
   return (
@@ -407,24 +504,103 @@ function ProductPicker({ onPick, disabled }: { onPick: (productId: string) => vo
           ))}
         </Select>
       </div>
-      <ErrorNote message={products.error} />
+      <ErrorNote message={error} />
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-        {products.data?.map((p) => (
+        {list.map((p) => (
           <button
             key={p.id}
             disabled={disabled}
-            onClick={() => onPick(p.id)}
+            onClick={() => onPick(p)}
             className="flex min-h-20 flex-col items-start justify-between rounded-lg border border-zinc-200 p-3 text-left text-sm transition hover:border-zinc-400 hover:shadow disabled:opacity-60 dark:border-zinc-800"
           >
             <span className="font-medium">{p.name}</span>
-            <span className="tabular-nums text-zinc-600 dark:text-zinc-400">{money(p.price)}</span>
+            <span className="flex w-full flex-wrap items-center gap-1">
+              <span className="tabular-nums text-zinc-600 dark:text-zinc-400">{money(p.price)}</span>
+              {p.isCombo && <Badge>Combo</Badge>}
+              {p.modifierGroups.length > 0 && <Badge>Opciones</Badge>}
+            </span>
           </button>
         ))}
       </div>
-      {products.data && products.data.length === 0 && (
-        <EmptyState>Ningún producto coincide.</EmptyState>
-      )}
+      {menu && list.length === 0 && <EmptyState>Ningún producto coincide.</EmptyState>}
     </section>
+  );
+}
+
+/** Elegir las opciones de un producto (término, extras…) antes de anotarlo. */
+function ModifierDialog({
+  product,
+  onAdd,
+}: {
+  product: MenuProduct;
+  onAdd: (modifierIds: string[], notes: string) => void;
+}) {
+  const [chosen, setChosen] = useState<Record<string, string[]>>({});
+  const [notes, setNotes] = useState("");
+
+  const ids = Object.values(chosen).flat();
+  const extra = product.modifierGroups
+    .flatMap((g) => g.modifiers)
+    .filter((m) => ids.includes(m.id))
+    .reduce((sum, m) => sum + toCents(m.price), 0n);
+  const missing = product.modifierGroups.find((g) => (chosen[g.id]?.length ?? 0) < g.minSelect);
+
+  function toggle(groupId: string, modifierId: string, max: number) {
+    setChosen((s) => {
+      const current = s[groupId] ?? [];
+      if (current.includes(modifierId)) return { ...s, [groupId]: current.filter((x) => x !== modifierId) };
+      // Con un máximo de 1 la opción nueva reemplaza a la anterior (como un selector).
+      return { ...s, [groupId]: max === 1 ? [modifierId] : current.length < max ? [...current, modifierId] : current };
+    });
+  }
+
+  return (
+    <div className="space-y-4">
+      {product.modifierGroups.map((g) => {
+        const selected = chosen[g.id] ?? [];
+        return (
+          <fieldset key={g.id} className="space-y-2">
+            <legend className="text-sm font-medium">
+              {g.name}{" "}
+              <span className="font-normal text-zinc-500">
+                {g.minSelect > 0 ? "obligatorio" : "opcional"}
+                {g.maxSelect > 1 ? ` · hasta ${g.maxSelect}` : ""}
+              </span>
+            </legend>
+            <div className="flex flex-wrap gap-2">
+              {g.modifiers.map((m) => {
+                const on = selected.includes(m.id);
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    aria-pressed={on}
+                    onClick={() => toggle(g.id, m.id, g.maxSelect)}
+                    className={`rounded-md border px-3 py-1.5 text-sm transition ${
+                      on
+                        ? "border-foreground bg-foreground text-background"
+                        : "border-zinc-300 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-900"
+                    }`}
+                  >
+                    {m.name}
+                    {Number(m.price) > 0 && <span className="opacity-70"> +{money(m.price)}</span>}
+                  </button>
+                );
+              })}
+            </div>
+          </fieldset>
+        );
+      })}
+      <Field label="Nota (opcional)">
+        <Input value={notes} maxLength={200} placeholder="Ej.: sin cebolla" onChange={(e) => setNotes(e.target.value)} />
+      </Field>
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-sm tabular-nums">{money(fromCents(toCents(product.price) + extra))}</span>
+        <Button disabled={!!missing} onClick={() => onAdd(ids, notes.trim())}>
+          {missing ? `Elige ${missing.name.toLowerCase()}` : "Agregar"}
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -624,7 +800,12 @@ function BillDialog({
                 checked={included[i.id] ?? false}
                 onChange={(e) => setIncluded((s) => ({ ...s, [i.id]: e.target.checked }))}
               />
-              <span className="flex-1">{i.name}</span>
+              <span className="flex-1">
+                {i.name}
+                {i.modifiers.length > 0 && (
+                  <span className="block text-xs text-zinc-500">{i.modifiers.map((m) => m.name).join(", ")}</span>
+                )}
+              </span>
               <Input
                 aria-label={`Cantidad de ${i.name}`}
                 className="w-20 text-right"
