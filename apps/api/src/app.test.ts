@@ -3348,6 +3348,480 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       });
     });
 
+    describe("carta: modificadores, cursos y combos", () => {
+      const put = (path: string, body: unknown, cookie?: string) =>
+        call(path, { method: "PUT", body: JSON.stringify(body), cookie });
+      const product = async (r: Resto, body: Json) => {
+        const res = await post("/v1/products", body, r.cookie);
+        expect(res.status, JSON.stringify(await res.clone().json())).toBe(201);
+        return (await json(res)).data as Json;
+      };
+      const group = (r: Resto, body: Json) => post(`${R}/modifier-groups`, body, r.cookie);
+      const terminoBody = {
+        name: "Término",
+        minSelect: 1,
+        maxSelect: 1,
+        modifiers: [{ name: "Medio" }, { name: "Bien cocido" }],
+      };
+      const extrasBody = {
+        name: "Extras",
+        minSelect: 0,
+        maxSelect: 2,
+        modifiers: [
+          { name: "Queso", price: "50.00" },
+          { name: "Tocino", price: "60.00" },
+          { name: "Huevo", price: "30.00" },
+        ],
+      };
+      const stockOf = async (r: Resto, productId: string) =>
+        ((await json(await get(`/v1/inventory/stock?branchId=${r.branch.id}`, r.cookie))).data as Json[]).find(
+          (x) => x.productId === productId,
+        )?.quantity;
+
+      /** Hamburguesa RD$300.00 con «Término» (obligatorio) y «Extras» (hasta 2). */
+      async function burger(r: Resto) {
+        const termino = (await json(await group(r, terminoBody))).data as Json;
+        const extras = (await json(await group(r, extrasBody))).data as Json;
+        const hamburguesa = await product(r, { name: "Hamburguesa", price: "300.00", prepStation: "KITCHEN" });
+        const cfg = await put(`${R}/products/${hamburguesa.id}/menu`, { modifierGroupIds: [termino.id, extras.id] }, r.cookie);
+        expect(cfg.status).toBe(204);
+        const mod = (g: Json, name: string) => (g.modifiers as Json[]).find((m) => m.name === name)!.id as string;
+        return { termino, extras, hamburguesa, mod };
+      }
+
+      describe("grupos de modificadores", () => {
+        it("crea, lista, edita y borra grupos con sus opciones", async () => {
+          const r = await resto("cm1");
+          const created = await group(r, extrasBody);
+          expect(created.status).toBe(201);
+          const g = (await json(created)).data as Json;
+          expect(g).toMatchObject({ name: "Extras", minSelect: 0, maxSelect: 2, active: true, products: 0 });
+          expect(g.modifiers.map((m: Json) => `${m.name}:${m.price}`)).toEqual(["Queso:50.00", "Tocino:60.00", "Huevo:30.00"]);
+          expect((await group(r, extrasBody)).status).toBe(409); // mismo nombre
+
+          // Editar: renombrar una opción, cambiar su precio, quitar otra y agregar una nueva.
+          const [queso, tocino] = g.modifiers as [Json, Json, Json];
+          const upd = await put(
+            `${R}/modifier-groups/${g.id}`,
+            {
+              name: "Adicionales",
+              minSelect: 0,
+              maxSelect: 3,
+              modifiers: [
+                { id: queso.id, name: "Queso cheddar", price: "55.00" },
+                { id: tocino.id, name: "Tocino", price: "60.00", active: false },
+                { name: "Aguacate", price: "40.00" },
+              ],
+            },
+            r.cookie,
+          );
+          expect(upd.status, JSON.stringify(await upd.clone().json())).toBe(200);
+          const after = (await json(upd)).data as Json;
+          expect(after).toMatchObject({ name: "Adicionales", maxSelect: 3 });
+          expect(after.modifiers.map((m: Json) => `${m.name}:${m.price}:${m.active}`)).toEqual([
+            "Queso cheddar:55.00:true",
+            "Tocino:60.00:false",
+            "Aguacate:40.00:true",
+          ]);
+          expect(after.modifiers[0].id).toBe(queso.id); // se conserva el id
+
+          // Un intercambio de nombres no choca con la unicidad.
+          const swap = await put(
+            `${R}/modifier-groups/${g.id}`,
+            {
+              name: "Adicionales",
+              modifiers: [
+                { id: after.modifiers[0].id, name: "Aguacate", price: "40.00" },
+                { id: after.modifiers[2].id, name: "Queso cheddar", price: "55.00" },
+              ],
+            },
+            r.cookie,
+          );
+          expect(swap.status).toBe(200);
+
+          const list = (await json(await get(`${R}/modifier-groups`, r.cookie))).data as Json[];
+          expect(list.map((x) => x.name)).toEqual(["Adicionales"]);
+          expect((await call(`${R}/modifier-groups/${g.id}`, { method: "DELETE", cookie: r.cookie })).status).toBe(204);
+          expect(((await json(await get(`${R}/modifier-groups`, r.cookie))).data as Json[])).toEqual([]);
+        });
+
+        it("valida mínimos, máximos, nombres repetidos y precios", async () => {
+          const r = await resto("cm2");
+          const bad = (over: Json) => group(r, { ...extrasBody, ...over });
+          expect((await bad({ minSelect: 3, maxSelect: 2 })).status).toBe(400);
+          expect((await bad({ maxSelect: 0 })).status).toBe(400);
+          expect((await bad({ minSelect: 4, maxSelect: 5 })).status).toBe(400); // más que las opciones activas
+          expect((await bad({ modifiers: [] })).status).toBe(400);
+          expect((await bad({ modifiers: [{ name: "A" }, { name: "a" }] })).status).toBe(400);
+          expect((await bad({ modifiers: [{ name: "A", price: "-5" }] })).status).toBe(400);
+          expect((await bad({ name: "" })).status).toBe(400);
+        });
+
+        it("el mesero lee los grupos pero no los administra; cada empresa ve los suyos", async () => {
+          const a = await resto("cm3a");
+          const b = await resto("cm3b");
+          const g = (await json(await group(a, extrasBody))).data as Json;
+          const waiter = await signUp("cm3w");
+          await prisma.member.create({ data: { id: randomUUID(), organizationId: a.orgId, userId: waiter.userId, role: "member" } });
+          const cookie = await setActive(a.orgId, waiter.cookie);
+          expect((await get(`${R}/modifier-groups`, cookie)).status).toBe(200);
+          expect((await post(`${R}/modifier-groups`, extrasBody, cookie)).status).toBe(403);
+          expect((await put(`${R}/modifier-groups/${g.id}`, extrasBody, cookie)).status).toBe(403);
+          expect((await call(`${R}/modifier-groups/${g.id}`, { method: "DELETE", cookie })).status).toBe(403);
+
+          expect(((await json(await get(`${R}/modifier-groups`, b.cookie))).data as Json[])).toEqual([]);
+          expect((await put(`${R}/modifier-groups/${g.id}`, extrasBody, b.cookie)).status).toBe(404);
+          expect((await call(`${R}/modifier-groups/${g.id}`, { method: "DELETE", cookie: b.cookie })).status).toBe(404);
+        });
+      });
+
+      describe("modificadores en la comanda", () => {
+        it("la carta ofrece los grupos de cada producto con sus precios", async () => {
+          const r = await resto("cm4");
+          const { hamburguesa } = await burger(r);
+          const menu = (await json(await get(`${R}/menu`, r.cookie))).data as Json[];
+          const h = menu.find((p) => p.id === hamburguesa.id)!;
+          expect(h.modifierGroups.map((g: Json) => `${g.name}(${g.minSelect}-${g.maxSelect})`)).toEqual(["Término(1-1)", "Extras(0-2)"]);
+          expect(h.modifierGroups[1].modifiers.map((m: Json) => m.price)).toEqual(["50.00", "60.00", "30.00"]);
+          expect(menu.find((p) => p.name === "Pollo guisado")!.modifierGroups).toEqual([]);
+          const cfg = (await json(await get(`${R}/products/${hamburguesa.id}/menu`, r.cookie))).data;
+          expect(cfg.modifierGroupIds).toHaveLength(2);
+          // Filtros
+          expect(((await json(await get(`${R}/menu?q=hambur`, r.cookie))).data as Json[]).map((p) => p.name)).toEqual(["Hamburguesa"]);
+        });
+
+        it("suma el recargo de las opciones al precio y lo cobra", async () => {
+          const r = await resto("cm5");
+          const { hamburguesa, termino, extras, mod } = await burger(r);
+          const o = await openOrder(r);
+          const res = await post(
+            `${R}/orders/${o.id}/items`,
+            { productId: hamburguesa.id, quantity: "2", notes: "sin cebolla", modifierIds: [mod(termino, "Medio"), mod(extras, "Queso"), mod(extras, "Tocino")] },
+            r.cookie,
+          );
+          expect(res.status, JSON.stringify(await res.clone().json())).toBe(201);
+          const order = (await json(res)).data as Json;
+          const item = itemOf(order, "Hamburguesa");
+          expect(item.unitPrice).toBe("410.00"); // 300 + 50 + 60
+          expect(item.modifiers.map((m: Json) => `${m.name}:${m.price}`)).toEqual(["Medio:0.00", "Queso:50.00", "Tocino:60.00"]);
+          expect(order.totals.total).toBe("820.00");
+
+          // Cambiar el precio de la opción después no altera lo ya anotado.
+          const g = (await json(await get(`${R}/modifier-groups`, r.cookie))).data as Json[];
+          const ex = g.find((x) => x.name === "Extras")!;
+          await put(`${R}/modifier-groups/${ex.id}`, { ...ex, modifiers: ex.modifiers.map((m: Json) => ({ ...m, price: "999.00" })) }, r.cookie);
+          expect(itemOf(await getOrder(r, o.id), "Hamburguesa").unitPrice).toBe("410.00");
+
+          // El comprobante dice qué se cobró y a qué precio.
+          const billed = await post(`${R}/orders/${o.id}/bill`, { propinaLegal: false, payments: [{ method: "CASH", amount: "820.00" }] }, r.cookie);
+          expect(billed.status, JSON.stringify(await billed.clone().json())).toBe(201);
+          const line = (await json(billed)).data.document.lines[0];
+          expect(line).toMatchObject({ name: "Hamburguesa", unitPrice: "410.00", quantity: "2" });
+          expect(line.description).toBe("Medio, Queso, Tocino · sin cebolla");
+        });
+
+        it("exige el mínimo, respeta el máximo y rechaza opciones ajenas o repetidas", async () => {
+          const r = await resto("cm6");
+          const { hamburguesa, termino, extras, mod } = await burger(r);
+          const o = await openOrder(r);
+          const add = (modifierIds: string[]) => post(`${R}/orders/${o.id}/items`, { productId: hamburguesa.id, modifierIds }, r.cookie);
+
+          const none = await add([]);
+          expect(none.status).toBe(422);
+          expect(await error(none)).toMatch(/Término/);
+          expect((await add([mod(termino, "Medio"), mod(termino, "Bien cocido")])).status).toBe(422); // máximo 1
+          expect((await add([mod(termino, "Medio"), mod(extras, "Queso"), mod(extras, "Tocino"), mod(extras, "Huevo")])).status).toBe(422); // máximo 2
+          expect((await add([mod(termino, "Medio"), mod(termino, "Medio")])).status).toBe(422); // repetida
+          expect((await add([mod(termino, "Medio"), randomUUID()])).status).toBe(422); // ajena
+          // Una opción de otro producto tampoco vale.
+          const other = await group(r, { name: "Salsas", modifiers: [{ name: "Ranch" }] });
+          const ranch = ((await json(other)).data.modifiers as Json[])[0]!.id;
+          expect((await add([mod(termino, "Medio"), ranch])).status).toBe(422);
+
+          expect((await add([mod(termino, "Bien cocido")])).status).toBe(201);
+          expect((await getOrder(r, o.id)).items).toHaveLength(1);
+        });
+
+        it("junta las líneas iguales y separa las que tienen opciones distintas", async () => {
+          const r = await resto("cm7");
+          const { hamburguesa, termino, extras, mod } = await burger(r);
+          const o = await openOrder(r);
+          const add = (modifierIds: string[]) => post(`${R}/orders/${o.id}/items`, { productId: hamburguesa.id, modifierIds }, r.cookie);
+          await add([mod(termino, "Medio"), mod(extras, "Queso")]);
+          await add([mod(extras, "Queso"), mod(termino, "Medio")]); // mismo conjunto, otro orden
+          await add([mod(termino, "Medio")]);
+          const items = (await getOrder(r, o.id)).items as Json[];
+          expect(items.map((i) => `${i.quantity}:${i.unitPrice}`).sort()).toEqual(["1:300.00", "2:350.00"]);
+        });
+
+        it("las opciones desactivadas o de un grupo inactivo ya no se ofrecen", async () => {
+          const r = await resto("cm8");
+          const { hamburguesa, termino, extras, mod } = await burger(r);
+          const o = await openOrder(r);
+          const queso = mod(extras, "Queso");
+          await put(`${R}/modifier-groups/${extras.id}`, { ...extras, modifiers: (extras.modifiers as Json[]).map((m) => ({ ...m, active: m.name !== "Queso" })) }, r.cookie);
+          expect((await post(`${R}/orders/${o.id}/items`, { productId: hamburguesa.id, modifierIds: [mod(termino, "Medio"), queso] }, r.cookie)).status).toBe(422);
+          const menu = (await json(await get(`${R}/menu`, r.cookie))).data as Json[];
+          expect(menu.find((p) => p.id === hamburguesa.id)!.modifierGroups[1].modifiers.map((m: Json) => m.name)).toEqual(["Tocino", "Huevo"]);
+
+          await put(`${R}/modifier-groups/${termino.id}`, { ...termino, active: false }, r.cookie);
+          // Con el grupo obligatorio inactivo ya no se pide.
+          expect((await post(`${R}/orders/${o.id}/items`, { productId: hamburguesa.id }, r.cookie)).status).toBe(201);
+        });
+      });
+
+      describe("cursos", () => {
+        it("el producto trae su curso y se puede cambiar al anotarlo o antes de enviar", async () => {
+          const r = await resto("cu1");
+          const flan = await product(r, { name: "Flan", price: "100.00", course: 3 });
+          expect(flan.course).toBe(3);
+          expect((await post("/v1/products", { name: "Malo", price: "1.00", course: 6 }, r.cookie)).status).toBe(400);
+          expect((await patch(`/v1/products/${flan.id}`, { course: 0 }, r.cookie)).status).toBe(400);
+
+          const o = await openOrder(r);
+          const res = await post(`${R}/orders/${o.id}/items`, { productId: flan.id }, r.cookie);
+          expect(itemOf((await json(res)).data, "Flan").course).toBe(3);
+          const over = await post(`${R}/orders/${o.id}/items`, { productId: r.pollo.id, course: 2 }, r.cookie);
+          const pollo = itemOf((await json(over)).data, "Pollo guisado");
+          expect(pollo.course).toBe(2);
+
+          const moved = await patch(`${R}/orders/${o.id}/items/${pollo.id}`, { course: 1 }, r.cookie);
+          expect(itemOf((await json(moved)).data, "Pollo guisado").course).toBe(1);
+          expect((await patch(`${R}/orders/${o.id}/items/${pollo.id}`, { course: 9 }, r.cookie)).status).toBe(400);
+          // El mismo producto en otro curso es otra línea.
+          await post(`${R}/orders/${o.id}/items`, { productId: r.pollo.id, course: 2 }, r.cookie);
+          expect(((await getOrder(r, o.id)).items as Json[]).filter((i) => i.name === "Pollo guisado")).toHaveLength(2);
+        });
+
+        it("envía a cocina un curso a la vez", async () => {
+          const r = await resto("cu2");
+          const ensalada = await product(r, { name: "Ensalada", price: "150.00", prepStation: "KITCHEN", course: 1 });
+          const flan = await product(r, { name: "Flan", price: "100.00", prepStation: "KITCHEN", course: 3 });
+          const o = await openOrder(r);
+          await addItem(r, o.id, ensalada.id);
+          await addItem(r, o.id, r.pollo.id); // curso 1 por defecto
+          await post(`${R}/orders/${o.id}/items`, { productId: r.cerveza.id, course: 2 }, r.cookie);
+          await addItem(r, o.id, flan.id);
+
+          const first = await post(`${R}/orders/${o.id}/send`, { course: 1 }, r.cookie);
+          expect(first.status).toBe(200);
+          const t1 = (await json(first)).data;
+          expect(t1.ticket.course).toBe(1);
+          expect(t1.ticket.stations[0].items.map((i: Json) => i.name).sort()).toEqual(["Ensalada", "Pollo guisado"]);
+          const states = (order: Json) => Object.fromEntries((order.items as Json[]).map((i) => [i.name, i.status]));
+          expect(states(t1.order)).toEqual({ Ensalada: "SENT", "Pollo guisado": "SENT", Cerveza: "PENDING", Flan: "PENDING" });
+
+          // La cocina solo ve lo enviado; el postre espera.
+          const kitchen = (await json(await get(`${R}/kitchen?station=KITCHEN`, r.cookie))).data as Json[];
+          expect(kitchen[0]!.items.map((i: Json) => i.name).sort()).toEqual(["Ensalada", "Pollo guisado"]);
+
+          // Un curso sin pendientes no se puede enviar.
+          expect((await post(`${R}/orders/${o.id}/send`, { course: 1 }, r.cookie)).status).toBe(422);
+          const second = await post(`${R}/orders/${o.id}/send`, { course: 2 }, r.cookie);
+          expect((await json(second)).data.ticket.stations.map((s: Json) => s.station)).toEqual(["BAR"]);
+          // Sin curso: todo lo que quede.
+          const rest = await send(r, o.id);
+          expect(states((await json(rest)).data.order)).toEqual({ Ensalada: "SENT", "Pollo guisado": "SENT", Cerveza: "SENT", Flan: "SENT" });
+          expect((await post(`${R}/orders/${o.id}/send`, { course: 7 }, r.cookie)).status).toBe(400);
+        });
+      });
+
+      describe("combos", () => {
+        /** «Combo Pollo» RD$400.00: 1 pollo (cocina) + 2 cervezas (bar, con inventario). */
+        async function combo(r: Resto, extra: Json = {}) {
+          const c = await product(r, { name: "Combo Pollo", price: "400.00", ...extra });
+          const cfg = await put(
+            `${R}/products/${c.id}/menu`,
+            { components: [{ productId: r.pollo.id, quantity: 1 }, { productId: r.cerveza.id, quantity: 2 }] },
+            r.cookie,
+          );
+          expect(cfg.status).toBe(204);
+          return c;
+        }
+
+        it("se configura con componentes y aparece en la carta", async () => {
+          const r = await resto("co1");
+          const c = await combo(r);
+          const cfg = (await json(await get(`${R}/products/${c.id}/menu`, r.cookie))).data;
+          expect(cfg.isCombo).toBe(true);
+          expect(cfg.components.map((k: Json) => `${k.quantity} ${k.name}`).sort()).toEqual(["1 Pollo guisado", "2 Cerveza"]);
+          const menu = (await json(await get(`${R}/menu`, r.cookie))).data as Json[];
+          expect(menu.find((p) => p.id === c.id)).toMatchObject({ isCombo: true });
+          expect((await json(await get(`/v1/products/${c.id}`, r.cookie))).data.isCombo).toBe(true);
+
+          // Vaciar los componentes lo devuelve a producto normal.
+          expect((await put(`${R}/products/${c.id}/menu`, { components: [] }, r.cookie)).status).toBe(204);
+          expect((await json(await get(`/v1/products/${c.id}`, r.cookie))).data.isCombo).toBe(false);
+        });
+
+        it("rechaza combos inválidos", async () => {
+          const r = await resto("co2");
+          const c = await product(r, { name: "Combo X", price: "100.00" });
+          const cfg = (components: Json[], extra: Json = {}) => put(`${R}/products/${c.id}/menu`, { components, ...extra }, r.cookie);
+          expect((await cfg([{ productId: c.id, quantity: 1 }])).status).toBe(422); // a sí mismo
+          expect((await cfg([{ productId: r.pollo.id, quantity: 1 }, { productId: r.pollo.id, quantity: 2 }])).status).toBe(422); // repetido
+          expect((await cfg([{ productId: randomUUID(), quantity: 1 }])).status).toBe(422); // no existe
+          expect((await cfg([{ productId: r.pollo.id, quantity: 0 }])).status).toBe(400);
+          const g = (await json(await group(r, extrasBody))).data;
+          expect((await cfg([{ productId: r.pollo.id, quantity: 1 }], { modifierGroupIds: [g.id] })).status).toBe(422); // combo sin modificadores
+          expect((await put(`${R}/products/${r.pollo.id}/menu`, { modifierGroupIds: [randomUUID()] }, r.cookie)).status).toBe(422);
+          expect((await put(`${R}/products/${randomUUID()}/menu`, {}, r.cookie)).status).toBe(404);
+
+          // Un combo no contiene otro combo, ni un componente puede volverse combo.
+          await cfg([{ productId: r.pollo.id, quantity: 1 }]);
+          const outer = await product(r, { name: "Combo grande", price: "900.00" });
+          expect((await put(`${R}/products/${outer.id}/menu`, { components: [{ productId: c.id, quantity: 1 }] }, r.cookie)).status).toBe(422);
+          expect((await put(`${R}/products/${r.pollo.id}/menu`, { components: [{ productId: r.agua.id, quantity: 1 }] }, r.cookie)).status).toBe(422);
+          // Ni uno con inventario propio, ni productos por peso como parte.
+          const tracked = await product(r, { name: "Combo con stock", price: "10.00", trackInventory: true });
+          expect((await put(`${R}/products/${tracked.id}/menu`, { components: [{ productId: r.agua.id, quantity: 1 }] }, r.cookie)).status).toBe(422);
+          const peso = await product(r, { name: "Arroz", price: "10.00", allowsDecimals: true, unit: "LB" });
+          expect((await put(`${R}/products/${c.id}/menu`, { components: [{ productId: peso.id, quantity: 1 }] }, r.cookie)).status).toBe(422);
+          // Y un combo ya configurado no puede pasar a llevar inventario.
+          expect((await patch(`/v1/products/${c.id}`, { trackInventory: true }, r.cookie)).status).toBe(422);
+        });
+
+        it("anota el combo como una línea que se cobra y sus partes que van a cocina y bar", async () => {
+          const r = await resto("co3");
+          const c = await combo(r);
+          const o = await openOrder(r);
+          const res = await addItem(r, o.id, c.id, "2");
+          expect(res.status, JSON.stringify(await res.clone().json())).toBe(201);
+          const order = (await json(res)).data as Json;
+
+          const parent = itemOf(order, "Combo Pollo");
+          const parts = (order.items as Json[]).filter((i) => i.parentItemId === parent.id);
+          expect(parent).toMatchObject({ quantity: "2", unitPrice: "400.00", parentItemId: null });
+          expect(parts.map((p) => `${p.quantity} ${p.name} ${p.unitPrice} ${p.station} ${p.remaining}`).sort()).toEqual([
+            "2 Pollo guisado 0.00 KITCHEN 0",
+            "4 Cerveza 0.00 BAR 0",
+          ]);
+          expect(order.totals.total).toBe("800.00"); // solo se cobra el combo
+          expect((await patch(`${R}/orders/${o.id}/items/${parts[0]!.id}`, { quantity: "9" }, r.cookie)).status).toBe(409);
+          expect((await post(`${R}/orders/${o.id}/items/${parts[0]!.id}/void`, {}, r.cookie)).status).toBe(409);
+
+          // Cambiar los combos mantiene la proporción de las partes.
+          const upd = await patch(`${R}/orders/${o.id}/items/${parent.id}`, { quantity: "3", notes: "sin hielo" }, r.cookie);
+          const after = (await json(upd)).data as Json;
+          const parts3 = (after.items as Json[]).filter((i) => i.parentItemId === parent.id);
+          expect(parts3.map((p) => `${p.quantity} ${p.name} ${p.notes}`).sort()).toEqual(["3 Pollo guisado sin hielo", "6 Cerveza sin hielo"]);
+          expect(after.totals.total).toBe("1200.00");
+
+          // Cada combo es una línea aparte (no se juntan) y no admite fracciones ni modificadores.
+          await addItem(r, o.id, c.id, "1");
+          expect(((await getOrder(r, o.id)).items as Json[]).filter((i) => i.name === "Combo Pollo" && !i.parentItemId)).toHaveLength(2);
+          expect((await addItem(r, o.id, c.id, "1.5")).status).toBe(422);
+        });
+
+        it("al enviar, las partes van a su estación y el combo queda listo; la cocina ve de qué combo son", async () => {
+          const r = await resto("co4");
+          const c = await combo(r);
+          const o = await openOrder(r);
+          await addItem(r, o.id, c.id, "1");
+          const sent = (await json(await send(r, o.id))).data;
+          const byStation = Object.fromEntries(sent.ticket.stations.map((s: Json) => [s.station, s.items.map((i: Json) => `${i.quantity} ${i.name} (${i.combo})`)]));
+          expect(byStation).toEqual({ KITCHEN: ["1 Pollo guisado (Combo Pollo)"], BAR: ["2 Cerveza (Combo Pollo)"] });
+          expect(itemOf(sent.order, "Combo Pollo").status).toBe("READY");
+
+          const kitchen = (await json(await get(`${R}/kitchen?station=KITCHEN`, r.cookie))).data as Json[];
+          expect(kitchen[0]!.items[0]).toMatchObject({ name: "Pollo guisado", combo: "Combo Pollo", quantity: "1" });
+          const salon = (await json(await get(`${R}/tables`, r.cookie))).data as Json[];
+          expect(salon[0]!.order).toMatchObject({ items: 1, waiting: 2 }); // el combo cuenta como un producto
+        });
+
+        it("anular un combo enviado anula sus partes; uno sin enviar se quita completo", async () => {
+          const r = await resto("co5");
+          const c = await combo(r);
+          const o = await openOrder(r, 0);
+          const o2 = await openOrder(r, 1);
+
+          const p = itemOf((await json(await addItem(r, o.id, c.id, "1"))).data, "Combo Pollo");
+          await send(r, o.id);
+          const voided = await post(`${R}/orders/${o.id}/items/${p.id}/void`, { reason: "Cliente se fue" }, r.cookie);
+          const items = ((await json(voided)).data.items as Json[]);
+          expect(items).toHaveLength(3);
+          expect(items.every((i) => i.status === "VOID")).toBe(true);
+          expect((await json(await get(`${R}/kitchen?station=KITCHEN`, r.cookie))).data).toEqual([]);
+
+          const q = itemOf((await json(await addItem(r, o2.id, c.id, "1"))).data, "Combo Pollo");
+          const removed = await post(`${R}/orders/${o2.id}/items/${q.id}/void`, {}, r.cookie);
+          expect((await json(removed)).data.items).toEqual([]);
+        });
+
+        it("cobrar el combo factura una línea y descuenta del inventario sus componentes", async () => {
+          const r = await resto("co6");
+          const c = await combo(r);
+          await post("/v1/inventory/receipts", { productId: r.cerveza.id, branchId: r.branch.id, quantity: "24" }, r.cookie);
+          const o = await openOrder(r);
+          const parent = itemOf((await json(await addItem(r, o.id, c.id, "2"))).data, "Combo Pollo");
+          await send(r, o.id);
+          expect(await stockOf(r, r.cerveza.id)).toBe("24"); // anotar o enviar no toca el inventario
+
+          // Primero 1 de 2 combos: 2 cervezas.
+          const first = await bill(r, o.id, { propinaLegal: false, items: [{ itemId: parent.id, quantity: "1" }], payments: [{ method: "CASH", amount: "400.00" }] });
+          expect(first.status, JSON.stringify(await first.clone().json())).toBe(201);
+          const d1 = (await json(first)).data;
+          expect(d1.closed).toBe(false);
+          expect(d1.document.lines.map((l: Json) => `${l.name} x${l.quantity}`)).toEqual(["Combo Pollo x1"]);
+          expect(await stockOf(r, r.cerveza.id)).toBe("22");
+
+          // El resto cierra la mesa y descuenta las otras 2.
+          const second = await bill(r, o.id, { propinaLegal: false, payments: [{ method: "CASH", amount: "400.00" }] });
+          expect(second.status).toBe(201);
+          expect((await json(second)).data.closed).toBe(true);
+          expect(await stockOf(r, r.cerveza.id)).toBe("20");
+          const movements = (await json(await get(`/v1/inventory/movements?productId=${r.cerveza.id}&type=SALE`, r.cookie))).data as Json[];
+          expect(movements.map((m) => m.quantity).sort()).toEqual(["-2", "-2"]);
+        });
+
+        it("sin existencia suficiente de un componente no se cobra nada", async () => {
+          const r = await resto("co7");
+          await patch("/v1/inventory/settings", { allowNegativeStock: false }, r.cookie);
+          const c = await combo(r);
+          await post("/v1/inventory/receipts", { productId: r.cerveza.id, branchId: r.branch.id, quantity: "1" }, r.cookie);
+          const o = await openOrder(r);
+          await addItem(r, o.id, c.id, "1"); // necesita 2 cervezas
+          const res = await bill(r, o.id, { propinaLegal: false, payments: [{ method: "CASH", amount: "400.00" }] });
+          expect(res.status).toBe(422);
+          expect(await error(res)).toMatch(/Cerveza/);
+          const after = await getOrder(r, o.id);
+          expect(after.status).toBe("OPEN");
+          expect((await json(await get("/v1/documents", r.cookie))).total).toBe(0);
+          expect(await stockOf(r, r.cerveza.id)).toBe("1");
+          // Con el siguiente cobro correcto, el e-NCF sigue siendo el 1.
+          await post("/v1/inventory/receipts", { productId: r.cerveza.id, branchId: r.branch.id, quantity: "5" }, r.cookie);
+          expect((await json(await bill(r, o.id, { propinaLegal: false, payments: [{ method: "CASH", amount: "400.00" }] }))).data.document.encf).toBe("E320000000001");
+        });
+
+        it("cobrar un combo sin enviar deja sus partes como entregadas", async () => {
+          const r = await resto("co8");
+          const c = await combo(r);
+          const o = await openOrder(r);
+          await addItem(r, o.id, c.id, "1");
+          const res = await bill(r, o.id, { propinaLegal: false, payments: [{ method: "CASH", amount: "400.00" }] });
+          expect(res.status).toBe(201);
+          const order = (await json(res)).data.order as Json;
+          expect(order.status).toBe("CLOSED");
+          expect((order.items as Json[]).map((i) => i.status)).toEqual(["READY", "READY", "READY"]);
+          expect((await json(await get(`${R}/kitchen?station=KITCHEN`, r.cookie))).data).toEqual([]);
+        });
+
+        it("un componente desactivado impide anotar el combo, y los combos aislados por empresa", async () => {
+          const r = await resto("co9");
+          const other = await resto("co9b");
+          const c = await combo(r);
+          expect((await put(`${R}/products/${c.id}/menu`, { components: [{ productId: other.pollo.id, quantity: 1 }] }, r.cookie)).status).toBe(422);
+          await call(`/v1/products/${r.pollo.id}`, { method: "DELETE", cookie: r.cookie });
+          const o = await openOrder(r);
+          const res = await addItem(r, o.id, c.id, "1");
+          expect(res.status).toBe(422);
+          expect(await error(res)).toMatch(/Pollo guisado/);
+          expect(((await json(await get(`${R}/menu`, other.cookie))).data as Json[]).some((p) => p.isCombo)).toBe(false);
+          expect((await get(`${R}/products/${c.id}/menu`, other.cookie)).status).toBe(404);
+        });
+      });
+    });
+
     describe("aislamiento", () => {
       it("cada empresa ve solo sus mesas y comandas", async () => {
         const a = await resto("ra1");

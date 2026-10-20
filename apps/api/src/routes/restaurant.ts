@@ -12,7 +12,16 @@ import {
   type DocumentInput,
 } from "../lib/documents";
 import { issueDocument } from "../lib/issue";
-import { itemDto, ORDER_INCLUDE, orderDto, orderTotals, remainingOf, type OrderFull } from "../lib/orders";
+import {
+  itemDto,
+  modifiersOf,
+  ORDER_INCLUDE,
+  orderDto,
+  orderTotals,
+  remainingOf,
+  type OrderFull,
+} from "../lib/orders";
+import { applyComboStock } from "../lib/stock";
 import { optionalText, quantity, uuidParam } from "../lib/schemas";
 import { zv } from "../lib/validator";
 import { requireRole } from "../middleware/tenant";
@@ -51,12 +60,22 @@ const bulkTables = z.object({
 });
 
 const openBody = z.object({ tableId: z.uuid(), covers: z.number().int().min(1).max(200).nullish() });
+const course = z.number().int().min(1).max(5);
 const addItemBody = z.object({
   productId: z.uuid(),
   quantity: quantity.default("1"),
   notes: optionalText(200),
+  /** Opciones elegidas (grupos de modificadores del producto). */
+  modifierIds: z.array(z.uuid()).max(30).default([]),
+  /** Curso en que sale; por defecto el del producto. */
+  course: course.optional(),
 });
-const updateItemBody = z.object({ quantity: quantity.optional(), notes: optionalText(200).optional() });
+const updateItemBody = z.object({
+  quantity: quantity.optional(),
+  notes: optionalText(200).optional(),
+  course: course.optional(),
+});
+const sendBody = z.object({ course: course.optional() });
 const voidBody = z.object({ reason: z.string().trim().max(200).optional() });
 const itemParams = z.object({ id: z.uuid(), itemId: z.uuid() });
 
@@ -125,9 +144,14 @@ export const restaurant = new Hono<AppEnv>()
               number: open.number,
               covers: open.covers,
               openedAt: open.openedAt,
-              items: open.items.filter((i) => i.status !== "VOID").length,
+              items: open.items.filter((i) => i.status !== "VOID" && !i.parentItemId).length,
               waiting: open.items.filter((i) => i.status === "SENT").length,
-              ready: open.items.filter((i) => i.status === "READY" && remainingOf(i) > 0n).length,
+              // Listos y aún sin cobrar; las partes de un combo cuentan mientras su combo esté pendiente de cobro.
+              ready: open.items.filter((i) => {
+                if (i.status !== "READY") return false;
+                const owner = i.parentItemId ? open.items.find((p) => p.id === i.parentItemId) : i;
+                return !!owner && remainingOf(owner) > 0n;
+              }).length,
               unsent: open.items.filter((i) => i.status === "PENDING").length,
               total: orderTotals(open.items).total,
             }
@@ -254,33 +278,98 @@ export const restaurant = new Hono<AppEnv>()
 
     const order = await c.get("run")(async (tx) => {
       await loadOpenOrder(tx, id);
-      const product = await tx.product.findFirst({ where: { id: input.productId, active: true } });
+      const product = await tx.product.findFirst({
+        where: { id: input.productId, active: true },
+        include: {
+          modifierGroups: { include: { group: { include: { modifiers: true } } } },
+          comboComponents: { include: { product: true } },
+        },
+      });
       if (!product) throw unprocessable("El producto no existe o está inactivo");
       if (!product.allowsDecimals && qty % 1000n !== 0n) {
         throw unprocessable(`"${product.name}" no se vende en fracciones`);
       }
+      const itemCourse = input.course ?? product.course;
+      const base = {
+        organizationId: c.get("organizationId"),
+        orderId: id,
+        unit: product.unit,
+        priceIncludesTax: product.priceIncludesTax,
+        tax: product.tax,
+        notes: input.notes ?? null,
+        course: itemCourse,
+        createdById: c.get("user").id,
+      };
 
-      // Si ya hay uno igual sin enviar a cocina, se suma en vez de duplicar la línea.
-      const same = await tx.orderItem.findFirst({
-        where: { orderId: id, productId: product.id, status: "PENDING", notes: input.notes ?? null },
+      // Combo: una línea que se cobra (el combo) y una por cada componente, que solo va a cocina/bar.
+      if (product.isCombo) {
+        if (input.modifierIds.length > 0) throw unprocessable("Un combo no admite modificadores");
+        const parts = product.comboComponents;
+        if (parts.length === 0) throw unprocessable(`El combo "${product.name}" no tiene componentes`);
+        const inactive = parts.find((k) => !k.product.active);
+        if (inactive) throw unprocessable(`"${inactive.product.name}" ya no está disponible`);
+
+        const parent = await tx.orderItem.create({
+          data: { ...base, productId: product.id, name: product.name, quantity: qty, unitPrice: product.price, station: "NONE" },
+        });
+        for (const k of parts) {
+          await tx.orderItem.create({
+            data: {
+              ...base,
+              productId: k.productId,
+              name: k.product.name,
+              unit: k.product.unit,
+              quantity: BigInt(k.quantity) * qty,
+              unitPrice: 0n,
+              priceIncludesTax: k.product.priceIncludesTax,
+              tax: k.product.tax,
+              station: k.product.prepStation,
+              parentItemId: parent.id,
+            },
+          });
+        }
+        return loadOrder(tx, id);
+      }
+
+      // Modificadores: cada grupo del producto exige elegir entre su mínimo y su máximo.
+      const chosen = new Set(input.modifierIds);
+      if (chosen.size !== input.modifierIds.length) throw unprocessable("Una opción está repetida");
+      const groups = product.modifierGroups.map((pg) => pg.group).filter((g) => g.active);
+      const picked: { id: string; name: string; price: bigint }[] = [];
+      for (const g of groups) {
+        const options = g.modifiers.filter((m) => m.active && chosen.has(m.id));
+        if (options.length < g.minSelect) {
+          throw unprocessable(
+            g.minSelect === 1 ? `Elige una opción de «${g.name}»` : `Elige al menos ${g.minSelect} opciones de «${g.name}»`,
+          );
+        }
+        if (options.length > g.maxSelect) {
+          throw unprocessable(`«${g.name}» admite como máximo ${g.maxSelect} opción${g.maxSelect === 1 ? "" : "es"}`);
+        }
+        picked.push(...options.map((m) => ({ id: m.id, name: m.name, price: m.price })));
+      }
+      if (picked.length !== chosen.size) throw unprocessable("Una de las opciones no corresponde a este producto");
+
+      const stored = picked.map((m) => ({ id: m.id, name: m.name, price: String(m.price) }));
+      const key = (ids: string[]) => [...ids].sort().join(",");
+
+      // Si ya hay uno igual (mismas notas, curso y opciones) sin enviar, se suma en vez de duplicar la línea.
+      const candidates = await tx.orderItem.findMany({
+        where: { orderId: id, productId: product.id, status: "PENDING", notes: input.notes ?? null, course: itemCourse, parentItemId: null },
       });
+      const same = candidates.find((i) => key(modifiersOf(i).map((m) => m.id)) === key(picked.map((m) => m.id)));
       if (same) {
         await tx.orderItem.update({ where: { id: same.id }, data: { quantity: { increment: qty } } });
       } else {
         await tx.orderItem.create({
           data: {
-            organizationId: c.get("organizationId"),
-            orderId: id,
+            ...base,
             productId: product.id,
             name: product.name,
-            unit: product.unit,
             quantity: qty,
-            unitPrice: product.price,
-            priceIncludesTax: product.priceIncludesTax,
-            tax: product.tax,
+            unitPrice: product.price + picked.reduce((sum, m) => sum + m.price, 0n),
             station: product.prepStation,
-            notes: input.notes ?? null,
-            createdById: c.get("user").id,
+            modifiers: stored,
           },
         });
       }
@@ -296,10 +385,12 @@ export const restaurant = new Hono<AppEnv>()
       await loadOpenOrder(tx, id);
       const item = await tx.orderItem.findFirst({ where: { id: itemId, orderId: id } });
       if (!item) throw notFound("Producto");
+      if (item.parentItemId) throw conflict("Es parte de un combo: modifica el combo");
       if (item.status !== "PENDING") {
         throw conflict("Ese producto ya se envió a cocina: anúlalo y vuelve a agregarlo");
       }
       const data: Prisma.OrderItemUpdateInput = {};
+      const parts = await tx.orderItem.findMany({ where: { parentItemId: itemId } });
       if (input.quantity !== undefined) {
         const qty = toMilli(input.quantity);
         if (qty <= 0n) throw unprocessable("La cantidad debe ser mayor que cero");
@@ -308,8 +399,19 @@ export const restaurant = new Hono<AppEnv>()
           throw unprocessable(`"${product.name}" no se vende en fracciones`);
         }
         data.quantity = qty;
+        // Las partes de un combo mantienen su proporción: cada una es (cantidad por combo) × combos.
+        for (const part of parts) {
+          await tx.orderItem.update({ where: { id: part.id }, data: { quantity: (part.quantity / item.quantity) * qty } });
+        }
       }
-      if ("notes" in input) data.notes = input.notes ?? null;
+      if ("notes" in input) {
+        data.notes = input.notes ?? null;
+        if (parts.length > 0) await tx.orderItem.updateMany({ where: { parentItemId: itemId }, data: { notes: input.notes ?? null } });
+      }
+      if (input.course !== undefined) {
+        data.course = input.course;
+        if (parts.length > 0) await tx.orderItem.updateMany({ where: { parentItemId: itemId }, data: { course: input.course } });
+      }
       await tx.orderItem.update({ where: { id: itemId }, data });
       return loadOrder(tx, id);
     });
@@ -323,14 +425,20 @@ export const restaurant = new Hono<AppEnv>()
       await loadOpenOrder(tx, id);
       const item = await tx.orderItem.findFirst({ where: { id: itemId, orderId: id } });
       if (!item) throw notFound("Producto");
+      if (item.parentItemId) throw conflict("Es parte de un combo: anula el combo completo");
       if (item.status === "VOID") throw conflict("Ese producto ya está anulado");
       if (item.billedQuantity > 0n) throw conflict("Ese producto ya se cobró (total o parcialmente)");
 
       if (item.status === "PENDING") {
+        // Las partes de un combo se borran en cascada junto con él.
         await tx.orderItem.delete({ where: { id: itemId } });
       } else {
         if (!reason || reason.length < 3) throw unprocessable("Indica el motivo de la anulación");
         await tx.orderItem.update({ where: { id: itemId }, data: { status: "VOID", voidReason: reason } });
+        await tx.orderItem.updateMany({
+          where: { parentItemId: itemId, status: { not: "VOID" } },
+          data: { status: "VOID", voidReason: reason },
+        });
         await tx.auditLog.create({
           data: auditEntry(c, "order.void_item", "order_item", itemId, { name: item.name, reason }),
         });
@@ -340,12 +448,20 @@ export const restaurant = new Hono<AppEnv>()
     return c.json({ data: orderDto(order) });
   })
   // Envía a cocina/bar lo que está pendiente. Lo que no pasa por preparación (estación NONE) queda listo.
-  .post("/orders/:id/send", zv("param", uuidParam), async (c) => {
+  // Con `course` solo sale ese curso (entrada, plato fuerte…); sin él, todo lo pendiente.
+  .post("/orders/:id/send", zv("param", uuidParam), zv("json", sendBody), async (c) => {
     const { id } = c.req.valid("param");
+    const { course } = c.req.valid("json");
     const result = await c.get("run")(async (tx) => {
       await loadOpenOrder(tx, id);
-      const pending = await tx.orderItem.findMany({ where: { orderId: id, status: "PENDING" } });
-      if (pending.length === 0) throw unprocessable("No hay productos por enviar");
+      const pending = await tx.orderItem.findMany({
+        where: { orderId: id, status: "PENDING", ...(course ? { course } : {}) },
+        orderBy: { createdAt: "asc" },
+      });
+      if (pending.length === 0) {
+        throw unprocessable(course ? `No hay productos pendientes en el curso ${course}` : "No hay productos por enviar");
+      }
+      const comboNames = new Map(pending.map((p) => [p.id, p.name]));
 
       const now = new Date();
       for (const item of pending) {
@@ -367,6 +483,9 @@ export const restaurant = new Hono<AppEnv>()
           quantity: fromMilli(p.quantity),
           notes: p.notes,
           station: p.station,
+          course: p.course,
+          modifiers: modifiersOf(p).map((m) => m.name),
+          combo: p.parentItemId ? (comboNames.get(p.parentItemId) ?? null) : null,
         })),
       };
     });
@@ -379,6 +498,8 @@ export const restaurant = new Hono<AppEnv>()
           table: result.order.table.name,
           zone: result.order.table.zone,
           covers: result.order.covers,
+          /** Curso enviado (null = todo lo pendiente). */
+          course: course ?? null,
           stations: (["KITCHEN", "BAR"] as const)
             .map((station) => ({ station, items: result.sent.filter((s) => s.station === station) }))
             .filter((s) => s.items.length > 0),
@@ -477,7 +598,9 @@ export const restaurant = new Hono<AppEnv>()
         modificationCode: null,
         lines: selection.map(({ item, qty }) => ({
           productId: item.productId,
-          description: null,
+          // Opciones y notas del pedido, para que el comprobante diga qué se cobró.
+          description:
+            [modifiersOf(item).map((m) => m.name).join(", "), item.notes ?? ""].filter(Boolean).join(" · ") || null,
           name: item.name,
           // Se factura al precio y con el impuesto que tenía al anotarse, no al de hoy.
           unitPrice: fromCents(item.unitPrice),
@@ -502,6 +625,25 @@ export const restaurant = new Hono<AppEnv>()
       });
       const issued = await issueDocument(tx, { id: draft.id, organizationId, userId });
 
+      // Los componentes de un combo cobrado salen del inventario (el combo mismo no lo lleva).
+      const profile = await tx.companyProfile.findFirst({ select: { allowNegativeStock: true } });
+      const entries: { productId: string; quantity: bigint }[] = [];
+      for (const { item, qty } of selection) {
+        for (const part of order.items) {
+          if (part.parentItemId !== item.id || part.status === "VOID" || !part.productId) continue;
+          entries.push({ productId: part.productId, quantity: (part.quantity * qty) / item.quantity });
+        }
+      }
+      await applyComboStock(tx, {
+        organizationId,
+        userId,
+        branchId: order.branchId,
+        documentId: issued.id,
+        allowNegative: profile?.allowNegativeStock ?? false,
+        reason: "Combo cobrado en la comanda #" + order.number,
+        entries,
+      });
+
       // Lo cobrado se descuenta de la comanda; lo que nunca pasó por cocina queda como entregado.
       const now = new Date();
       for (const { item, qty } of selection) {
@@ -512,6 +654,12 @@ export const restaurant = new Hono<AppEnv>()
             ...(item.status === "PENDING" ? { status: "READY", sentAt: now, readyAt: now } : {}),
           },
         });
+        if (item.status === "PENDING") {
+          await tx.orderItem.updateMany({
+            where: { parentItemId: item.id, status: "PENDING" },
+            data: { status: "READY", sentAt: now, readyAt: now },
+          });
+        }
       }
 
       const after = await loadOrder(tx, id);
@@ -547,12 +695,19 @@ export const restaurant = new Hono<AppEnv>()
         order: { status: "OPEN", ...(branchId ? { branchId } : {}) },
       },
       orderBy: { sentAt: "asc" },
-      include: { order: { include: { table: true } } },
+      include: { order: { include: { table: true } }, parent: { select: { name: true } } },
     });
 
     const groups = new Map<
       string,
-      { orderId: string; number: number; table: string; zone: string | null; sentAt: Date | null; items: ReturnType<typeof itemDto>[] }
+      {
+        orderId: string;
+        number: number;
+        table: string;
+        zone: string | null;
+        sentAt: Date | null;
+        items: (ReturnType<typeof itemDto> & { combo: string | null })[];
+      }
     >();
     for (const i of items) {
       const g = groups.get(i.orderId) ?? {
@@ -563,7 +718,7 @@ export const restaurant = new Hono<AppEnv>()
         sentAt: i.sentAt,
         items: [],
       };
-      g.items.push(itemDto(i));
+      g.items.push({ ...itemDto(i), combo: i.parent?.name ?? null });
       groups.set(i.orderId, g);
     }
     return c.json({ data: [...groups.values()] });

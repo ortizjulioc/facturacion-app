@@ -34,6 +34,8 @@ export const productDto = (p: ProductRow, showCost = false) => ({
   trackInventory: p.trackInventory,
   minStock: fromMilli(p.minStock),
   prepStation: p.prepStation,
+  course: p.course,
+  isCombo: p.isCombo,
   active: p.active,
   createdAt: p.createdAt,
   updatedAt: p.updatedAt,
@@ -67,6 +69,7 @@ const fields = {
   trackInventory: z.boolean(),
   minStock: quantity,
   prepStation: z.enum(["NONE", "KITCHEN", "BAR"]),
+  course: z.number().int().min(1).max(5),
 };
 
 // Los valores por defecto se aplican al crear, NO en el esquema: así un PATCH parcial no los pisa.
@@ -84,6 +87,7 @@ const createProduct = z.object({
   trackInventory: fields.trackInventory.default(false),
   minStock: fields.minStock.default("0"),
   prepStation: fields.prepStation.default("NONE"),
+  course: fields.course.default(1),
 });
 
 const updateProduct = z
@@ -101,6 +105,7 @@ const updateProduct = z
     trackInventory: fields.trackInventory,
     minStock: fields.minStock,
     prepStation: fields.prepStation,
+    course: fields.course,
     active: z.boolean(),
   })
   .partial();
@@ -198,6 +203,12 @@ export const products = new Hono<AppEnv>()
       const { price, minStock, ...input } = c.req.valid("json");
       const product = await c.get("run")(async (tx) => {
         await assertCategory(tx, input.categoryId);
+        if (input.trackInventory) {
+          const current = await tx.product.findFirst({ where: { id }, select: { isCombo: true } });
+          if (current?.isCombo) {
+            throw new HTTPException(422, { message: "Un combo no lleva inventario propio: se descuentan sus componentes" });
+          }
+        }
         const updated = await tx.product.update({
           where: { id },
           data: {

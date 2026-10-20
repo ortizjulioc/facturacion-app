@@ -19,9 +19,26 @@ export const ORDER_INCLUDE = {
 
 const m = (v: bigint) => fromCents(v);
 
-/** Lo que aún falta por cobrar de un producto (0 si está anulado o ya se cobró completo). */
-export const remainingOf = (item: Pick<Item, "status" | "quantity" | "billedQuantity">) =>
-  item.status === "VOID" ? 0n : item.quantity - item.billedQuantity;
+/**
+ * Lo que aún falta por cobrar de un producto (0 si está anulado o ya se cobró completo).
+ * Las partes de un combo no se cobran por separado: el combo se cobra en su producto «padre».
+ */
+export const remainingOf = (
+  item: Pick<Item, "status" | "quantity" | "billedQuantity"> & { parentItemId?: string | null },
+) => (item.status === "VOID" || item.parentItemId ? 0n : item.quantity - item.billedQuantity);
+
+export type StoredModifier = { id: string; name: string; price: string };
+
+/** Los modificadores se guardan como JSON; esto lo lee de forma segura. */
+export const modifiersOf = (item: Pick<Item, "modifiers">): StoredModifier[] =>
+  Array.isArray(item.modifiers)
+    ? (item.modifiers as unknown[]).flatMap((m) => {
+        const x = m as Partial<StoredModifier> | null;
+        return x && typeof x.id === "string" && typeof x.name === "string" && typeof x.price === "string"
+          ? [{ id: x.id, name: x.name, price: x.price }]
+          : [];
+      })
+    : [];
 
 const lineInput = (item: Item, quantity: bigint): LineInput => ({
   unitPrice: item.unitPrice,
@@ -34,7 +51,11 @@ const lineInput = (item: Item, quantity: bigint): LineInput => ({
  * Totales de lo que falta por cobrar de la comanda, con y sin propina legal (10 %).
  * Usa el mismo motor que la facturación, así que el total de la pre-cuenta es el que saldrá en la factura.
  */
-export function orderTotals(items: Pick<Item, "status" | "quantity" | "billedQuantity" | "unitPrice" | "tax" | "priceIncludesTax">[]) {
+export function orderTotals(
+  items: (Pick<Item, "status" | "quantity" | "billedQuantity" | "unitPrice" | "tax" | "priceIncludesTax"> & {
+    parentItemId?: string | null;
+  })[],
+) {
   const lines = items
     .map((i) => ({ i, rem: remainingOf(i) }))
     .filter((x) => x.rem > 0n)
@@ -68,6 +89,10 @@ export const itemDto = (i: Item) => {
     priceIncludesTax: i.priceIncludesTax,
     tax: i.tax,
     notes: i.notes,
+    course: i.course,
+    modifiers: modifiersOf(i).map((m) => ({ id: m.id, name: m.name, price: fromCents(BigInt(m.price)) })),
+    /** Si es parte de un combo: el id del combo (el padre se cobra; las partes solo van a cocina). */
+    parentItemId: i.parentItemId,
     station: i.station,
     status: i.status,
     sentAt: i.sentAt,

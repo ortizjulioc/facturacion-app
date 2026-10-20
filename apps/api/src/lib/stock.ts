@@ -147,3 +147,44 @@ export async function applyDocumentStock(
     });
   }
 }
+
+/**
+ * Descuenta del inventario los componentes de los combos cobrados (el combo mismo no lleva inventario:
+ * se factura como una sola línea). `entries` trae la cantidad de cada componente, en milésimas; solo se
+ * mueven los productos con `trackInventory`.
+ */
+export async function applyComboStock(
+  tx: TenantTx,
+  m: {
+    organizationId: string;
+    userId: string;
+    branchId: string;
+    documentId: string;
+    allowNegative: boolean;
+    reason: string;
+    entries: { productId: string; quantity: bigint }[];
+  },
+): Promise<void> {
+  const totals = new Map<string, bigint>();
+  for (const e of m.entries) totals.set(e.productId, (totals.get(e.productId) ?? 0n) + e.quantity);
+  if (totals.size === 0) return;
+
+  const products = await tx.product.findMany({
+    where: { id: { in: [...totals.keys()] }, trackInventory: true },
+    select: { id: true, name: true },
+  });
+  for (const product of products.sort((a, b) => a.id.localeCompare(b.id))) {
+    await moveStock(tx, {
+      organizationId: m.organizationId,
+      userId: m.userId,
+      productId: product.id,
+      productName: product.name,
+      branchId: m.branchId,
+      delta: -totals.get(product.id)!,
+      type: "SALE",
+      allowNegative: m.allowNegative,
+      documentId: m.documentId,
+      reason: m.reason,
+    });
+  }
+}
