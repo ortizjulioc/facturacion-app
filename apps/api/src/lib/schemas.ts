@@ -26,7 +26,12 @@ export const listQuery = z.object({
 
 export type Page<T> = { data: T[]; total: number; page: number; pageSize: number };
 
-export const pageOf = <T>(data: T[], total: number, page: number, pageSize: number): Page<T> => ({
+export const pageOf = <T>(
+  data: T[],
+  total: number,
+  page: number,
+  pageSize: number,
+): Page<T> => ({
   data,
   total,
   page,
@@ -41,3 +46,7 @@ export const optionalText = (max: number) =>
     .max(max)
     .nullish()
     .transform((v) => (v ? v : null));
+
+export const isoDate = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Fecha inválida (AAAA-MM-DD)");

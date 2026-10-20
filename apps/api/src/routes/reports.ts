@@ -16,7 +16,7 @@ const TZ = "America/Santo_Domingo";
 const DAY_MS = 86_400_000;
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Fecha inválida (AAAA-MM-DD)");
 
-const rangeQuery = z
+export const rangeQuery = z
   .object({
     from: isoDate,
     to: isoDate,

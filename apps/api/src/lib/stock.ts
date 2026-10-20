@@ -16,6 +16,7 @@ type MoveInput = {
   allowNegative: boolean;
   unitCost?: bigint | null;
   documentId?: string | null;
+  purchaseId?: string | null;
   reason?: string | null;
 };
 
@@ -64,6 +65,7 @@ export async function moveStock(tx: TenantTx, m: MoveInput): Promise<bigint> {
       balanceAfter,
       unitCost: m.unitCost ?? null,
       documentId: m.documentId ?? null,
+      purchaseId: m.purchaseId ?? null,
       reason: m.reason ?? null,
       createdById: m.userId,
     },

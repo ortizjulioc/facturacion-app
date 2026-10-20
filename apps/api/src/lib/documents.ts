@@ -72,20 +72,40 @@ export const documentInput = z
   })
   .superRefine((v, ctx) => {
     if (v.currency === "DOP" && Number(v.exchangeRate) !== 1) {
-      ctx.addIssue({ code: "custom", path: ["exchangeRate"], message: "En pesos la tasa de cambio es 1" });
+      ctx.addIssue({
+        code: "custom",
+        path: ["exchangeRate"],
+        message: "En pesos la tasa de cambio es 1",
+      });
     }
     if (v.currency === "USD" && Number(v.exchangeRate) <= 1) {
-      ctx.addIssue({ code: "custom", path: ["exchangeRate"], message: "Indica la tasa de cambio del dólar" });
+      ctx.addIssue({
+        code: "custom",
+        path: ["exchangeRate"],
+        message: "Indica la tasa de cambio del dólar",
+      });
     }
     if (isModifier(v.type)) {
       if (!v.referencedDocumentId) {
-        ctx.addIssue({ code: "custom", path: ["referencedDocumentId"], message: "Indica el comprobante que modifica" });
+        ctx.addIssue({
+          code: "custom",
+          path: ["referencedDocumentId"],
+          message: "Indica el comprobante que modifica",
+        });
       }
       if (!v.modificationCode) {
-        ctx.addIssue({ code: "custom", path: ["modificationCode"], message: "Indica el código de modificación" });
+        ctx.addIssue({
+          code: "custom",
+          path: ["modificationCode"],
+          message: "Indica el código de modificación",
+        });
       }
     } else if (v.referencedDocumentId || v.modificationCode) {
-      ctx.addIssue({ code: "custom", path: ["referencedDocumentId"], message: "Solo las notas de crédito o débito referencian otro comprobante" });
+      ctx.addIssue({
+        code: "custom",
+        path: ["referencedDocumentId"],
+        message: "Solo las notas de crédito o débito referencian otro comprobante",
+      });
     }
   });
 
@@ -95,16 +115,35 @@ export type DocumentInput = z.infer<typeof documentInput>;
 
 const unprocessable = (message: string) => new HTTPException(422, { message });
 
+/**
+ * Un `Document` es siempre de VENTA (E31–E34; lo garantiza una restricción en la base de datos).
+ * El enum de Prisma incluye también E41/E43 porque comparte la numeración con las compras,
+ * así que aquí se acota el tipo y, por seguridad, se verifica en ejecución.
+ */
+export function asSalesType(type: string): EcfType {
+  if (!(ECF_TYPES as readonly string[]).includes(type)) {
+    throw new HTTPException(500, {
+      message: `Tipo de comprobante de venta inválido: ${type}`,
+    });
+  }
+  return type as EcfType;
+}
+
 /** Todo lo necesario para insertar un documento; los totales salen siempre de `core`. */
 export async function buildDraft(tx: TenantTx, input: DocumentInput) {
   // Sucursal y caja deben existir (RLS oculta las de otras empresas) y estar activas.
-  const branch = await tx.branch.findFirst({ where: { id: input.branchId, active: true } });
+  const branch = await tx.branch.findFirst({
+    where: { id: input.branchId, active: true },
+  });
   if (!branch) throw unprocessable("La sucursal no existe o está inactiva");
   if (input.terminalId) {
     const terminal = await tx.terminal.findFirst({
       where: { id: input.terminalId, branchId: input.branchId, active: true },
     });
-    if (!terminal) throw unprocessable("La caja no existe, está inactiva o no pertenece a la sucursal");
+    if (!terminal)
+      throw unprocessable(
+        "La caja no existe, está inactiva o no pertenece a la sucursal",
+      );
   }
 
   const referenced = input.referencedDocumentId
@@ -112,16 +151,21 @@ export async function buildDraft(tx: TenantTx, input: DocumentInput) {
     : null;
   if (input.referencedDocumentId) {
     if (!referenced) throw unprocessable("El comprobante a modificar no existe");
-    if (referenced.status === "DRAFT") throw unprocessable("El comprobante a modificar aún no está emitido");
+    if (referenced.status === "DRAFT")
+      throw unprocessable("El comprobante a modificar aún no está emitido");
     if (referenced.type !== "E31" && referenced.type !== "E32") {
-      throw unprocessable("Solo se pueden modificar facturas de crédito fiscal o de consumo");
+      throw unprocessable(
+        "Solo se pueden modificar facturas de crédito fiscal o de consumo",
+      );
     }
   }
 
   const buyer = await resolveBuyer(tx, input, referenced);
 
   // Líneas: se copian los datos del producto al momento de la venta.
-  const productIds = [...new Set(input.lines.flatMap((l) => (l.productId ? [l.productId] : [])))];
+  const productIds = [
+    ...new Set(input.lines.flatMap((l) => (l.productId ? [l.productId] : []))),
+  ];
   const products = productIds.length
     ? await tx.product.findMany({ where: { id: { in: productIds } } })
     : [];
@@ -131,13 +175,16 @@ export async function buildDraft(tx: TenantTx, input: DocumentInput) {
     const where = `Línea ${i + 1}`;
     const product = l.productId ? byId.get(l.productId) : undefined;
     if (l.productId && !product) throw unprocessable(`${where}: el producto no existe`);
-    if (product && !product.active) throw unprocessable(`${where}: "${product.name}" está inactivo`);
+    if (product && !product.active)
+      throw unprocessable(`${where}: "${product.name}" está inactivo`);
 
     const name = l.name ?? product?.name;
     const tax = l.tax ?? product?.tax;
     const unitPrice = l.unitPrice !== undefined ? toCents(l.unitPrice) : product?.price;
     if (!name || !tax || unitPrice === undefined) {
-      throw unprocessable(`${where}: indica nombre, precio e impuesto, o elige un producto`);
+      throw unprocessable(
+        `${where}: indica nombre, precio e impuesto, o elige un producto`,
+      );
     }
     const qty = toMilli(l.quantity);
     if (qty <= 0n) throw unprocessable(`${where}: la cantidad debe ser mayor que cero`);
@@ -173,7 +220,9 @@ export async function buildDraft(tx: TenantTx, input: DocumentInput) {
       propinaLegal: input.propinaLegal,
     });
   } catch (e) {
-    throw unprocessable(e instanceof Error ? e.message : "No se pudieron calcular los totales");
+    throw unprocessable(
+      e instanceof Error ? e.message : "No se pudieron calcular los totales",
+    );
   }
 
   const lines = resolved.map((r, i) => {
@@ -188,7 +237,11 @@ export async function buildDraft(tx: TenantTx, input: DocumentInput) {
       unitPrice: r.core.unitPrice,
       priceIncludesTax: r.core.priceIncludesTax,
       tax: r.core.tax,
-      discountType: r.core.discount ? (r.core.discount.type === "percent" ? "PERCENT" : "AMOUNT") : null,
+      discountType: r.core.discount
+        ? r.core.discount.type === "percent"
+          ? "PERCENT"
+          : "AMOUNT"
+        : null,
       discountValue: r.core.discount
         ? r.core.discount.type === "percent"
           ? BigInt(r.core.discount.bps)
@@ -207,7 +260,8 @@ export async function buildDraft(tx: TenantTx, input: DocumentInput) {
     amount: toCents(p.amount),
     reference: p.reference ?? null,
   }));
-  if (payments.some((p) => p.amount <= 0n)) throw unprocessable("Los pagos deben ser mayores que cero");
+  if (payments.some((p) => p.amount <= 0n))
+    throw unprocessable("Los pagos deben ser mayores que cero");
 
   const document = {
     type: input.type,
@@ -243,7 +297,12 @@ async function resolveBuyer(
   input: DocumentInput,
   referenced: Prisma.DocumentGetPayload<object> | null,
 ) {
-  const none = { customerId: null, buyerName: null, buyerDocType: null, buyerDocNumber: null };
+  const none = {
+    customerId: null,
+    buyerName: null,
+    buyerDocType: null,
+    buyerDocNumber: null,
+  };
 
   // Las notas heredan el comprador del comprobante que modifican.
   if (referenced) {
@@ -256,7 +315,9 @@ async function resolveBuyer(
   }
 
   if (input.customerId) {
-    const customer = await tx.customer.findFirst({ where: { id: input.customerId, active: true } });
+    const customer = await tx.customer.findFirst({
+      where: { id: input.customerId, active: true },
+    });
     if (!customer) throw unprocessable("El cliente no existe o está inactivo");
     return {
       customerId: customer.id,
@@ -287,7 +348,9 @@ async function resolveBuyer(
 
 // ───────────── Salida ─────────────
 
-export type DocumentFull = Prisma.DocumentGetPayload<{ include: { lines: true; payments: true } }>;
+export type DocumentFull = Prisma.DocumentGetPayload<{
+  include: { lines: true; payments: true };
+}>;
 
 export const FULL = {
   lines: { orderBy: { lineNumber: "asc" } },

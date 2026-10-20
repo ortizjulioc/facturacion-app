@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { ECF_TYPES } from "@facturacion/core";
+import { ALL_ECF_TYPES } from "@facturacion/core";
 import type { Prisma } from "@facturacion/db";
 import { auditEntry } from "../lib/audit";
 import { uuidParam } from "../lib/schemas";
@@ -29,7 +29,7 @@ const number10 = z.number().int().min(1).max(9_999_999_999);
 
 const createSequence = z
   .object({
-    ecfType: z.enum(ECF_TYPES),
+    ecfType: z.enum(ALL_ECF_TYPES),
     fromNumber: number10,
     toNumber: number10,
     expiresAt: isoDate,
@@ -62,12 +62,19 @@ export const sequences = new Hono<AppEnv>()
 
     const seq = await c.get("run")(async (tx) => {
       if (input.terminalId) {
-        const terminal = await tx.terminal.findFirst({ where: { id: input.terminalId, active: true } });
-        if (!terminal) throw new HTTPException(422, { message: "La caja no existe o está inactiva" });
+        const terminal = await tx.terminal.findFirst({
+          where: { id: input.terminalId, active: true },
+        });
+        if (!terminal)
+          throw new HTTPException(422, { message: "La caja no existe o está inactiva" });
       }
       // Dos rangos del mismo tipo no pueden solaparse: darían e-NCF duplicados.
       const overlap = await tx.sequence.findFirst({
-        where: { ecfType: input.ecfType, fromNumber: { lte: to }, toNumber: { gte: from } },
+        where: {
+          ecfType: input.ecfType,
+          fromNumber: { lte: to },
+          toNumber: { gte: from },
+        },
       });
       if (overlap) {
         throw new HTTPException(409, {
@@ -97,42 +104,58 @@ export const sequences = new Hono<AppEnv>()
     });
     return c.json({ data: sequenceDto(seq) }, 201);
   })
-  .patch("/:id", canWrite, zv("param", uuidParam), zv("json", updateSequence), async (c) => {
-    const { id } = c.req.valid("param");
-    const input = c.req.valid("json");
+  .patch(
+    "/:id",
+    canWrite,
+    zv("param", uuidParam),
+    zv("json", updateSequence),
+    async (c) => {
+      const { id } = c.req.valid("param");
+      const input = c.req.valid("json");
 
-    const seq = await c.get("run")(async (tx) => {
-      const current = await tx.sequence.findFirst({ where: { id } });
-      if (!current) throw new HTTPException(404, { message: "Secuencia no encontrada" });
+      const seq = await c.get("run")(async (tx) => {
+        const current = await tx.sequence.findFirst({ where: { id } });
+        if (!current)
+          throw new HTTPException(404, { message: "Secuencia no encontrada" });
 
-      if (input.toNumber !== undefined) {
-        const to = BigInt(input.toNumber);
-        if (to < current.nextNumber - 1n) {
-          throw new HTTPException(422, { message: "El número final no puede ser menor que los e-NCF ya emitidos" });
+        if (input.toNumber !== undefined) {
+          const to = BigInt(input.toNumber);
+          if (to < current.nextNumber - 1n) {
+            throw new HTTPException(422, {
+              message: "El número final no puede ser menor que los e-NCF ya emitidos",
+            });
+          }
+          const overlap = await tx.sequence.findFirst({
+            where: {
+              id: { not: id },
+              ecfType: current.ecfType,
+              fromNumber: { lte: to },
+              toNumber: { gte: current.fromNumber },
+            },
+          });
+          if (overlap)
+            throw new HTTPException(409, {
+              message: "El nuevo rango se solapa con otro registrado",
+            });
         }
-        const overlap = await tx.sequence.findFirst({
-          where: {
-            id: { not: id },
-            ecfType: current.ecfType,
-            fromNumber: { lte: to },
-            toNumber: { gte: current.fromNumber },
+
+        const updated = await tx.sequence.update({
+          where: { id },
+          data: {
+            ...(input.active === undefined ? {} : { active: input.active }),
+            ...(input.expiresAt === undefined
+              ? {}
+              : { expiresAt: new Date(`${input.expiresAt}T00:00:00Z`) }),
+            ...(input.toNumber === undefined ? {} : { toNumber: BigInt(input.toNumber) }),
           },
         });
-        if (overlap) throw new HTTPException(409, { message: "El nuevo rango se solapa con otro registrado" });
-      }
-
-      const updated = await tx.sequence.update({
-        where: { id },
-        data: {
-          ...(input.active === undefined ? {} : { active: input.active }),
-          ...(input.expiresAt === undefined ? {} : { expiresAt: new Date(`${input.expiresAt}T00:00:00Z`) }),
-          ...(input.toNumber === undefined ? {} : { toNumber: BigInt(input.toNumber) }),
-        },
+        await tx.auditLog.create({
+          data: auditEntry(c, "sequence.update", "sequence", id, {
+            fields: Object.keys(input),
+          }),
+        });
+        return updated;
       });
-      await tx.auditLog.create({
-        data: auditEntry(c, "sequence.update", "sequence", id, { fields: Object.keys(input) }),
-      });
-      return updated;
-    });
-    return c.json({ data: sequenceDto(seq) });
-  });
+      return c.json({ data: sequenceDto(seq) });
+    },
+  );

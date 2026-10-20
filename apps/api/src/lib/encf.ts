@@ -1,5 +1,5 @@
 import { HTTPException } from "hono/http-exception";
-import { formatEncf, type EcfType } from "@facturacion/core";
+import { formatEncf, type AnyEcfType } from "@facturacion/core";
 import type { TenantTx } from "../types";
 
 /**
@@ -13,7 +13,7 @@ import type { TenantTx } from "../types";
  */
 export async function allocateEncf(
   tx: TenantTx,
-  type: EcfType,
+  type: AnyEcfType,
   terminalId: string | null,
 ): Promise<string> {
   const rows = await tx.$queryRaw<{ n: bigint }[]>`

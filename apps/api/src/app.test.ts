@@ -2102,6 +2102,853 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     });
   });
 
+  describe("proveedores y compras", () => {
+    const todayStr = new Intl.DateTimeFormat("sv-SE", {
+      timeZone: "America/Santo_Domingo",
+    }).format(new Date());
+
+    /** Empresa con secuencias E41/E43, un proveedor formal, uno informal y un producto con inventario. */
+    async function buying(label: string) {
+      const b = await billing(label, {
+        seqs: [
+          ["E32", 1, 50],
+          ["E41", 1, 50],
+          ["E43", 1, 50],
+        ],
+      });
+      const supplier = (
+        await json(
+          await post(
+            "/v1/suppliers",
+            {
+              name: "Distribuidora Norte",
+              documentType: "RNC",
+              documentNumber: "131246796",
+            },
+            b.cookie,
+          ),
+        )
+      ).data;
+      const informal = (
+        await json(
+          await post(
+            "/v1/suppliers",
+            {
+              name: "Juan Pérez",
+              documentType: "CEDULA",
+              documentNumber: "001-1234567-8",
+            },
+            b.cookie,
+          ),
+        )
+      ).data;
+      const tracked = (
+        await json(
+          await post(
+            "/v1/products",
+            { name: "Martillo", price: "100.00", tax: "EXENTO", trackInventory: true },
+            b.cookie,
+          ),
+        )
+      ).data;
+      return { ...b, supplier, informal, tracked };
+    }
+    type Buying = Awaited<ReturnType<typeof buying>>;
+
+    const purchaseBody = (s: Buying, over: Json = {}) => ({
+      kind: "SUPPLIER_INVOICE",
+      branchId: s.branch.id,
+      supplierId: s.supplier.id,
+      ncf: "B0100000123",
+      invoiceDate: todayStr,
+      lines: [
+        { productId: s.tracked.id, quantity: "10", unitCost: "50.00", tax: "ITBIS18" },
+      ],
+      ...over,
+    });
+    const draftPurchase = async (s: Buying, over: Json = {}) => {
+      const res = await post("/v1/purchases", purchaseBody(s, over), s.cookie);
+      expect(res.status, JSON.stringify(await res.clone().json())).toBe(201);
+      return (await json(res)).data as Json;
+    };
+    const postPurchase = (s: Buying, id: string) =>
+      post(`/v1/purchases/${id}/post`, {}, s.cookie);
+    const stockOf = async (s: Buying, productId = s.tracked.id) => {
+      const rows = (
+        await json(await get(`/v1/inventory/stock?branchId=${s.branch.id}`, s.cookie))
+      ).data as Json[];
+      return rows.find((r) => r.productId === productId)?.quantity as string | undefined;
+    };
+    const movements = async (s: Buying, type = "RECEIPT") =>
+      (await json(await get(`/v1/inventory/movements?type=${type}`, s.cookie)))
+        .data as Json[];
+
+    describe("proveedores", () => {
+      it("normaliza el documento, evita repetidos y busca", async () => {
+        const s = await buying("pv1");
+        expect(s.informal).toMatchObject({
+          documentType: "CEDULA",
+          documentNumber: "00112345678",
+        });
+
+        const bad = await post(
+          "/v1/suppliers",
+          { name: "Mal", documentType: "RNC", documentNumber: "123" },
+          s.cookie,
+        );
+        expect(bad.status).toBe(422);
+        const dup = await post(
+          "/v1/suppliers",
+          { name: "Otro", documentType: "RNC", documentNumber: "1-31-24679-6" },
+          s.cookie,
+        );
+        expect(dup.status).toBe(409);
+
+        expect((await json(await get("/v1/suppliers?q=norte", s.cookie))).total).toBe(1);
+        expect((await json(await get("/v1/suppliers?q=131-24679", s.cookie))).total).toBe(
+          1,
+        );
+
+        const upd = await patch(
+          `/v1/suppliers/${s.supplier.id}`,
+          { phone: "809-555-0100", active: false },
+          s.cookie,
+        );
+        expect((await json(upd)).data).toMatchObject({
+          phone: "809-555-0100",
+          active: false,
+        });
+        expect((await json(await get("/v1/suppliers?active=true", s.cookie))).total).toBe(
+          1,
+        );
+      });
+
+      it("un proveedor inactivo no sirve para comprar", async () => {
+        const s = await buying("pv2");
+        await patch(`/v1/suppliers/${s.supplier.id}`, { active: false }, s.cookie);
+        expect((await post("/v1/purchases", purchaseBody(s), s.cookie)).status).toBe(422);
+      });
+
+      it("solo propietarios y administradores; cada empresa ve los suyos", async () => {
+        const a = await buying("pv3a");
+        const b = await buying("pv3b");
+        const cashier = await signUp("pv3c");
+        await prisma.member.create({
+          data: {
+            id: randomUUID(),
+            organizationId: a.orgId,
+            userId: cashier.userId,
+            role: "member",
+          },
+        });
+        const cookie = await setActive(a.orgId, cashier.cookie);
+
+        for (const path of ["/v1/suppliers", "/v1/purchases"])
+          expect((await get(path, cookie)).status).toBe(403);
+        expect((await post("/v1/suppliers", { name: "X" }, cookie)).status).toBe(403);
+        expect((await get(`/v1/suppliers/${a.supplier.id}`, b.cookie)).status).toBe(404);
+        // Mismo RNC en otra empresa: permitido.
+        expect(
+          (
+            await post(
+              "/v1/suppliers",
+              { name: "Igual", documentType: "RNC", documentNumber: "131246796" },
+              b.cookie,
+            )
+          ).status,
+        ).toBe(409); // b ya tiene el suyo
+        const c2 = await buying("pv3d");
+        expect((await json(await get("/v1/suppliers", c2.cookie))).total).toBe(2);
+        expect((await get("/v1/suppliers")).status).toBe(401);
+      });
+    });
+
+    describe("factura de proveedor", () => {
+      it("calcula los totales en el servidor y valida el NCF", async () => {
+        const s = await buying("pf1");
+        const d = await draftPurchase(s, { ncf: "b01-0000 0123" });
+        expect(d).toMatchObject({
+          kind: "SUPPLIER_INVOICE",
+          status: "DRAFT",
+          ncf: "B0100000123",
+          supplierName: "Distribuidora Norte",
+        });
+        expect(d.totals).toMatchObject({
+          subtotal: "500.00",
+          tax18: "90.00",
+          tax: "90.00",
+          total: "590.00",
+        });
+
+        for (const ncf of [undefined, "", "B01", "X0100000123", "E41000000001"]) {
+          const res = await post("/v1/purchases", purchaseBody(s, { ncf }), s.cookie);
+          expect(res.status, String(ncf)).toBe(422);
+        }
+        expect(
+          (await post("/v1/purchases", purchaseBody(s, { supplierId: null }), s.cookie))
+            .status,
+        ).toBe(422);
+      });
+
+      it("no se repite el NCF de un mismo proveedor, pero otro proveedor puede usar el mismo número", async () => {
+        const s = await buying("pf2");
+        await draftPurchase(s);
+        const dup = await post("/v1/purchases", purchaseBody(s), s.cookie);
+        expect(dup.status).toBe(409);
+        expect(await error(dup)).toMatch(/ese NCF/);
+        expect(
+          (
+            await post(
+              "/v1/purchases",
+              purchaseBody(s, { supplierId: s.informal.id }),
+              s.cookie,
+            )
+          ).status,
+        ).toBe(201);
+      });
+
+      it("al registrar da entrada al inventario con el costo neto y actualiza el último costo", async () => {
+        const s = await buying("pf3");
+        const d = await draftPurchase(s);
+        expect(await stockOf(s)).toBe("0");
+
+        const res = await postPurchase(s, d.id);
+        expect(res.status).toBe(200);
+        expect((await json(res)).data).toMatchObject({
+          status: "POSTED",
+          ncf: "B0100000123",
+        });
+
+        expect(await stockOf(s)).toBe("10");
+        const mv = (await movements(s))[0]!;
+        expect(mv).toMatchObject({
+          type: "RECEIPT",
+          quantity: "10",
+          balanceAfter: "10",
+          unitCost: "50.00",
+        });
+        expect(mv.reason).toContain("B0100000123");
+
+        const product = (await json(await get(`/v1/products/${s.tracked.id}`, s.cookie)))
+          .data;
+        expect(product.lastCost).toBe("50.00"); // el administrador ve el último costo…
+        const row = await withTenant(prisma, s.orgId).product.findFirstOrThrow({
+          where: { id: s.tracked.id },
+        });
+        expect(row.lastCost).toBe(5000n);
+
+        // …y el cajero no.
+        const cashier = await signUp("pf3c");
+        await prisma.member.create({
+          data: {
+            id: randomUUID(),
+            organizationId: s.orgId,
+            userId: cashier.userId,
+            role: "member",
+          },
+        });
+        const cashierCookie = await setActive(s.orgId, cashier.cookie);
+        const asCashier = (
+          await json(await get(`/v1/products/${s.tracked.id}`, cashierCookie))
+        ).data;
+        expect(asCashier.lastCost).toBeUndefined();
+        const list = (await json(await get("/v1/products", cashierCookie)))
+          .data as Json[];
+        expect(list.every((p) => p.lastCost === undefined)).toBe(true);
+      });
+
+      it("el costo unitario sale de la base sin impuesto, también con precio con ITBIS incluido y descuento", async () => {
+        const s = await buying("pf4");
+        // 4 unidades a RD$59.00 con ITBIS incluido → base 200.00 → costo 50.00
+        await postPurchase(
+          s,
+          (
+            await draftPurchase(s, {
+              lines: [
+                {
+                  productId: s.tracked.id,
+                  quantity: "4",
+                  unitCost: "59.00",
+                  tax: "ITBIS18",
+                  priceIncludesTax: true,
+                },
+              ],
+            })
+          ).id,
+        );
+        // 2 unidades a RD$100.00 con 10 % de descuento → base 180.00 → costo 90.00
+        await postPurchase(
+          s,
+          (
+            await draftPurchase(s, {
+              ncf: "B0100000124",
+              lines: [
+                {
+                  productId: s.tracked.id,
+                  quantity: "2",
+                  unitCost: "100.00",
+                  tax: "EXENTO",
+                  discount: { type: "percent", bps: 1000 },
+                },
+              ],
+            })
+          ).id,
+        );
+        const costs = (await movements(s)).map((m) => m.unitCost).sort();
+        expect(costs).toEqual(["50.00", "90.00"]);
+        expect(await stockOf(s)).toBe("6");
+      });
+
+      it("promedia el costo cuando el mismo producto aparece en varias líneas", async () => {
+        const s = await buying("pf5");
+        const d = await draftPurchase(s, {
+          lines: [
+            { productId: s.tracked.id, quantity: "1", unitCost: "10.00", tax: "EXENTO" },
+            { productId: s.tracked.id, quantity: "3", unitCost: "20.00", tax: "EXENTO" },
+          ],
+        });
+        await postPurchase(s, d.id);
+        const moves = await movements(s);
+        expect(moves).toHaveLength(1);
+        expect(moves[0]).toMatchObject({ quantity: "4", unitCost: "17.50" }); // (10 + 60) / 4
+      });
+
+      it("convierte a pesos el costo de una compra en dólares", async () => {
+        const s = await buying("pf6");
+        const d = await draftPurchase(s, {
+          currency: "USD",
+          exchangeRate: "60",
+          lines: [
+            { productId: s.tracked.id, quantity: "5", unitCost: "10.00", tax: "EXENTO" },
+          ],
+        });
+        await postPurchase(s, d.id);
+        expect((await movements(s))[0]).toMatchObject({
+          quantity: "5",
+          unitCost: "600.00",
+        });
+      });
+
+      it("un producto sin control de inventario no genera movimientos", async () => {
+        const s = await buying("pf7");
+        const plain = (
+          await json(
+            await post("/v1/products", { name: "Sin control", price: "5" }, s.cookie),
+          )
+        ).data;
+        const d = await draftPurchase(s, {
+          lines: [
+            { productId: plain.id, quantity: "3", unitCost: "2.00", tax: "ITBIS18" },
+          ],
+        });
+        expect((await postPurchase(s, d.id)).status).toBe(200);
+        expect(await movements(s)).toHaveLength(0);
+      });
+
+      it("una compra registrada no se modifica ni se elimina, y no se registra dos veces", async () => {
+        const s = await buying("pf8");
+        const d = await draftPurchase(s);
+        await postPurchase(s, d.id);
+        expect((await postPurchase(s, d.id)).status).toBe(409);
+        expect(
+          (await send("PUT", `/v1/purchases/${d.id}`, purchaseBody(s), s.cookie)).status,
+        ).toBe(409);
+        expect(
+          (await call(`/v1/purchases/${d.id}`, { method: "DELETE", cookie: s.cookie }))
+            .status,
+        ).toBe(409);
+        expect(await stockOf(s)).toBe("10"); // no se duplicó la entrada
+      });
+
+      it("un borrador se puede reemplazar y eliminar sin tocar el inventario", async () => {
+        const s = await buying("pf9");
+        const d = await draftPurchase(s);
+        const put = await send(
+          "PUT",
+          `/v1/purchases/${d.id}`,
+          purchaseBody(s, {
+            lines: [
+              { productId: s.tracked.id, quantity: "1", unitCost: "9.00", tax: "EXENTO" },
+            ],
+          }),
+          s.cookie,
+        );
+        expect((await json(put)).data.totals.total).toBe("9.00");
+        // Reemplazar conservando su propio NCF no cuenta como duplicado.
+        expect(put.status).toBe(200);
+        expect(
+          (await call(`/v1/purchases/${d.id}`, { method: "DELETE", cookie: s.cookie }))
+            .status,
+        ).toBe(204);
+        expect(await stockOf(s)).toBe("0");
+        expect((await get(`/v1/purchases/${d.id}`, s.cookie)).status).toBe(404);
+      });
+
+      it("valida las líneas", async () => {
+        const s = await buying("pf10");
+        let n = 0;
+        const lines = (l: Json[]) =>
+          post(
+            "/v1/purchases",
+            purchaseBody(s, {
+              ncf: `B01000002${String(++n).padStart(2, "0")}`,
+              lines: l,
+            }),
+            s.cookie,
+          );
+        expect((await lines([{ quantity: "1", unitCost: "5.00" }])).status).toBe(422); // sin producto ni nombre
+        expect(
+          (await lines([{ name: "Algo", quantity: "1", unitCost: "5.00" }])).status,
+        ).toBe(422); // sin impuesto
+        expect(
+          (
+            await lines([
+              { name: "Algo", quantity: "1", unitCost: "5.00", tax: "EXENTO" },
+            ])
+          ).status,
+        ).toBe(201);
+        expect(
+          (
+            await lines([
+              {
+                productId: s.tracked.id,
+                quantity: "1.5",
+                unitCost: "5.00",
+                tax: "EXENTO",
+              },
+            ])
+          ).status,
+        ).toBe(422); // no admite fracciones
+        expect(
+          (
+            await lines([
+              { productId: s.tracked.id, quantity: "0", unitCost: "5.00", tax: "EXENTO" },
+            ])
+          ).status,
+        ).toBe(422);
+        expect(
+          (
+            await lines([
+              { productId: randomUUID(), quantity: "1", unitCost: "5.00", tax: "EXENTO" },
+            ])
+          ).status,
+        ).toBe(422);
+        expect((await lines([])).status).toBe(400);
+      });
+    });
+
+    describe("comprobante de compras (E41)", () => {
+      const e41 = (s: Buying, over: Json = {}) =>
+        purchaseBody(s, {
+          kind: "E41",
+          ncf: undefined,
+          supplierId: s.informal.id,
+          expenseType: 2,
+          ...over,
+        });
+
+      it("recibe el e-NCF de la empresa al registrarse y también mueve el inventario", async () => {
+        const s = await buying("pe1");
+        const d = (await json(await post("/v1/purchases", e41(s), s.cookie))).data;
+        expect(d).toMatchObject({ kind: "E41", status: "DRAFT", ncf: null });
+        const posted = (await json(await postPurchase(s, d.id))).data;
+        expect(posted).toMatchObject({ status: "POSTED", ncf: "E410000000001" });
+        expect(await stockOf(s)).toBe("10");
+        // La numeración de E41 es independiente de la de venta.
+        const sale = await createDraft(s);
+        expect((await json(await issue(s, sale.id))).data.encf).toBe("E320000000001");
+      });
+
+      it("no admite NCF escrito a mano y exige proveedor con documento", async () => {
+        const s = await buying("pe2");
+        expect(
+          (await post("/v1/purchases", e41(s, { ncf: "E410000000099" }), s.cookie))
+            .status,
+        ).toBe(422);
+        expect(
+          (await post("/v1/purchases", e41(s, { supplierId: null }), s.cookie)).status,
+        ).toBe(422);
+
+        const noDoc = (
+          await json(await post("/v1/suppliers", { name: "Sin documento" }, s.cookie))
+        ).data;
+        const d = (
+          await json(
+            await post("/v1/purchases", e41(s, { supplierId: noDoc.id }), s.cookie),
+          )
+        ).data;
+        const res = await postPurchase(s, d.id);
+        expect(res.status).toBe(422);
+        expect(await error(res)).toMatch(/cédula o RNC/);
+      });
+
+      it("registra las retenciones sin pasarse del ITBIS ni de la base", async () => {
+        const s = await buying("pe3");
+        const lines = [
+          { name: "Servicio", quantity: "1", unitCost: "100.00", tax: "ITBIS18" },
+        ]; // ITBIS 18.00
+        const ok = await post(
+          "/v1/purchases",
+          e41(s, { lines, itbisWithheld: "18.00", isrWithheld: "10.00" }),
+          s.cookie,
+        );
+        expect(ok.status).toBe(201);
+        expect((await json(ok)).data.totals).toMatchObject({
+          itbisWithheld: "18.00",
+          isrWithheld: "10.00",
+        });
+        expect(
+          (
+            await post(
+              "/v1/purchases",
+              e41(s, { lines, itbisWithheld: "18.01" }),
+              s.cookie,
+            )
+          ).status,
+        ).toBe(422);
+        expect(
+          (
+            await post(
+              "/v1/purchases",
+              e41(s, { lines, isrWithheld: "100.01" }),
+              s.cookie,
+            )
+          ).status,
+        ).toBe(422);
+      });
+
+      it("sin secuencia vigente no se registra y el borrador queda intacto", async () => {
+        const s = await buying("pe4");
+        const other = await billing("pe4b", { seqs: [["E32", 1, 5]] }); // sin E41
+        const supplier = (
+          await json(
+            await post(
+              "/v1/suppliers",
+              { name: "Informal", documentType: "CEDULA", documentNumber: "00112345678" },
+              other.cookie,
+            ),
+          )
+        ).data;
+        const body = {
+          kind: "E41",
+          branchId: other.branch.id,
+          supplierId: supplier.id,
+          invoiceDate: todayStr,
+          lines: [{ name: "Servicio", quantity: "1", unitCost: "10.00", tax: "EXENTO" }],
+        };
+        const d = (await json(await post("/v1/purchases", body, other.cookie))).data;
+        const res = await post(`/v1/purchases/${d.id}/post`, {}, other.cookie);
+        expect(res.status).toBe(422);
+        expect(await error(res)).toMatch(/secuencia/i);
+        expect(
+          (await json(await get(`/v1/purchases/${d.id}`, other.cookie))).data.status,
+        ).toBe("DRAFT");
+        void s;
+      });
+
+      it("registrar varias a la vez no repite el e-NCF", async () => {
+        const s = await buying("pe5");
+        const drafts = await Promise.all(
+          Array.from({ length: 5 }, () =>
+            (async () =>
+              (
+                await json(
+                  await post(
+                    "/v1/purchases",
+                    e41(s, {
+                      lines: [
+                        {
+                          name: "Servicio",
+                          quantity: "1",
+                          unitCost: "10.00",
+                          tax: "EXENTO",
+                        },
+                      ],
+                    }),
+                    s.cookie,
+                  ),
+                )
+              ).data as Json)(),
+          ),
+        );
+        const results = await Promise.all(drafts.map((d) => postPurchase(s, d.id)));
+        expect(results.map((r) => r.status)).toEqual(Array(5).fill(200));
+        const ncfs = (
+          await Promise.all(results.map(async (r) => (await json(r)).data.ncf as string))
+        ).sort();
+        expect(ncfs).toEqual(
+          Array.from({ length: 5 }, (_, i) => `E41${String(i + 1).padStart(10, "0")}`),
+        );
+      });
+    });
+
+    describe("gastos menores (E43)", () => {
+      const e43 = (s: Buying, over: Json = {}) => ({
+        kind: "E43",
+        branchId: s.branch.id,
+        invoiceDate: todayStr,
+        expenseType: 2,
+        lines: [
+          { name: "Taxi al banco", quantity: "1", unitCost: "350.00", tax: "EXENTO" },
+        ],
+        ...over,
+      });
+
+      it("no necesita proveedor y recibe su e-NCF sin tocar el inventario", async () => {
+        const s = await buying("pg1");
+        const d = (await json(await post("/v1/purchases", e43(s), s.cookie))).data;
+        expect(d).toMatchObject({
+          kind: "E43",
+          supplierName: null,
+          totals: { total: "350.00" },
+        });
+        const posted = (await json(await postPurchase(s, d.id))).data;
+        expect(posted.ncf).toBe("E430000000001");
+        expect(await movements(s)).toHaveLength(0);
+      });
+
+      it("no admite productos de inventario ni retenciones", async () => {
+        const s = await buying("pg2");
+        const withProduct = await post(
+          "/v1/purchases",
+          e43(s, {
+            lines: [
+              { productId: s.tracked.id, quantity: "1", unitCost: "5.00", tax: "EXENTO" },
+            ],
+          }),
+          s.cookie,
+        );
+        expect(withProduct.status).toBe(422);
+        expect(
+          (await post("/v1/purchases", e43(s, { itbisWithheld: "1.00" }), s.cookie))
+            .status,
+        ).toBe(422);
+      });
+    });
+
+    describe("reporte de compras", () => {
+      async function scenario(label: string) {
+        const s = await buying(label);
+        // 1) Factura de proveedor: 2 × 50.00 + ITBIS 18 % = 118.00 (tipo 9)
+        await postPurchase(
+          s,
+          (
+            await draftPurchase(s, {
+              lines: [
+                {
+                  productId: s.tracked.id,
+                  quantity: "2",
+                  unitCost: "50.00",
+                  tax: "ITBIS18",
+                },
+              ],
+            })
+          ).id,
+        );
+        // 2) Gasto menor de 30.00 (tipo 2)
+        await postPurchase(
+          s,
+          (
+            await json(
+              await post(
+                "/v1/purchases",
+                {
+                  kind: "E43",
+                  branchId: s.branch.id,
+                  invoiceDate: todayStr,
+                  expenseType: 2,
+                  paymentMethod: "CARD",
+                  lines: [
+                    { name: "Parqueo", quantity: "1", unitCost: "30.00", tax: "EXENTO" },
+                  ],
+                },
+                s.cookie,
+              ),
+            )
+          ).data.id,
+        );
+        // 3) Comprobante de compras en dólares: US$10.00 × 60 = RD$600.00 con retención de ISR de US$1.00
+        await postPurchase(
+          s,
+          (
+            await json(
+              await post(
+                "/v1/purchases",
+                {
+                  kind: "E41",
+                  branchId: s.branch.id,
+                  supplierId: s.informal.id,
+                  invoiceDate: todayStr,
+                  expenseType: 2,
+                  currency: "USD",
+                  exchangeRate: "60",
+                  isrWithheld: "1.00",
+                  lines: [
+                    {
+                      name: "Servicio profesional",
+                      quantity: "1",
+                      unitCost: "10.00",
+                      tax: "EXENTO",
+                    },
+                  ],
+                },
+                s.cookie,
+              ),
+            )
+          ).data.id,
+        );
+        // 4) Un borrador que no debe contar.
+        await draftPurchase(s, { ncf: "B0100000999" });
+        return s;
+      }
+
+      it("suma lo registrado en pesos y separa ITBIS y retenciones", async () => {
+        const s = await scenario("pr1");
+        const { data } = await json(
+          await get(`/v1/reports/purchases?from=${todayStr}&to=${todayStr}`, s.cookie),
+        );
+        expect(data.totals).toMatchObject({
+          documents: 3,
+          subtotal: "730.00",
+          tax: "18.00",
+          total: "748.00",
+          itbisWithheld: "0.00",
+          isrWithheld: "60.00",
+        });
+        expect(data.series).toHaveLength(1);
+        expect(data.series[0]).toMatchObject({
+          period: todayStr,
+          count: 3,
+          total: "748.00",
+        });
+        const kind = Object.fromEntries(data.byKind.map((k: Json) => [k.kind, k.total]));
+        expect(kind).toEqual({ E41: "600.00", SUPPLIER_INVOICE: "118.00", E43: "30.00" });
+        const expense = Object.fromEntries(
+          data.byExpense.map((e: Json) => [e.expenseType, e.total]),
+        );
+        expect(expense).toEqual({ 2: "630.00", 9: "118.00" });
+        expect(data.topSuppliers[0]).toMatchObject({
+          name: "Juan Pérez",
+          total: "600.00",
+        });
+      });
+
+      it("respeta el rango y exige fechas válidas", async () => {
+        const s = await scenario("pr2");
+        const past = await json(
+          await get("/v1/reports/purchases?from=2020-01-01&to=2020-12-31", s.cookie),
+        );
+        expect(past.data.totals).toMatchObject({ documents: 0, total: "0.00" });
+        expect(
+          (await get("/v1/reports/purchases?from=2026-02-01&to=2026-01-01", s.cookie))
+            .status,
+        ).toBe(400);
+      });
+
+      it("exporta un CSV con las columnas del 606", async () => {
+        const s = await scenario("pr3");
+        const res = await get(
+          `/v1/reports/purchases.csv?from=${todayStr}&to=${todayStr}`,
+          s.cookie,
+        );
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-disposition")).toContain(
+          `compras-${todayStr}_${todayStr}.csv`,
+        );
+        const lines = (await res.text()).replace("﻿", "").trim().split("\r\n");
+        expect(lines[0]).toContain("Tipo de bienes y servicios (606)");
+        expect(lines).toHaveLength(1 + 3);
+        expect(
+          lines.some(
+            (l) =>
+              l.includes("B0100000123") && l.includes("131246796") && l.includes(",1,"),
+          ),
+        ).toBe(true); // RNC → tipo 1
+        expect(
+          lines.some(
+            (l) =>
+              l.includes("E410000000001") &&
+              l.includes("00112345678") &&
+              l.includes(",2,"),
+          ),
+        ).toBe(true); // cédula → tipo 2
+      });
+
+      it("solo administradores y cada empresa ve lo suyo", async () => {
+        const a = await scenario("pr4a");
+        const b = await buying("pr4b");
+        const cashier = await signUp("pr4c");
+        await prisma.member.create({
+          data: {
+            id: randomUUID(),
+            organizationId: a.orgId,
+            userId: cashier.userId,
+            role: "member",
+          },
+        });
+        const cookie = await setActive(a.orgId, cashier.cookie);
+        expect(
+          (await get(`/v1/reports/purchases?from=${todayStr}&to=${todayStr}`, cookie))
+            .status,
+        ).toBe(403);
+        expect(
+          (await get(`/v1/reports/purchases.csv?from=${todayStr}&to=${todayStr}`, cookie))
+            .status,
+        ).toBe(403);
+        expect(
+          (
+            await json(
+              await get(
+                `/v1/reports/purchases?from=${todayStr}&to=${todayStr}`,
+                b.cookie,
+              ),
+            )
+          ).data.totals.documents,
+        ).toBe(0);
+      });
+    });
+
+    it("los comprobantes de compra no se pueden emitir como ventas", async () => {
+      const s = await buying("px1");
+      for (const type of ["E41", "E43"]) {
+        expect(
+          (await post("/v1/documents", draftBody(s, { type }), s.cookie)).status,
+        ).toBe(400);
+      }
+      // Y las compras no aparecen en el reporte de ventas.
+      await postPurchase(s, (await draftPurchase(s)).id);
+      const sales = await json(
+        await get(`/v1/reports/sales?from=${todayStr}&to=${todayStr}`, s.cookie),
+      );
+      expect(sales.data.totals.documents).toBe(0);
+    });
+
+    it("sin sesión no se accede a las compras", async () => {
+      for (const path of [
+        "/v1/purchases",
+        "/v1/suppliers",
+        "/v1/reports/purchases?from=2026-01-01&to=2026-01-02",
+      ]) {
+        expect((await get(path)).status).toBe(401);
+      }
+    });
+
+    it("cada empresa ve solo sus compras y no puede usar proveedores ajenos", async () => {
+      const a = await buying("pz1a");
+      const b = await buying("pz1b");
+      const d = await draftPurchase(a);
+      expect((await get(`/v1/purchases/${d.id}`, b.cookie)).status).toBe(404);
+      expect((await postPurchase(b, d.id)).status).toBe(404);
+      expect((await json(await get("/v1/purchases", b.cookie))).total).toBe(0);
+      const steal = await post(
+        "/v1/purchases",
+        purchaseBody(b, { supplierId: a.supplier.id }),
+        b.cookie,
+      );
+      expect(steal.status).toBe(422);
+    });
+  });
+
   describe("bitácora", () => {
     it("registra cada cambio, de forma atómica con el cambio", async () => {
       const { cookie, orgId } = await owner("log");

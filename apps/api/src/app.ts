@@ -11,8 +11,11 @@ import { customers } from "./routes/customers";
 import { documents } from "./routes/documents";
 import { inventory } from "./routes/inventory";
 import { products } from "./routes/products";
+import { purchases } from "./routes/purchases";
 import { reports } from "./routes/reports";
+import { purchaseReports } from "./routes/reports-purchases";
 import { sequences } from "./routes/sequences";
+import { suppliers } from "./routes/suppliers";
 import { terminals } from "./routes/terminals";
 import { requireTenant } from "./middleware/tenant";
 import { webOrigins } from "./env";
@@ -76,7 +79,10 @@ export function createApp(deps: Deps) {
     .route("/v1/sequences", sequences)
     .route("/v1/documents", documents)
     .route("/v1/reports", reports)
+    .route("/v1/reports", purchaseReports)
     .route("/v1/inventory", inventory)
+    .route("/v1/suppliers", suppliers)
+    .route("/v1/purchases", purchases)
     .route("/v1", calculate);
 
   app.onError((err, c) => {

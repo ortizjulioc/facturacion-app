@@ -11,6 +11,7 @@ import {
 import type { Prisma } from "@facturacion/db";
 import { auditEntry } from "../lib/audit";
 import {
+  asSalesType,
   buildDraft,
   documentDto,
   documentInput,
@@ -206,7 +207,8 @@ export const documents = new Hono<AppEnv>()
         buyerDocType: draft.buyerDocType,
         buyerDocNumber: draft.buyerDocNumber,
       };
-      if (draft.customerId && !isModifier(draft.type)) {
+      const type = asSalesType(draft.type);
+      if (draft.customerId && !isModifier(type)) {
         const customer = await tx.customer.findFirst({ where: { id: draft.customerId } });
         if (customer) {
           buyer = {
@@ -217,8 +219,8 @@ export const documents = new Hono<AppEnv>()
         }
       }
 
-      if (!isModifier(draft.type)) {
-        const [problem] = buyerErrors(draft.type, draft.total, {
+      if (!isModifier(type)) {
+        const [problem] = buyerErrors(type, draft.total, {
           docType: buyer.buyerDocType,
           docNumber: buyer.buyerDocNumber,
         });

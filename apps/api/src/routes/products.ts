@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { zv } from "../lib/validator";
 import { z } from "zod";
@@ -19,7 +19,7 @@ import type { AppEnv, TenantTx } from "../types";
 type ProductRow = Prisma.ProductGetPayload<object>;
 
 /** Los montos viajan como texto decimal ("19.99"): JSON no soporta BigInt. */
-export const productDto = (p: ProductRow) => ({
+export const productDto = (p: ProductRow, showCost = false) => ({
   id: p.id,
   name: p.name,
   description: p.description,
@@ -36,7 +36,15 @@ export const productDto = (p: ProductRow) => ({
   active: p.active,
   createdAt: p.createdAt,
   updatedAt: p.updatedAt,
+  // El costo de compra solo lo ven propietarios y administradores (el cajero no).
+  ...(showCost ? { lastCost: p.lastCost === null ? null : fromCents(p.lastCost) } : {}),
 });
+
+const seesCost = (c: Context<AppEnv>) =>
+  c
+    .get("role")
+    .split(",")
+    .some((r) => ["owner", "admin"].includes(r.trim()));
 
 const fields = {
   name: z.string().trim().min(1).max(200),
@@ -130,7 +138,14 @@ export const products = new Hono<AppEnv>()
       }),
       db.product.count({ where }),
     ]);
-    return c.json(pageOf(rows.map(productDto), total, page, pageSize));
+    return c.json(
+      pageOf(
+        rows.map((r) => productDto(r, seesCost(c))),
+        total,
+        page,
+        pageSize,
+      ),
+    );
   })
   // Búsqueda exacta por código de barras: la usa la caja al escanear.
   .get("/by-barcode/:code", async (c) => {
@@ -138,14 +153,14 @@ export const products = new Hono<AppEnv>()
       .get("db")
       .product.findFirst({ where: { barcode: c.req.param("code"), active: true } });
     if (!product) throw new HTTPException(404, { message: "Producto no encontrado" });
-    return c.json({ data: productDto(product) });
+    return c.json({ data: productDto(product, seesCost(c)) });
   })
   .get("/:id", zv("param", uuidParam), async (c) => {
     const product = await c
       .get("db")
       .product.findFirst({ where: { id: c.req.valid("param").id } });
     if (!product) throw new HTTPException(404, { message: "Producto no encontrado" });
-    return c.json({ data: productDto(product) });
+    return c.json({ data: productDto(product, seesCost(c)) });
   })
   .post("/", canWrite, zv("json", createProduct), async (c) => {
     const { price, minStock, ...input } = c.req.valid("json");
@@ -167,7 +182,7 @@ export const products = new Hono<AppEnv>()
       });
       return created;
     });
-    return c.json({ data: productDto(product) }, 201);
+    return c.json({ data: productDto(product, seesCost(c)) }, 201);
   })
   .patch(
     "/:id",
@@ -194,7 +209,7 @@ export const products = new Hono<AppEnv>()
         });
         return updated;
       });
-      return c.json({ data: productDto(product) });
+      return c.json({ data: productDto(product, seesCost(c)) });
     },
   )
   // Un producto facturado no puede desaparecer: DELETE lo desactiva.
