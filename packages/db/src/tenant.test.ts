@@ -435,6 +435,232 @@ describe.skipIf(!process.env.DATABASE_URL)("RLS multiempresa", () => {
     });
   });
 
+  describe("compras", () => {
+    const base = async (org: string) => {
+      const as = withTenant(prisma, org);
+      const branch = await as.branch.findFirstOrThrow();
+      const supplier = await as.supplier.create({
+        data: { organizationId: org, name: `Proveedor ${randomUUID().slice(0, 6)}` },
+      });
+      let n = 0;
+      const purchase = (over: object = {}) =>
+        as.purchase.create({
+          data: {
+            organizationId: org,
+            kind: "SUPPLIER_INVOICE",
+            branchId: branch.id,
+            supplierId: supplier.id,
+            ncf: `B01${String(Date.now() % 1e7).padStart(7, "0")}${++n}`.slice(0, 11),
+            invoiceDate: new Date("2026-10-01"),
+            createdById: "test-user",
+            total: 11800n,
+            subtotal: 10000n,
+            totalTax: 1800n,
+            ...over,
+          },
+        });
+      const line = (purchaseId: string) => ({
+        organizationId: org,
+        purchaseId,
+        lineNumber: 1,
+        name: "Producto",
+        quantity: 1000n,
+        unitCost: 10000n,
+        priceIncludesTax: false,
+        tax: "ITBIS18" as const,
+        gross: 10000n,
+        discount: 0n,
+        base: 10000n,
+        taxAmount: 1800n,
+        total: 11800n,
+      });
+      return { as, branch, supplier, purchase, line };
+    };
+
+    it("aísla proveedores, compras y líneas por empresa", async () => {
+      const a = await base(orgA);
+      const p = await a.purchase();
+      await a.as.purchaseLine.create({ data: a.line(p.id) });
+      const asB = withTenant(prisma, orgB);
+      for (const model of ["supplier", "purchase", "purchaseLine"] as const) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect(
+          await (a.as[model] as any).count(),
+          `${model} visible para su dueño`,
+        ).toBeGreaterThan(0);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect(
+          await (asB[model] as any).count(),
+          `${model} oculto para otra empresa`,
+        ).toBe(0);
+      }
+      await expect(
+        asB.supplier.create({ data: { organizationId: orgA, name: "Intruso" } }),
+      ).rejects.toThrow();
+    });
+
+    it("un borrador se edita y se elimina; una compra registrada queda congelada", async () => {
+      const a = await base(orgA);
+      const draft = await a.purchase();
+      await a.as.purchaseLine.create({ data: a.line(draft.id) });
+      await a.as.purchase.update({
+        where: { id: draft.id },
+        data: { notes: "cambio permitido" },
+      });
+
+      const posted = await a.as.purchase.update({
+        where: { id: draft.id },
+        data: { status: "POSTED", postedAt: new Date() },
+      });
+      expect(posted.status).toBe("POSTED");
+
+      await expect(
+        a.as.purchase.update({ where: { id: draft.id }, data: { total: 1n } }),
+      ).rejects.toThrow(/no se puede modificar/);
+      await expect(
+        a.as.purchase.update({ where: { id: draft.id }, data: { status: "DRAFT" } }),
+      ).rejects.toThrow();
+      await expect(a.as.purchase.delete({ where: { id: draft.id } })).rejects.toThrow(
+        /no se puede eliminar/,
+      );
+      await expect(
+        a.as.purchaseLine.updateMany({
+          where: { purchaseId: draft.id },
+          data: { unitCost: 1n },
+        }),
+      ).rejects.toThrow(/no se pueden modificar/);
+      await expect(
+        a.as.purchaseLine.deleteMany({ where: { purchaseId: draft.id } }),
+      ).rejects.toThrow();
+      await expect(
+        a.as.purchaseLine.create({ data: { ...a.line(draft.id), lineNumber: 2 } }),
+      ).rejects.toThrow();
+
+      const other = await a.purchase();
+      await a.as.purchaseLine.create({ data: a.line(other.id) });
+      await a.as.purchaseLine.deleteMany({ where: { purchaseId: other.id } });
+      await a.as.purchase.delete({ where: { id: other.id } });
+    });
+
+    it("el NCF debe tener el formato de su tipo y toda compra registrada lleva NCF", async () => {
+      const a = await base(orgA);
+      await expect(a.purchase({ ncf: "X0100000001" })).rejects.toThrow(); // formato de proveedor inválido
+      await expect(a.purchase({ kind: "E41", ncf: "B0100000001" })).rejects.toThrow(); // E41 exige e-NCF E41…
+      await expect(a.purchase({ kind: "E43", ncf: "E410000000001" })).rejects.toThrow(); // y E43 el E43…
+      await expect(
+        a.purchase({ kind: "E43", ncf: "E430000000001", supplierId: null }),
+      ).resolves.toBeTruthy();
+      await expect(a.purchase({ ncf: "E310000000045" })).resolves.toBeTruthy(); // e-CF de un proveedor formal
+
+      const noNcf = await a.purchase({ ncf: null });
+      await expect(
+        a.as.purchase.update({
+          where: { id: noNcf.id },
+          data: { status: "POSTED", postedAt: new Date() },
+        }),
+      ).rejects.toThrow();
+      const noDate = await a.purchase();
+      await expect(
+        a.as.purchase.update({ where: { id: noDate.id }, data: { status: "POSTED" } }),
+      ).rejects.toThrow();
+    });
+
+    it("no repite el NCF de un proveedor ni el e-NCF propio de la empresa", async () => {
+      const a = await base(orgA);
+      await a.purchase({ ncf: "B0100000777" });
+      await expect(a.purchase({ ncf: "B0100000777" })).rejects.toThrow(); // mismo proveedor
+      const other = await a.as.supplier.create({
+        data: { organizationId: orgA, name: "Otro proveedor" },
+      });
+      await expect(
+        a.purchase({ ncf: "B0100000777", supplierId: other.id }),
+      ).resolves.toBeTruthy(); // otro proveedor
+
+      await a.purchase({ kind: "E41", ncf: "E410000000777", supplierId: other.id });
+      await expect(
+        a.purchase({ kind: "E41", ncf: "E410000000777", supplierId: null }),
+      ).rejects.toThrow(); // e-NCF propio único
+      await expect(
+        a.purchase({ kind: "E43", ncf: "E430000000777", supplierId: null }),
+      ).resolves.toBeTruthy();
+    });
+
+    it("rechaza retenciones y tipos de gasto fuera de rango", async () => {
+      const a = await base(orgA);
+      const n = () =>
+        `B01${Math.floor(Math.random() * 1e8)
+          .toString()
+          .padStart(8, "0")}`; // B + 10 dígitos
+      await expect(a.purchase({ ncf: n(), itbisWithheld: 1801n })).rejects.toThrow(); // más que el ITBIS (1800)
+      await expect(a.purchase({ ncf: n(), isrWithheld: 10001n })).rejects.toThrow(); // más que la base
+      await expect(a.purchase({ ncf: n(), itbisWithheld: -1n })).rejects.toThrow();
+      await expect(a.purchase({ ncf: n(), expenseType: 0 })).rejects.toThrow();
+      await expect(a.purchase({ ncf: n(), expenseType: 12 })).rejects.toThrow();
+      await expect(
+        a.purchase({
+          ncf: n(),
+          itbisWithheld: 1800n,
+          isrWithheld: 10000n,
+          expenseType: 11,
+        }),
+      ).resolves.toBeTruthy();
+    });
+
+    it("E41 y E43 solo numeran compras: un documento de venta no puede ser de esos tipos", async () => {
+      const a = await base(orgA);
+      await expect(
+        a.as.document.create({
+          data: {
+            organizationId: orgA,
+            type: "E41",
+            branchId: a.branch.id,
+            createdById: "test-user",
+          },
+        }),
+      ).rejects.toThrow();
+      // …pero sí pueden tener secuencia propia.
+      await expect(
+        a.as.sequence.create({
+          data: {
+            organizationId: orgA,
+            ecfType: "E41",
+            fromNumber: 1n,
+            toNumber: 10n,
+            nextNumber: 1n,
+            expiresAt: new Date("2099-12-31"),
+          },
+        }),
+      ).resolves.toBeTruthy();
+    });
+
+    it("una entrada al inventario puede enlazar su compra de origen", async () => {
+      const a = await base(orgA);
+      const p = await a.purchase();
+      const product = await a.as.product.create({
+        data: {
+          organizationId: orgA,
+          name: `Prod ${p.id.slice(0, 6)}`,
+          price: 1n,
+          trackInventory: true,
+        },
+      });
+      const m = await a.as.stockMovement.create({
+        data: {
+          organizationId: orgA,
+          productId: product.id,
+          branchId: a.branch.id,
+          type: "RECEIPT",
+          quantity: 5_000n,
+          balanceAfter: 5_000n,
+          unitCost: 5_000n,
+          purchaseId: p.id,
+          createdById: "test-user",
+        },
+      });
+      expect(m.purchaseId).toBe(p.id);
+    });
+  });
+
   it("la bitácora es inmutable para el rol de la app", async () => {
     const asA = withTenant(prisma, orgA);
     const log = await asA.auditLog.create({

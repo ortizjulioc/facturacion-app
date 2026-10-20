@@ -12,6 +12,23 @@ export const ECF_LABELS: Record<EcfType, string> = {
   E34: "Nota de crédito",
 };
 
+/**
+ * Comprobantes que emite la empresa por COMPRAS (no son ventas): E41 comprobante de compras
+ * (a proveedores informales) y E43 gastos menores. Comparten la numeración e-NCF con los de venta.
+ */
+export const PURCHASE_ECF_TYPES = ["E41", "E43"] as const;
+export type PurchaseEcfType = (typeof PURCHASE_ECF_TYPES)[number];
+
+/** Todos los tipos que tienen secuencia de e-NCF. */
+export const ALL_ECF_TYPES = [...ECF_TYPES, ...PURCHASE_ECF_TYPES] as const;
+export type AnyEcfType = (typeof ALL_ECF_TYPES)[number];
+
+export const ALL_ECF_LABELS: Record<AnyEcfType, string> = {
+  ...ECF_LABELS,
+  E41: "Comprobante de compras",
+  E43: "Gastos menores",
+};
+
 /** Las notas de débito y crédito modifican un comprobante ya emitido. */
 export const isModifier = (type: EcfType) => type === "E33" || type === "E34";
 
@@ -38,19 +55,19 @@ const MAX_SEQUENCE = 9_999_999_999n;
 /**
  * e-NCF = "E" + tipo (2 dígitos) + secuencia (10 dígitos): E310000000001 (13 caracteres).
  */
-export function formatEncf(type: EcfType, sequence: bigint): string {
+export function formatEncf(type: AnyEcfType, sequence: bigint): string {
   if (sequence < 1n || sequence > MAX_SEQUENCE) {
     throw new Error("La secuencia del e-NCF debe estar entre 1 y 9,999,999,999");
   }
   return `E${type.slice(1)}${sequence.toString().padStart(10, "0")}`;
 }
 
-export function parseEncf(encf: string): { type: EcfType; sequence: bigint } | null {
-  const m = /^E(31|32|33|34)(\d{10})$/.exec(encf);
+export function parseEncf(encf: string): { type: AnyEcfType; sequence: bigint } | null {
+  const m = /^E(31|32|33|34|41|43)(\d{10})$/.exec(encf);
   if (!m) return null;
   const sequence = BigInt(m[2]!);
   if (sequence < 1n) return null;
-  return { type: `E${m[1]}` as EcfType, sequence };
+  return { type: `E${m[1]}` as AnyEcfType, sequence };
 }
 
 export type BuyerInput = {
@@ -70,7 +87,9 @@ export function buyerErrors(type: EcfType, total: Cents, buyer: BuyerInput): str
     return ["La factura de crédito fiscal requiere un cliente con RNC"];
   }
   if (type === "E32" && total >= CONSUMER_ID_THRESHOLD && !identified) {
-    return ["Las facturas de consumo desde RD$250,000.00 requieren identificar al comprador"];
+    return [
+      "Las facturas de consumo desde RD$250,000.00 requieren identificar al comprador",
+    ];
   }
   return [];
 }

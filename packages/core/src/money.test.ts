@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatDop, fromCents, toCents } from "./money";
+import { convertCents, formatDop, fromCents, toCents } from "./money";
 
 describe("money", () => {
   it("convierte texto a centavos sin errores de float", () => {
@@ -23,5 +23,19 @@ describe("money", () => {
   it("formatea pesos dominicanos", () => {
     expect(formatDop(123450n)).toBe("RD$ 1,234.50");
     expect(formatDop(-5n)).toBe("-RD$ 0.05");
+  });
+});
+
+describe("convertCents", () => {
+  it("convierte con la tasa de cambio y redondea a centavos", () => {
+    expect(convertCents(1000n, "58.5")).toBe(58_500n);
+    expect(convertCents(1000n, "1")).toBe(1000n);
+    expect(convertCents(333n, "58.7325")).toBe(19_558n); // 3.33 × 58.7325 = 195.58
+    expect(convertCents(0n, "60")).toBe(0n);
+  });
+  it("rechaza tasas inválidas", () => {
+    expect(() => convertCents(1n, "abc")).toThrow();
+    expect(() => convertCents(1n, "1.23456")).toThrow();
+    expect(() => convertCents(1n, "-2")).toThrow();
   });
 });

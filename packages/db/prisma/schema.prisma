@@ -99,6 +99,8 @@ model Organization {
   auditLogs      AuditLog[]
   stockLevels    StockLevel[]
   stockMovements StockMovement[]
+  suppliers      Supplier[]
+  purchases      Purchase[]
 
   @@map("organization")
 }
@@ -150,6 +152,7 @@ model Branch {
   documents      Document[]
   stockLevels    StockLevel[]
   stockMovements StockMovement[]
+  purchases      Purchase[]
 
   @@unique([organizationId, code])
   @@map("branch")
@@ -231,8 +234,11 @@ model Product {
   organization     Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   category         Category?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   documentLines    DocumentLine[]
+  /// Último costo unitario neto (sin impuesto) de compra, en centavos.
+  lastCost         BigInt?
   stockLevels      StockLevel[]
   stockMovements   StockMovement[]
+  purchaseLines    PurchaseLine[]
 
   @@unique([organizationId, sku])
   @@unique([organizationId, barcode])
@@ -268,6 +274,10 @@ enum EcfType {
   E32
   E33
   E34
+  /// Comprobante de compras (lo emite la empresa a un proveedor informal).
+  E41
+  /// Gastos menores (lo emite la empresa).
+  E43
 }
 
 enum DocumentStatus {
@@ -447,6 +457,125 @@ model Payment {
   @@map("payment")
 }
 
+enum PurchaseKind {
+  /// Factura (o e-CF) que emitió el proveedor y que la empresa registra.
+  SUPPLIER_INVOICE
+  /// Comprobante de compras que emite la empresa (proveedor informal).
+  E41
+  /// Gasto menor que emite la empresa.
+  E43
+}
+
+enum PurchaseStatus {
+  DRAFT
+  /// Registrada: ya no se puede modificar ni borrar.
+  POSTED
+}
+
+model Supplier {
+  id             String        @id @default(uuid(7)) @db.Uuid
+  organizationId String
+  name           String
+  documentType   DocumentType?
+  /// Solo dígitos (RNC 9, cédula 11) o texto libre para pasaporte.
+  documentNumber String?
+  email          String?
+  phone          String?
+  address        String?
+  active         Boolean       @default(true)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  purchases      Purchase[]
+
+  @@unique([organizationId, documentNumber])
+  @@index([organizationId, name])
+  @@map("supplier")
+}
+
+/// Compra o gasto. Se edita solo en DRAFT; al registrarla (POSTED) queda congelada.
+model Purchase {
+  id                String          @id @default(uuid(7)) @db.Uuid
+  organizationId    String
+  kind              PurchaseKind
+  status            PurchaseStatus  @default(DRAFT)
+  branchId          String          @db.Uuid
+  supplierId        String?         @db.Uuid
+  /// Copia del proveedor al registrar.
+  supplierName      String?
+  supplierDocType   DocumentType?
+  supplierDocNumber String?
+  /// NCF del proveedor (factura de proveedor) o e-NCF que emite la empresa (E41/E43).
+  ncf               String?
+  /// Fecha del comprobante (la que va en el formato 606).
+  invoiceDate       DateTime        @db.Date
+  currency          String          @default("DOP")
+  exchangeRate      Decimal         @default(1) @db.Decimal(14, 4)
+  /// Tipo de bienes y servicios del 606 (1–11).
+  expenseType       Int             @default(9)
+  paymentMethod     PaymentMethod   @default(CASH)
+  notes             String?
+  // Totales en centavos, calculados SIEMPRE en el servidor con @facturacion/core.
+  totalDiscount     BigInt          @default(0)
+  subtotal          BigInt          @default(0)
+  base18            BigInt          @default(0)
+  tax18             BigInt          @default(0)
+  base16            BigInt          @default(0)
+  tax16             BigInt          @default(0)
+  base0             BigInt          @default(0)
+  baseExempt        BigInt          @default(0)
+  totalTax          BigInt          @default(0)
+  total             BigInt          @default(0)
+  itbisWithheld     BigInt          @default(0)
+  isrWithheld       BigInt          @default(0)
+  postedAt          DateTime?
+  createdById       String
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch            Branch          @relation(fields: [branchId], references: [id], onDelete: NoAction)
+  supplier          Supplier?       @relation(fields: [supplierId], references: [id], onDelete: NoAction)
+  lines             PurchaseLine[]
+  stockMovements    StockMovement[]
+
+  @@unique([organizationId, supplierId, ncf])
+  @@index([organizationId, status])
+  @@index([organizationId, invoiceDate])
+  @@index([supplierId])
+  @@index([branchId])
+  @@map("purchase")
+}
+
+model PurchaseLine {
+  id               String   @id @default(uuid(7)) @db.Uuid
+  organizationId   String
+  purchaseId       String   @db.Uuid
+  lineNumber       Int
+  productId        String?  @db.Uuid
+  name             String
+  unit             String   @default("UND")
+  /// Cantidad en milésimas (1000 = 1.000).
+  quantity         BigInt
+  /// Costo unitario tal como se digitó (con o sin impuesto según `priceIncludesTax`).
+  unitCost         BigInt
+  priceIncludesTax Boolean
+  tax              TaxCode
+  /// "PERCENT" (puntos básicos) o "AMOUNT" (centavos).
+  discountType     String?
+  discountValue    BigInt?
+  gross            BigInt
+  discount         BigInt
+  base             BigInt
+  taxAmount        BigInt
+  total            BigInt
+  purchase         Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  product          Product? @relation(fields: [productId], references: [id], onDelete: NoAction)
+
+  @@unique([purchaseId, lineNumber])
+  @@index([productId])
+  @@map("purchase_line")
+}
+
 enum StockMovementType {
   /// Entrada de mercancía (compra, producción…).
   RECEIPT
@@ -490,6 +619,8 @@ model StockMovement {
   /// Costo unitario en centavos (entradas).
   unitCost       BigInt?
   documentId     String?           @db.Uuid
+  /// Compra que originó la entrada (si la hay).
+  purchaseId     String?           @db.Uuid
   reason         String?
   createdById    String
   createdAt      DateTime          @default(now())
@@ -497,8 +628,10 @@ model StockMovement {
   product        Product           @relation(fields: [productId], references: [id], onDelete: NoAction)
   branch         Branch            @relation(fields: [branchId], references: [id], onDelete: NoAction)
   document       Document?         @relation(fields: [documentId], references: [id], onDelete: NoAction)
+  purchase       Purchase?         @relation(fields: [purchaseId], references: [id], onDelete: NoAction)
 
   @@index([organizationId, productId, createdAt])
+  @@index([purchaseId])
   @@index([organizationId, createdAt])
   @@index([documentId])
   @@map("stock_movement")

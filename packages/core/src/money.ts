@@ -1,3 +1,5 @@
+import { divRound } from "./tax";
+
 /**
  * Dinero en CENTAVOS (enteros). Nunca usar float para montos fiscales.
  * `bigint` para que no haya pérdida de precisión en sumas grandes ni en la BD (BigInt).
@@ -28,3 +30,14 @@ export const formatDop = (cents: Cents): string => {
   const grouped = digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   return `${neg ? "-" : ""}RD$ ${grouped}.${frac}`;
 };
+
+/**
+ * Convierte centavos con una tasa de cambio decimal (hasta 4 decimales), redondeando a centavos:
+ * `convertCents(1000n, "58.5")` → 58500n (US$10.00 a RD$585.00).
+ */
+export function convertCents(cents: Cents, rate: string): Cents {
+  const m = /^(\d+)(?:\.(\d{1,4}))?$/.exec(rate.trim());
+  if (!m) throw new Error(`Tasa de cambio inválida: "${rate}"`);
+  const scaled = BigInt(m[1]!) * 10_000n + BigInt((m[2] ?? "").padEnd(4, "0"));
+  return divRound(cents * scaled, 10_000n);
+}
