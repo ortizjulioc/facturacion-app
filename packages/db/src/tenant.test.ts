@@ -780,6 +780,99 @@ describe.skipIf(!process.env.DATABASE_URL)("RLS multiempresa", () => {
     });
   });
 
+  describe("carta del restaurante", () => {
+    const base = async (org: string) => {
+      const as = withTenant(prisma, org);
+      const branch = await as.branch.findFirstOrThrow();
+      const table = await as.diningTable.create({
+        data: { organizationId: org, branchId: branch.id, name: `Mesa ${randomUUID().slice(0, 6)}` },
+      });
+      const product = (name: string, over: object = {}) =>
+        as.product.create({ data: { organizationId: org, name: `${name} ${randomUUID().slice(0, 6)}`, price: 10_000n, ...over } });
+      const group = (over: object = {}) =>
+        as.modifierGroup.create({ data: { organizationId: org, name: `Grupo ${randomUUID().slice(0, 6)}`, ...over } });
+      return { as, branch, table, product, group };
+    };
+
+    it("grupos, opciones, vínculos y componentes están aislados por empresa", async () => {
+      const a = await base(orgA);
+      const b = await base(orgB);
+      const g = await a.group();
+      const mod = await a.as.modifier.create({ data: { organizationId: orgA, groupId: g.id, name: "Queso", price: 5_000n } });
+      const burger = await a.product("Burger");
+      const combo = await a.product("Combo", { isCombo: true });
+      const link = await a.as.productModifierGroup.create({ data: { organizationId: orgA, productId: burger.id, groupId: g.id } });
+      const part = await a.as.comboComponent.create({ data: { organizationId: orgA, comboId: combo.id, productId: burger.id, quantity: 2 } });
+
+      for (const model of ["modifierGroup", "modifier", "productModifierGroup", "comboComponent"] as const) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect(await (a.as[model] as any).count(), `${model} visible para su dueño`).toBeGreaterThan(0);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect(await (b.as[model] as any).count({ where: { organizationId: orgA } }), `${model} oculto`).toBe(0);
+      }
+      expect(mod.price).toBe(5_000n);
+      expect(link.productId).toBe(burger.id);
+      expect(part.quantity).toBe(2);
+      // No se puede escribir en nombre de otra empresa.
+      await expect(
+        b.as.modifierGroup.create({ data: { organizationId: orgA, name: "Intruso" } }),
+      ).rejects.toThrow();
+      await expect(
+        b.as.comboComponent.create({ data: { organizationId: orgA, comboId: combo.id, productId: burger.id } }),
+      ).rejects.toThrow();
+    });
+
+    it("valida cursos, precios, mínimos y máximos, y el combo", async () => {
+      const { as, product, group, table, branch } = await base(orgA);
+      await expect(product("Curso 0", { course: 0 })).rejects.toThrow();
+      await expect(product("Curso 6", { course: 6 })).rejects.toThrow();
+      await expect(product("Combo con stock", { isCombo: true, trackInventory: true })).rejects.toThrow();
+
+      await expect(group({ minSelect: -1 })).rejects.toThrow();
+      await expect(group({ maxSelect: 0 })).rejects.toThrow();
+      await expect(group({ minSelect: 3, maxSelect: 2 })).rejects.toThrow();
+      const g = await group({ minSelect: 1, maxSelect: 2 });
+      await expect(as.modifier.create({ data: { organizationId: orgA, groupId: g.id, name: "Negativo", price: -1n } })).rejects.toThrow();
+      await as.modifier.create({ data: { organizationId: orgA, groupId: g.id, name: "Sal" } });
+      await expect(as.modifier.create({ data: { organizationId: orgA, groupId: g.id, name: "Sal" } })).rejects.toThrow(); // repetida en el grupo
+
+      const combo = await product("Combo", { isCombo: true });
+      const part = await product("Parte");
+      await expect(as.comboComponent.create({ data: { organizationId: orgA, comboId: combo.id, productId: combo.id } })).rejects.toThrow(); // a sí mismo
+      await expect(as.comboComponent.create({ data: { organizationId: orgA, comboId: combo.id, productId: part.id, quantity: 0 } })).rejects.toThrow();
+      await as.comboComponent.create({ data: { organizationId: orgA, comboId: combo.id, productId: part.id } });
+      await expect(as.comboComponent.create({ data: { organizationId: orgA, comboId: combo.id, productId: part.id } })).rejects.toThrow(); // repetido
+
+      // Curso del producto anotado dentro de rango.
+      const order = await as.restaurantOrder.create({
+        data: { organizationId: orgA, branchId: branch.id, tableId: table.id, number: 2_000_000 + Math.floor(Math.random() * 900_000_000), openedById: "x" },
+      });
+      await expect(
+        as.orderItem.create({
+          data: { organizationId: orgA, orderId: order.id, name: "X", quantity: 1_000n, unitPrice: 1n, priceIncludesTax: true, tax: "ITBIS18", course: 9, createdById: "x" },
+        }),
+      ).rejects.toThrow();
+    });
+
+    it("las partes de un combo se borran junto con él, aunque la comanda esté protegida", async () => {
+      const { as, table, branch } = await base(orgA);
+      const order = await as.restaurantOrder.create({
+        data: { organizationId: orgA, branchId: branch.id, tableId: table.id, number: 2_000_000 + Math.floor(Math.random() * 900_000_000), openedById: "x" },
+      });
+      const item = (over: object = {}) =>
+        as.orderItem.create({
+          data: { organizationId: orgA, orderId: order.id, name: "Combo", quantity: 1_000n, unitPrice: 40_000n, priceIncludesTax: true, tax: "ITBIS18", createdById: "x", modifiers: [{ id: "m", name: "Queso", price: "5000" }], ...over },
+        });
+      const parent = await item();
+      const part = await item({ name: "Parte", unitPrice: 0n, parentItemId: parent.id });
+      expect(part.parentItemId).toBe(parent.id);
+      expect((await as.orderItem.findUniqueOrThrow({ where: { id: parent.id } })).modifiers).toEqual([{ id: "m", name: "Queso", price: "5000" }]);
+
+      await as.orderItem.delete({ where: { id: parent.id } });
+      expect(await as.orderItem.findUnique({ where: { id: part.id } })).toBeNull();
+    });
+  });
+
   it("la bitácora es inmutable para el rol de la app", async () => {
     const asA = withTenant(prisma, orgA);
     const log = await asA.auditLog.create({

@@ -103,6 +103,8 @@ model Organization {
   purchases        Purchase[]
   diningTables     DiningTable[]
   restaurantOrders RestaurantOrder[]
+  modifierGroups   ModifierGroup[]
+  modifiers        Modifier[]
 
   @@map("organization")
 }
@@ -234,6 +236,10 @@ model Product {
   minStock         BigInt          @default(0)
   /// Restaurante: dónde se prepara. Los productos NONE (p. ej. una botella) no pasan por la cocina.
   prepStation      PrepStation     @default(NONE)
+  /// Restaurante: curso en el que sale por defecto (1 entrada, 2 plato fuerte, 3 postre…).
+  course           Int             @default(1)
+  /// Restaurante: es un combo (varios productos a un precio; ver `ComboComponent`).
+  isCombo          Boolean         @default(false)
   active           Boolean         @default(true)
   createdAt        DateTime        @default(now())
   updatedAt        DateTime        @updatedAt
@@ -246,6 +252,9 @@ model Product {
   stockMovements   StockMovement[]
   purchaseLines    PurchaseLine[]
   orderItems       OrderItem[]
+  modifierGroups   ProductModifierGroup[]
+  comboComponents  ComboComponent[]  @relation("combo")
+  usedInCombos     ComboComponent[]  @relation("component")
 
   @@unique([organizationId, sku])
   @@unique([organizationId, barcode])
@@ -679,11 +688,19 @@ model OrderItem {
   voidReason       String?
   /// Cuánto ya se cobró (para dividir la cuenta). 0 ≤ billedQuantity ≤ quantity.
   billedQuantity   BigInt          @default(0)
+  /// Curso (1…5): permite enviar a cocina por tiempos.
+  course           Int             @default(1)
+  /// Modificadores elegidos (copia): [{ id, name, price }] con `price` en centavos como texto. Su precio ya está sumado a `unitPrice`.
+  modifiers        Json            @default("[]")
+  /// Si es parte de un combo: el producto «padre» que se cobra. Las partes valen 0 y solo van a cocina.
+  parentItemId     String?         @db.Uuid
   createdById      String
   createdAt        DateTime        @default(now())
   updatedAt        DateTime        @updatedAt
   order            RestaurantOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
   product          Product?        @relation(fields: [productId], references: [id], onDelete: NoAction)
+  parent           OrderItem?      @relation("combo_parts", fields: [parentItemId], references: [id], onDelete: Cascade)
+  parts            OrderItem[]     @relation("combo_parts")
 
   @@index([orderId])
   @@index([organizationId, status, station])
@@ -765,4 +782,69 @@ model AuditLog {
 
   @@index([organizationId, createdAt])
   @@map("audit_log")
+}
+
+/// Grupo de opciones que se ofrece al anotar un producto («Término de la carne», «Extras»…).
+model ModifierGroup {
+  id             String                 @id @default(uuid(7)) @db.Uuid
+  organizationId String
+  name           String
+  /// Cuántas opciones hay que elegir como mínimo (0 = opcional) y como máximo.
+  minSelect      Int                    @default(0)
+  maxSelect      Int                    @default(1)
+  active         Boolean                @default(true)
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+  organization   Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  modifiers      Modifier[]
+  products       ProductModifierGroup[]
+
+  @@unique([organizationId, name])
+  @@map("modifier_group")
+}
+
+model Modifier {
+  id             String                  @id @default(uuid(7)) @db.Uuid
+  organizationId String
+  groupId        String                  @db.Uuid
+  name           String
+  /// Recargo en centavos (0 = sin costo). Lleva el mismo impuesto que el producto.
+  price          BigInt                  @default(0)
+  sortOrder      Int                     @default(0)
+  active         Boolean                 @default(true)
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+  organization   Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  group          ModifierGroup           @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, name])
+  @@map("modifier")
+}
+
+model ProductModifierGroup {
+  organizationId String
+  productId      String        @db.Uuid
+  groupId        String        @db.Uuid
+  sortOrder      Int           @default(0)
+  product        Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  group          ModifierGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@id([productId, groupId])
+  @@index([organizationId])
+  @@map("product_modifier_group")
+}
+
+/// Productos que componen un combo (cantidad en unidades enteras).
+model ComboComponent {
+  id             String  @id @default(uuid(7)) @db.Uuid
+  organizationId String
+  comboId        String  @db.Uuid
+  productId      String  @db.Uuid
+  quantity       Int     @default(1)
+  combo          Product @relation("combo", fields: [comboId], references: [id], onDelete: Cascade)
+  product        Product @relation("component", fields: [productId], references: [id], onDelete: NoAction)
+
+  @@unique([comboId, productId])
+  @@index([organizationId])
+  @@map("combo_component")
 }
