@@ -1,25 +1,17 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import {
-  buyerErrors,
-  ECF_TYPES,
-  formatDop,
-  isModifier,
-  remainingCredit,
-} from "@facturacion/core";
+import { ECF_TYPES } from "@facturacion/core";
 import type { Prisma } from "@facturacion/db";
 import { auditEntry } from "../lib/audit";
 import {
-  asSalesType,
   buildDraft,
   documentDto,
   documentInput,
   documentSummaryDto,
   FULL,
 } from "../lib/documents";
-import { allocateEncf } from "../lib/encf";
-import { applyDocumentStock } from "../lib/stock";
+import { issueDocument } from "../lib/issue";
 import { listQuery, pageOf, uuidParam } from "../lib/schemas";
 import { zv } from "../lib/validator";
 import type { AppEnv } from "../types";
@@ -50,7 +42,6 @@ const documentsQuery = listQuery.omit({ active: true }).extend({
 });
 
 const notFound = () => new HTTPException(404, { message: "Comprobante no encontrado" });
-const unprocessable = (message: string) => new HTTPException(422, { message });
 
 // Cualquier miembro de la empresa (incluido el cajero) puede crear y emitir comprobantes.
 export const documents = new Hono<AppEnv>()
@@ -182,105 +173,11 @@ export const documents = new Hono<AppEnv>()
     });
     return c.body(null, 204);
   })
-  // Valida las reglas fiscales, asigna el e-NCF y congela el comprobante.
+  // Valida las reglas fiscales, asigna el e-NCF y congela el comprobante (ver lib/issue.ts).
   .post("/:id/issue", zv("param", uuidParam), async (c) => {
     const { id } = c.req.valid("param");
-    const doc = await c.get("run")(async (tx) => {
-      const draft = await tx.document.findFirst({ where: { id }, include: FULL });
-      if (!draft) throw notFound();
-      if (draft.status !== "DRAFT") {
-        throw new HTTPException(409, { message: "Este comprobante ya fue emitido" });
-      }
-
-      const profile = await tx.companyProfile.findFirst();
-      if (!profile) {
-        throw unprocessable(
-          "Registra los datos fiscales de la empresa antes de emitir comprobantes",
-        );
-      }
-      if (draft.total <= 0n)
-        throw unprocessable("El total del comprobante debe ser mayor que cero");
-
-      // El comprador se refresca desde la ficha del cliente: pudo cambiar desde que se creó el borrador.
-      let buyer = {
-        buyerName: draft.buyerName,
-        buyerDocType: draft.buyerDocType,
-        buyerDocNumber: draft.buyerDocNumber,
-      };
-      const type = asSalesType(draft.type);
-      if (draft.customerId && !isModifier(type)) {
-        const customer = await tx.customer.findFirst({ where: { id: draft.customerId } });
-        if (customer) {
-          buyer = {
-            buyerName: customer.name,
-            buyerDocType: customer.documentType,
-            buyerDocNumber: customer.documentNumber,
-          };
-        }
-      }
-
-      if (!isModifier(type)) {
-        const [problem] = buyerErrors(type, draft.total, {
-          docType: buyer.buyerDocType,
-          docNumber: buyer.buyerDocNumber,
-        });
-        if (problem) throw unprocessable(problem);
-
-        const paid = draft.payments.reduce((sum, p) => sum + p.amount, 0n);
-        if (paid !== draft.total) {
-          throw unprocessable(
-            `Los pagos (${formatDop(paid)}) deben sumar el total del comprobante (${formatDop(draft.total)})`,
-          );
-        }
-      }
-
-      if (draft.type === "E34" && draft.referencedDocumentId) {
-        // Se bloquea el comprobante original para que dos notas simultáneas no excedan su monto.
-        await tx.$queryRaw`SELECT 1 FROM "document" WHERE "id" = ${draft.referencedDocumentId}::uuid FOR UPDATE`;
-        const original = await tx.document.findFirstOrThrow({
-          where: { id: draft.referencedDocumentId },
-        });
-        const credited = await tx.document.aggregate({
-          _sum: { total: true },
-          where: {
-            referencedDocumentId: original.id,
-            type: "E34",
-            status: { not: "DRAFT" },
-          },
-        });
-        const already = credited._sum.total ?? 0n;
-        const left = remainingCredit(original.total, already);
-        if (draft.total > left) {
-          throw unprocessable(
-            `La nota de crédito (${formatDop(draft.total)}) excede lo que queda por acreditar (${formatDop(left)})`,
-          );
-        }
-        if (
-          draft.modificationCode === 1 &&
-          (already > 0n || draft.total !== original.total)
-        ) {
-          throw unprocessable(
-            "Para anular el comprobante la nota debe ser por el total y no puede haber otras notas de crédito",
-          );
-        }
-      }
-
-      const encf = await allocateEncf(tx, draft.type, draft.terminalId);
-      const issued = await tx.document.update({
-        where: { id },
-        data: { status: "ISSUED", encf, issuedAt: new Date(), ...buyer },
-        include: FULL,
-      });
-      // Descuenta (o reingresa) las existencias en la misma transacción: si no hay stock, no se emite.
-      await applyDocumentStock(tx, issued, c.get("user").id, profile.allowNegativeStock);
-      await tx.auditLog.create({
-        data: auditEntry(c, "document.issue", "document", id, {
-          encf,
-          type: issued.type,
-          total: formatDop(issued.total),
-        }),
-      });
-      return issued;
-    });
+    const doc = await c.get("run")((tx) =>
+      issueDocument(tx, { id, organizationId: c.get("organizationId"), userId: c.get("user").id }),
+    );
     return c.json({ data: documentDto(doc) });
   });

@@ -13,6 +13,7 @@ import { inventory } from "./routes/inventory";
 import { products } from "./routes/products";
 import { purchases } from "./routes/purchases";
 import { reports } from "./routes/reports";
+import { restaurant } from "./routes/restaurant";
 import { purchaseReports } from "./routes/reports-purchases";
 import { sequences } from "./routes/sequences";
 import { suppliers } from "./routes/suppliers";
@@ -83,6 +84,7 @@ export function createApp(deps: Deps) {
     .route("/v1/inventory", inventory)
     .route("/v1/suppliers", suppliers)
     .route("/v1/purchases", purchases)
+    .route("/v1/restaurant", restaurant)
     .route("/v1", calculate);
 
   app.onError((err, c) => {

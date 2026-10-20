@@ -2949,6 +2949,431 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     });
   });
 
+  describe("restaurante", () => {
+    /**
+     * Restaurante con 3 mesas y tres productos:
+     *  - Pollo guisado RD$350.00 (cocina), Cerveza RD$120.00 (bar, con inventario), Agua RD$50.00 (sin preparación).
+     * Precios con ITBIS 18 % incluido.
+     */
+    async function resto(label: string) {
+      const b = await billing(label, { seqs: [["E32", 1, 100], ["E31", 1, 50]] });
+      const mk = async (body: Json) => (await json(await post("/v1/products", body, b.cookie))).data as Json;
+      const pollo = await mk({ name: "Pollo guisado", price: "350.00", prepStation: "KITCHEN" });
+      const cerveza = await mk({ name: "Cerveza", price: "120.00", prepStation: "BAR", trackInventory: true });
+      const agua = await mk({ name: "Agua", price: "50.00", prepStation: "NONE" });
+      expect((await post("/v1/restaurant/tables/bulk", { branchId: b.branch.id, count: 3 }, b.cookie)).status).toBe(201);
+      const tables = (await json(await get("/v1/restaurant/tables", b.cookie))).data as Json[];
+      return { ...b, pollo, cerveza, agua, tables };
+    }
+    type Resto = Awaited<ReturnType<typeof resto>>;
+
+    const R = "/v1/restaurant";
+    const openOrder = async (r: Resto, tableIndex = 0, covers?: number) => {
+      const res = await post(`${R}/orders`, { tableId: r.tables[tableIndex]!.id, covers }, r.cookie);
+      expect(res.status, JSON.stringify(await res.clone().json())).toBe(201);
+      return (await json(res)).data as Json;
+    };
+    const addItem = (r: Resto, orderId: string, productId: string, qty = "1", notes?: string) =>
+      post(`${R}/orders/${orderId}/items`, { productId, quantity: qty, notes }, r.cookie);
+    const getOrder = async (r: Resto, id: string) => (await json(await get(`${R}/orders/${id}`, r.cookie))).data as Json;
+    const send = (r: Resto, id: string) => post(`${R}/orders/${id}/send`, {}, r.cookie);
+    const bill = (r: Resto, id: string, body: Json = {}) =>
+      post(`${R}/orders/${id}/bill`, { payments: [{ method: "CASH", amount: "889.49" }], ...body }, r.cookie);
+    const itemOf = (order: Json, name: string) => (order.items as Json[]).find((i) => i.name === name)!;
+
+    /** Mesa con 2 pollos y 1 cerveza: subtotal 694.91 + ITBIS 125.09 = 820.00; propina 69.49 → 889.49. */
+    async function tableWithOrder(r: Resto, tableIndex = 0) {
+      const o = await openOrder(r, tableIndex, 3);
+      await addItem(r, o.id, r.pollo.id, "2");
+      await addItem(r, o.id, r.cerveza.id, "1");
+      return (await getOrder(r, o.id)) as Json;
+    }
+
+    describe("mesas", () => {
+      it("crea mesas en lote sin repetir y valida los datos", async () => {
+        const r = await resto("rm1");
+        expect(r.tables.map((t) => t.name)).toEqual(["Mesa 1", "Mesa 2", "Mesa 3"]);
+
+        const again = await post(`${R}/tables/bulk`, { branchId: r.branch.id, count: 5, zone: "Terraza" }, r.cookie);
+        expect((await json(again)).data).toEqual({ created: 2, skipped: 3 });
+
+        expect((await post(`${R}/tables`, { branchId: r.branch.id, name: "Barra 1", zone: "Barra", seats: 2 }, r.cookie)).status).toBe(201);
+        expect((await post(`${R}/tables`, { branchId: r.branch.id, name: "Barra 1" }, r.cookie)).status).toBe(409);
+        expect((await post(`${R}/tables`, { branchId: r.branch.id, name: "Mala", seats: 0 }, r.cookie)).status).toBe(400);
+        expect((await post(`${R}/tables`, { branchId: randomUUID(), name: "X" }, r.cookie)).status).toBe(422);
+      });
+
+      it("no se puede desactivar una mesa con comanda abierta", async () => {
+        const r = await resto("rm2");
+        const o = await openOrder(r);
+        expect((await patch(`${R}/tables/${r.tables[0]!.id}`, { active: false }, r.cookie)).status).toBe(409);
+        await post(`${R}/orders/${o.id}/cancel`, { reason: "Se fueron" }, r.cookie);
+        expect((await patch(`${R}/tables/${r.tables[0]!.id}`, { active: false }, r.cookie)).status).toBe(200);
+        const active = (await json(await get(`${R}/tables`, r.cookie))).data as Json[];
+        expect(active).toHaveLength(2);
+        expect(((await json(await get(`${R}/tables?all=true`, r.cookie))).data as Json[])).toHaveLength(3);
+      });
+
+      it("el mesero ve el salón pero no administra las mesas", async () => {
+        const r = await resto("rm3");
+        const waiter = await signUp("rm3w");
+        await prisma.member.create({ data: { id: randomUUID(), organizationId: r.orgId, userId: waiter.userId, role: "member" } });
+        const cookie = await setActive(r.orgId, waiter.cookie);
+        expect((await get(`${R}/tables`, cookie)).status).toBe(200);
+        expect((await post(`${R}/tables`, { branchId: r.branch.id, name: "Nueva" }, cookie)).status).toBe(403);
+        expect((await post(`${R}/tables/bulk`, { branchId: r.branch.id, count: 2 }, cookie)).status).toBe(403);
+        expect((await patch(`${R}/tables/${r.tables[0]!.id}`, { name: "X" }, cookie)).status).toBe(403);
+        expect((await get(`${R}/tables`)).status).toBe(401);
+      });
+    });
+
+    describe("comandas", () => {
+      it("abre una comanda por mesa con consecutivo y la muestra en el salón", async () => {
+        const r = await resto("rc1");
+        const first = await openOrder(r, 0, 4);
+        expect(first).toMatchObject({ number: 1, status: "OPEN", covers: 4, table: { name: "Mesa 1" } });
+        expect((await post(`${R}/orders`, { tableId: r.tables[0]!.id }, r.cookie)).status).toBe(409);
+        expect((await openOrder(r, 1)).number).toBe(2);
+        expect((await post(`${R}/orders`, { tableId: randomUUID() }, r.cookie)).status).toBe(422);
+
+        await addItem(r, first.id, r.pollo.id, "2");
+        const salon = (await json(await get(`${R}/tables`, r.cookie))).data as Json[];
+        expect(salon.find((t) => t.name === "Mesa 1")!.order).toMatchObject({ number: 1, covers: 4, items: 1, unsent: 1, total: "700.00" });
+        expect(salon.find((t) => t.name === "Mesa 3")!.order).toBeNull();
+      });
+
+      it("dos meseros abriendo la misma mesa a la vez: solo una comanda", async () => {
+        const r = await resto("rc2");
+        const results = await Promise.all(
+          Array.from({ length: 4 }, () => post(`${R}/orders`, { tableId: r.tables[0]!.id }, r.cookie)),
+        );
+        expect(results.map((x) => x.status).sort()).toEqual([201, 409, 409, 409]);
+      });
+
+      it("anota productos con el precio de ese momento y suma los iguales sin enviar", async () => {
+        const r = await resto("rc3");
+        const o = await openOrder(r);
+        await addItem(r, o.id, r.pollo.id, "1");
+        await addItem(r, o.id, r.pollo.id, "2");
+        await addItem(r, o.id, r.pollo.id, "1", "sin cebolla"); // otras notas = otra línea
+        let order = await getOrder(r, o.id);
+        expect(order.items).toHaveLength(2);
+        expect(itemOf(order, "Pollo guisado")).toMatchObject({ quantity: "3", unitPrice: "350.00", status: "PENDING", station: "KITCHEN" });
+
+        // Cambiar el precio del producto después no afecta lo ya anotado.
+        await patch(`/v1/products/${r.pollo.id}`, { price: "999.00" }, r.cookie);
+        order = await getOrder(r, o.id);
+        expect(itemOf(order, "Pollo guisado").unitPrice).toBe("350.00");
+        expect(order.totals.total).toBe("1400.00"); // 4 × 350.00
+      });
+
+      it("valida productos, cantidades y fracciones", async () => {
+        const r = await resto("rc4");
+        const o = await openOrder(r);
+        expect((await addItem(r, o.id, r.pollo.id, "0")).status).toBe(422);
+        expect((await addItem(r, o.id, r.pollo.id, "1.5")).status).toBe(422);
+        expect((await addItem(r, o.id, randomUUID())).status).toBe(422);
+        await call(`/v1/products/${r.agua.id}`, { method: "DELETE", cookie: r.cookie });
+        expect((await addItem(r, o.id, r.agua.id)).status).toBe(422); // inactivo
+      });
+
+      it("modifica cantidad y notas solo antes de enviar; después se anula con motivo", async () => {
+        const r = await resto("rc5");
+        const o = await openOrder(r);
+        const withItem = (await json(await addItem(r, o.id, r.pollo.id, "2"))).data;
+        const itemId = withItem.items[0].id;
+
+        const upd = await patch(`${R}/orders/${o.id}/items/${itemId}`, { quantity: "3", notes: "término medio" }, r.cookie);
+        expect(itemOf((await json(upd)).data, "Pollo guisado")).toMatchObject({ quantity: "3", notes: "término medio" });
+
+        await send(r, o.id);
+        expect((await patch(`${R}/orders/${o.id}/items/${itemId}`, { quantity: "1" }, r.cookie)).status).toBe(409);
+        const noReason = await post(`${R}/orders/${o.id}/items/${itemId}/void`, {}, r.cookie);
+        expect(noReason.status).toBe(422);
+        const voided = await post(`${R}/orders/${o.id}/items/${itemId}/void`, { reason: "El cliente se fue" }, r.cookie);
+        expect(itemOf((await json(voided)).data, "Pollo guisado")).toMatchObject({ status: "VOID", voidReason: "El cliente se fue" });
+        expect((await post(`${R}/orders/${o.id}/items/${itemId}/void`, { reason: "otra vez" }, r.cookie)).status).toBe(409);
+        expect((await getOrder(r, o.id)).totals.total).toBe("0.00"); // lo anulado no se cobra
+      });
+
+      it("un producto sin enviar se quita sin dejar rastro", async () => {
+        const r = await resto("rc6");
+        const o = await openOrder(r);
+        const itemId = (await json(await addItem(r, o.id, r.pollo.id))).data.items[0].id;
+        const res = await post(`${R}/orders/${o.id}/items/${itemId}/void`, {}, r.cookie);
+        expect((await json(res)).data.items).toEqual([]);
+      });
+
+      it("calcula la pre-cuenta con ITBIS y propina legal del 10 % sobre el subtotal", async () => {
+        const r = await resto("rc7");
+        const order = await tableWithOrder(r);
+        expect(order.totals).toEqual({ subtotal: "694.91", tax: "125.09", total: "820.00", propina: "69.49", totalWithTip: "889.49" });
+      });
+
+      it("cambia la comanda de mesa solo a una libre", async () => {
+        const r = await resto("rc8");
+        const a = await openOrder(r, 0);
+        await openOrder(r, 1);
+        expect((await post(`${R}/orders/${a.id}/transfer`, { tableId: r.tables[1]!.id }, r.cookie)).status).toBe(409);
+        expect((await post(`${R}/orders/${a.id}/transfer`, { tableId: r.tables[0]!.id }, r.cookie)).status).toBe(422); // ya está ahí
+        const moved = await post(`${R}/orders/${a.id}/transfer`, { tableId: r.tables[2]!.id }, r.cookie);
+        expect((await json(moved)).data.table.name).toBe("Mesa 3");
+        // La mesa original quedó libre.
+        expect((await post(`${R}/orders`, { tableId: r.tables[0]!.id }, r.cookie)).status).toBe(201);
+      });
+
+      it("cancelar: libre antes de enviar; con productos en cocina, solo un administrador", async () => {
+        const r = await resto("rc9");
+        const waiter = await signUp("rc9w");
+        await prisma.member.create({ data: { id: randomUUID(), organizationId: r.orgId, userId: waiter.userId, role: "member" } });
+        const wCookie = await setActive(r.orgId, waiter.cookie);
+
+        const plain = await openOrder(r, 0);
+        await addItem(r, plain.id, r.pollo.id);
+        expect((await post(`${R}/orders/${plain.id}/cancel`, { reason: "Se fueron" }, wCookie)).status).toBe(204);
+
+        const cooking = await tableWithOrder(r, 1);
+        await send(r, cooking.id);
+        expect((await post(`${R}/orders/${cooking.id}/cancel`, { reason: "Error de mesa" }, wCookie)).status).toBe(403);
+        expect((await post(`${R}/orders/${cooking.id}/cancel`, { reason: "x" }, r.cookie)).status).toBe(400); // motivo muy corto
+        expect((await post(`${R}/orders/${cooking.id}/cancel`, { reason: "Error de mesa" }, r.cookie)).status).toBe(204);
+
+        // Una comanda cancelada ya no admite cambios.
+        expect((await addItem(r, cooking.id, r.agua.id)).status).toBe(409);
+        const final = await getOrder(r, cooking.id);
+        expect(final).toMatchObject({ status: "CANCELLED", cancelReason: "Error de mesa" });
+      });
+    });
+
+    describe("cocina y bar", () => {
+      it("envía a cada estación, deja listo lo que no se prepara y arma el ticket", async () => {
+        const r = await resto("rk1");
+        const o = await openOrder(r, 0, 2);
+        await addItem(r, o.id, r.pollo.id, "2", "sin cebolla");
+        await addItem(r, o.id, r.cerveza.id, "3");
+        await addItem(r, o.id, r.agua.id, "1");
+
+        const res = await send(r, o.id);
+        expect(res.status).toBe(200);
+        const { data } = await json(res);
+        expect(data.ticket).toMatchObject({ number: 1, table: "Mesa 1", covers: 2 });
+        const byStation = Object.fromEntries(data.ticket.stations.map((s: Json) => [s.station, s.items.map((i: Json) => `${i.quantity} ${i.name}${i.notes ? ` (${i.notes})` : ""}`)]));
+        expect(byStation).toEqual({ KITCHEN: ["2 Pollo guisado (sin cebolla)"], BAR: ["3 Cerveza"] });
+
+        expect(itemOf(data.order, "Pollo guisado").status).toBe("SENT");
+        expect(itemOf(data.order, "Agua").status).toBe("READY"); // no pasa por cocina
+        expect((await send(r, o.id)).status).toBe(422); // nada pendiente
+      });
+
+      it("la pantalla de cocina lista lo enviado por estación y se marca listo", async () => {
+        const r = await resto("rk2");
+        const a = await tableWithOrder(r, 0);
+        const b = await openOrder(r, 1);
+        await addItem(r, b.id, r.pollo.id, "1");
+        await send(r, a.id);
+        await send(r, b.id);
+
+        const kitchen = (await json(await get(`${R}/kitchen?station=KITCHEN`, r.cookie))).data as Json[];
+        expect(kitchen.map((g) => g.table)).toEqual(["Mesa 1", "Mesa 2"]); // el más antiguo primero
+        expect(kitchen[0]!.items.map((i: Json) => i.name)).toEqual(["Pollo guisado"]);
+        const bar = (await json(await get(`${R}/kitchen?station=BAR`, r.cookie))).data as Json[];
+        expect(bar).toHaveLength(1);
+        expect(bar[0]!.items[0].name).toBe("Cerveza");
+
+        const itemId = kitchen[0]!.items[0].id;
+        expect((await post(`${R}/items/${itemId}/ready`, {}, r.cookie)).status).toBe(204);
+        expect((await post(`${R}/items/${itemId}/ready`, {}, r.cookie)).status).toBe(409); // ya estaba listo
+        const after = (await json(await get(`${R}/kitchen?station=KITCHEN`, r.cookie))).data as Json[];
+        expect(after.map((g) => g.table)).toEqual(["Mesa 2"]);
+        expect(itemOf(await getOrder(r, a.id), "Pollo guisado").status).toBe("READY");
+
+        expect((await get(`${R}/kitchen?station=NONE`, r.cookie)).status).toBe(400);
+        const salon = (await json(await get(`${R}/tables`, r.cookie))).data as Json[];
+        expect(salon.find((t) => t.name === "Mesa 1")!.order).toMatchObject({ waiting: 1, ready: 1 }); // cerveza en el bar, pollo listo
+      });
+    });
+
+    describe("cobro", () => {
+      it("cobra la cuenta completa con propina legal, emite el e-NCF y cierra la mesa", async () => {
+        const r = await resto("rb1");
+        const order = await tableWithOrder(r);
+        await send(r, order.id);
+
+        const res = await bill(r, order.id);
+        expect(res.status, JSON.stringify(await res.clone().json())).toBe(201);
+        const { data } = await json(res);
+        expect(data.closed).toBe(true);
+        expect(data.document).toMatchObject({ status: "ISSUED", encf: "E320000000001", type: "E32" });
+        expect(data.document.totals).toMatchObject({ subtotal: "694.91", tax: "125.09", propina: "69.49", total: "889.49" });
+        expect(data.document.lines.map((l: Json) => l.name)).toEqual(["Pollo guisado", "Cerveza"]);
+        expect(data.order.status).toBe("CLOSED");
+        expect(data.order.items.every((i: Json) => i.remaining === "0")).toBe(true);
+
+        // La mesa vuelve a estar libre.
+        const salon = (await json(await get(`${R}/tables`, r.cookie))).data as Json[];
+        expect(salon.find((t) => t.name === "Mesa 1")!.order).toBeNull();
+        expect((await post(`${R}/orders`, { tableId: r.tables[0]!.id }, r.cookie)).status).toBe(201);
+        // Y no se puede cobrar dos veces.
+        expect((await bill(r, order.id)).status).toBe(409);
+      });
+
+      it("sin propina el total es el de la consumición", async () => {
+        const r = await resto("rb2");
+        const order = await tableWithOrder(r);
+        const res = await bill(r, order.id, { propinaLegal: false, payments: [{ method: "CARD", amount: "820.00" }] });
+        expect((await json(res)).data.document.totals).toMatchObject({ propina: "0.00", total: "820.00" });
+      });
+
+      it("divide la cuenta cobrando por partes y cierra al cobrar lo último", async () => {
+        const r = await resto("rb3");
+        const order = await tableWithOrder(r); // 2 pollos + 1 cerveza
+        const pollo = itemOf(order, "Pollo guisado");
+        const cerveza = itemOf(order, "Cerveza");
+
+        // Primer cliente: 1 pollo (350.00 → base 296.61 + ITBIS 53.39; propina 29.66 → 379.66)
+        const first = await bill(r, order.id, {
+          items: [{ itemId: pollo.id, quantity: "1" }],
+          payments: [{ method: "CASH", amount: "379.66" }],
+        });
+        expect(first.status, JSON.stringify(await first.clone().json())).toBe(201);
+        const one = (await json(first)).data;
+        expect(one.closed).toBe(false);
+        expect(one.document.totals.total).toBe("379.66");
+        expect(itemOf(one.order, "Pollo guisado")).toMatchObject({ billedQuantity: "1", remaining: "1" });
+
+        // No se puede cobrar más de lo que queda, ni un producto ajeno.
+        expect((await bill(r, order.id, { items: [{ itemId: pollo.id, quantity: "2" }] })).status).toBe(422);
+        expect((await bill(r, order.id, { items: [{ itemId: randomUUID(), quantity: "1" }] })).status).toBe(422);
+        expect((await bill(r, order.id, { items: [{ itemId: pollo.id, quantity: "0.5" }] })).status).toBe(422); // no se parte un pollo
+
+        // El resto de la mesa: 1 pollo + 1 cerveza.
+        const rest = await getOrder(r, order.id);
+        expect(rest.totals.total).toBe("470.00");
+        const second = await bill(r, order.id, { payments: [{ method: "CASH", amount: String(rest.totals.totalWithTip) }] });
+        expect(second.status, JSON.stringify(await second.clone().json())).toBe(201);
+        const last = (await json(second)).data;
+        expect(last.closed).toBe(true);
+        expect(last.document.encf).toBe("E320000000002");
+        expect(cerveza.name).toBe("Cerveza");
+      });
+
+      it("si los pagos no suman, no se cobra nada y no se gasta ningún número", async () => {
+        const r = await resto("rb4");
+        const order = await tableWithOrder(r);
+        const bad = await bill(r, order.id, { payments: [{ method: "CASH", amount: "800.00" }] });
+        expect(bad.status).toBe(422);
+        expect(await error(bad)).toMatch(/pagos/i);
+
+        const after = await getOrder(r, order.id);
+        expect(after.status).toBe("OPEN");
+        expect(after.items.every((i: Json) => i.billedQuantity === "0")).toBe(true);
+        expect((await json(await get("/v1/documents", r.cookie))).total).toBe(0);
+        // El siguiente cobro correcto sigue siendo el e-NCF 1.
+        expect((await json(await bill(r, order.id))).data.document.encf).toBe("E320000000001");
+      });
+
+      it("descuenta del inventario lo cobrado y anotar o enviar no lo toca", async () => {
+        const r = await resto("rb5");
+        await post("/v1/inventory/receipts", { productId: r.cerveza.id, branchId: r.branch.id, quantity: "24" }, r.cookie);
+        const order = await tableWithOrder(r); // 1 cerveza
+        await send(r, order.id);
+        const stock = async () => ((await json(await get(`/v1/inventory/stock?branchId=${r.branch.id}`, r.cookie))).data as Json[]).find((x) => x.productId === r.cerveza.id)!.quantity;
+        expect(await stock()).toBe("24");
+        await bill(r, order.id);
+        expect(await stock()).toBe("23");
+      });
+
+      it("factura de crédito fiscal exige cliente con RNC", async () => {
+        const r = await resto("rb6");
+        const company = (await json(await post("/v1/customers", { name: "Acme SRL", documentType: "RNC", documentNumber: "131246796" }, r.cookie))).data;
+        const order = await tableWithOrder(r);
+        const noRnc = await bill(r, order.id, { type: "E31" });
+        expect(noRnc.status).toBe(422);
+        expect(await error(noRnc)).toMatch(/RNC/);
+
+        const ok = await bill(r, order.id, { type: "E31", customerId: company.id });
+        expect(ok.status).toBe(201);
+        expect((await json(ok)).data.document).toMatchObject({ type: "E31", encf: "E310000000001", buyerName: "Acme SRL" });
+      });
+
+      it("cobra a pesar de que el producto se desactive después de anotarlo", async () => {
+        const r = await resto("rb7");
+        const order = await tableWithOrder(r);
+        await call(`/v1/products/${r.pollo.id}`, { method: "DELETE", cookie: r.cookie });
+        expect((await bill(r, order.id)).status).toBe(201);
+      });
+
+      it("lo anulado no se cobra y lo ya cobrado no se puede anular ni cancelar", async () => {
+        const r = await resto("rb8");
+        const order = await tableWithOrder(r);
+        await send(r, order.id);
+        const cerveza = itemOf(order, "Cerveza");
+        const pollo = itemOf(order, "Pollo guisado");
+        await post(`${R}/orders/${order.id}/items/${cerveza.id}/void`, { reason: "La pidieron fría y no hay" }, r.cookie);
+
+        const rest = await getOrder(r, order.id);
+        expect(rest.totals.total).toBe("700.00");
+        const res = await bill(r, order.id, { items: [{ itemId: pollo.id, quantity: "1" }], payments: [{ method: "CASH", amount: "379.66" }] });
+        expect(res.status).toBe(201);
+        expect((await bill(r, order.id, { items: [{ itemId: cerveza.id, quantity: "1" }] })).status).toBe(422); // anulado
+        expect((await post(`${R}/orders/${order.id}/items/${pollo.id}/void`, { reason: "ya cobrado" }, r.cookie)).status).toBe(409);
+        expect((await post(`${R}/orders/${order.id}/cancel`, { reason: "intento" }, r.cookie)).status).toBe(409);
+      });
+
+      it("dos cobros simultáneos de la misma mesa: uno cobra y el otro no", async () => {
+        const r = await resto("rb9");
+        const order = await tableWithOrder(r);
+        const results = await Promise.all([bill(r, order.id), bill(r, order.id)]);
+        const statuses = results.map((x) => x.status).sort();
+        expect(statuses[0]).toBe(201);
+        expect([409, 422]).toContain(statuses[1]);
+        expect((await json(await get("/v1/documents", r.cookie))).total).toBe(1);
+      });
+
+      it("el cajero (member) opera la mesa de punta a punta, y las ventas aparecen en el reporte", async () => {
+        const r = await resto("rb10");
+        const waiter = await signUp("rb10w");
+        await prisma.member.create({ data: { id: randomUUID(), organizationId: r.orgId, userId: waiter.userId, role: "member" } });
+        const cookie = await setActive(r.orgId, waiter.cookie);
+
+        const o = (await json(await post(`${R}/orders`, { tableId: r.tables[0]!.id }, cookie))).data;
+        expect((await post(`${R}/orders/${o.id}/items`, { productId: r.pollo.id, quantity: "2" }, cookie)).status).toBe(201);
+        expect((await post(`${R}/orders/${o.id}/send`, {}, cookie)).status).toBe(200);
+        const total = (await json(await get(`${R}/orders/${o.id}`, cookie))).data.totals.totalWithTip;
+        expect((await post(`${R}/orders/${o.id}/bill`, { payments: [{ method: "CASH", amount: total }] }, cookie)).status).toBe(201);
+
+        const today = new Intl.DateTimeFormat("sv-SE", { timeZone: "America/Santo_Domingo" }).format(new Date());
+        const sales = (await json(await get(`/v1/reports/sales?from=${today}&to=${today}`, r.cookie))).data;
+        expect(sales.totals).toMatchObject({ documents: 1, propina: "59.32", net: "759.32" }); // 700.00 + 10 % de 593.22 sin ITBIS
+      });
+    });
+
+    describe("aislamiento", () => {
+      it("cada empresa ve solo sus mesas y comandas", async () => {
+        const a = await resto("ra1");
+        const b = await resto("ra2");
+        const order = await tableWithOrder(a);
+
+        expect((await get(`${R}/orders/${order.id}`, b.cookie)).status).toBe(404);
+        expect((await send(b, order.id)).status).toBe(404);
+        expect((await bill(b, order.id)).status).toBe(404);
+        expect((await post(`${R}/orders`, { tableId: a.tables[1]!.id }, b.cookie)).status).toBe(422);
+        expect((await post(`${R}/orders/${order.id}/items`, { productId: b.pollo.id }, b.cookie)).status).toBe(404);
+        const salonB = (await json(await get(`${R}/tables`, b.cookie))).data as Json[];
+        expect(salonB.every((t) => t.order === null)).toBe(true);
+        expect((await json(await get(`${R}/kitchen?station=KITCHEN`, b.cookie))).data).toEqual([]);
+      });
+
+      it("el producto guarda su estación de preparación", async () => {
+        const r = await resto("ra3");
+        expect(r.pollo.prepStation).toBe("KITCHEN");
+        expect(r.agua.prepStation).toBe("NONE");
+        const upd = await patch(`/v1/products/${r.agua.id}`, { prepStation: "BAR" }, r.cookie);
+        expect((await json(upd)).data).toMatchObject({ prepStation: "BAR", name: "Agua" });
+      });
+    });
+  });
+
   describe("bitácora", () => {
     it("registra cada cambio, de forma atómica con el cambio", async () => {
       const { cookie, orgId } = await owner("log");

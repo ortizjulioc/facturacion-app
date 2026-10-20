@@ -38,7 +38,7 @@ const lineInput = z.object({
     .optional(),
 });
 
-const paymentInput = z.object({
+export const paymentInput = z.object({
   method: z.enum(["CASH", "TRANSFER", "CHECK", "CARD", "CREDIT", "OTHER"]),
   amount: money,
   reference: optionalText(100),
@@ -130,7 +130,11 @@ export function asSalesType(type: string): EcfType {
 }
 
 /** Todo lo necesario para insertar un documento; los totales salen siempre de `core`. */
-export async function buildDraft(tx: TenantTx, input: DocumentInput) {
+export async function buildDraft(
+  tx: TenantTx,
+  input: DocumentInput,
+  opts: { allowInactiveProducts?: boolean } = {},
+) {
   // Sucursal y caja deben existir (RLS oculta las de otras empresas) y estar activas.
   const branch = await tx.branch.findFirst({
     where: { id: input.branchId, active: true },
@@ -175,7 +179,8 @@ export async function buildDraft(tx: TenantTx, input: DocumentInput) {
     const where = `Línea ${i + 1}`;
     const product = l.productId ? byId.get(l.productId) : undefined;
     if (l.productId && !product) throw unprocessable(`${where}: el producto no existe`);
-    if (product && !product.active)
+    // Cobrar una comanda ya servida debe poder hacerse aunque el producto se desactive después.
+    if (product && !product.active && !opts.allowInactiveProducts)
       throw unprocessable(`${where}: "${product.name}" está inactivo`);
 
     const name = l.name ?? product?.name;

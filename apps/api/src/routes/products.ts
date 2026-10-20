@@ -33,6 +33,7 @@ export const productDto = (p: ProductRow, showCost = false) => ({
   allowsDecimals: p.allowsDecimals,
   trackInventory: p.trackInventory,
   minStock: fromMilli(p.minStock),
+  prepStation: p.prepStation,
   active: p.active,
   createdAt: p.createdAt,
   updatedAt: p.updatedAt,
@@ -65,6 +66,7 @@ const fields = {
   allowsDecimals: z.boolean(),
   trackInventory: z.boolean(),
   minStock: quantity,
+  prepStation: z.enum(["NONE", "KITCHEN", "BAR"]),
 };
 
 // Los valores por defecto se aplican al crear, NO en el esquema: así un PATCH parcial no los pisa.
@@ -81,6 +83,7 @@ const createProduct = z.object({
   allowsDecimals: fields.allowsDecimals.default(false),
   trackInventory: fields.trackInventory.default(false),
   minStock: fields.minStock.default("0"),
+  prepStation: fields.prepStation.default("NONE"),
 });
 
 const updateProduct = z
@@ -97,6 +100,7 @@ const updateProduct = z
     allowsDecimals: fields.allowsDecimals,
     trackInventory: fields.trackInventory,
     minStock: fields.minStock,
+    prepStation: fields.prepStation,
     active: z.boolean(),
   })
   .partial();
