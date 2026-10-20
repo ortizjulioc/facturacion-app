@@ -304,6 +304,7 @@ function ProductForm({
       unit: text("unit") || "UND",
       priceIncludesTax: f.get("priceIncludesTax") === "on",
       allowsDecimals: f.get("allowsDecimals") === "on",
+      prepStation: text("prepStation") as "NONE" | "KITCHEN" | "BAR",
       trackInventory: track,
       minStock: track ? text("minStock").replace(",", ".") || "0" : "0",
     };
@@ -405,6 +406,16 @@ function ProductForm({
           </Field>
         )}
       </div>
+      <Field
+        label="Estación de preparación"
+        hint="En restaurantes: a dónde se envía el pedido al anotarlo en una mesa"
+      >
+        <Select name="prepStation" defaultValue={product?.prepStation ?? "NONE"}>
+          <option value="NONE">No se prepara (sale directo)</option>
+          <option value="KITCHEN">Cocina</option>
+          <option value="BAR">Bar</option>
+        </Select>
+      </Field>
       <Field label="Descripción">
         <Textarea name="description" rows={2} defaultValue={product?.description ?? ""} />
       </Field>
