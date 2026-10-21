@@ -25,7 +25,7 @@ export async function issueDocument(
      * Venta hecha SIN conexión en una caja: el e-NCF y la fecha ya existen (salieron del bloque de la caja y
      * están impresos en el ticket), así que no se asigna número ni se rechaza por existencia: la venta ya ocurrió.
      */
-    preset?: { encf: string; issuedAt: Date };
+    preset?: { encf: string; issuedAt: Date; shiftId?: string | null };
   },
 ): Promise<DocumentFull> {
   const { id, organizationId, userId, preset } = params;
@@ -99,17 +99,20 @@ export async function issueDocument(
     }
   }
 
-  const encf = preset?.encf ?? (await allocateEncf(tx, draft.type, draft.terminalId));
   // Si la caja tiene un turno abierto, el comprobante queda en ese turno. FOR SHARE: el cierre del turno
   // (FOR UPDATE) espera a las emisiones en curso, así que ningún comprobante se escapa del informe Z.
-  let shiftId: string | null = null;
-  // Las ventas subidas desde una caja offline no se atan al turno abierto de hoy: pasaron antes (turnos sincronizados: pendiente).
+  // Las ventas subidas desde una caja sin conexión traen su turno (ya cerrado o no) y no usan el de hoy.
+  let shiftId: string | null = preset?.shiftId ?? null;
   if (draft.terminalId && !preset) {
     const open = await tx.$queryRaw<{ id: string }[]>`
       SELECT "id" FROM "cash_shift"
       WHERE "terminalId" = ${draft.terminalId}::uuid AND "status" = 'OPEN' FOR SHARE`;
     shiftId = open[0]?.id ?? null;
+    if (!shiftId && profile.requireShift) {
+      throw unprocessable("Abre un turno en esta caja antes de emitir comprobantes");
+    }
   }
+  const encf = preset?.encf ?? (await allocateEncf(tx, draft.type, draft.terminalId));
   const issued = await tx.document.update({
     where: { id },
     data: { status: "ISSUED", encf, issuedAt: preset?.issuedAt ?? new Date(), shiftId, ...buyer },

@@ -99,6 +99,9 @@ export async function applyDocumentStock(
 
   if (doc.type === "E31" || doc.type === "E32") {
     source = { lines: doc.lines, branchId: doc.branchId, type: "SALE", reason: null };
+  } else if (doc.type === "E34" && doc.returnsStock && doc.modificationCode !== 1) {
+    // Devolución de mercancía (desde la caja): vuelven a las existencias las líneas de la propia nota.
+    source = { lines: doc.lines, branchId: doc.branchId, type: "RETURN", reason: `Devolución de ${doc.referencedEncf ?? "comprobante"}` };
   } else if (
     doc.type === "E34" &&
     doc.modificationCode === 1 &&

@@ -11,7 +11,8 @@ const DOC_TYPES = ["E31", "E32", "E33", "E34"] as const;
  *  - solo cuentan comprobantes emitidos en la caja durante el turno;
  *  - las notas de crédito (E34) restan y las de débito (E33) suman;
  *  - todo en pesos (los comprobantes en dólares se convierten con su tasa de cambio);
- *  - el efectivo esperado es el fondo de apertura más lo cobrado en efectivo.
+ *  - el efectivo esperado es el fondo de apertura más lo cobrado en efectivo, menos lo devuelto en efectivo
+ *    (los pagos de una nota de crédito son reembolsos y restan en su forma de pago).
  */
 export async function shiftReport(db: DocumentReader, shift: { id: string; openingAmount: bigint }) {
   const docs = await db.document.findMany({
@@ -45,6 +46,10 @@ export async function shiftReport(db: DocumentReader, shift: { id: string; openi
 
     if (type === "E34") {
       credits += total;
+      // Lo devuelto al cliente sale del cobro de esa forma de pago (efectivo devuelto = menos efectivo en la gaveta).
+      for (const p of d.payments) {
+        byMethod.set(p.method, (byMethod.get(p.method) ?? 0n) - convertCents(p.amount, rate));
+      }
       continue;
     }
     sales += total;

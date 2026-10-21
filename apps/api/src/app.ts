@@ -15,6 +15,7 @@ import { purchases } from "./routes/purchases";
 import { reports } from "./routes/reports";
 import { restaurant } from "./routes/restaurant";
 import { restaurantMenu } from "./routes/restaurant-menu";
+import { pins } from "./routes/pins";
 import { shifts } from "./routes/shifts";
 import { sync } from "./routes/sync";
 import { purchaseReports } from "./routes/reports-purchases";
@@ -90,6 +91,7 @@ export function createApp(deps: Deps) {
     .route("/v1/restaurant", restaurant)
     .route("/v1/restaurant", restaurantMenu)
     .route("/v1/shifts", shifts)
+    .route("/v1/pins", pins)
     .route("/v1/sync", sync)
     .route("/v1", calculate);
 

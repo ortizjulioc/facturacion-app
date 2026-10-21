@@ -384,6 +384,7 @@ export const documentDto = (d: DocumentFull) => ({
   branchId: d.branchId,
   terminalId: d.terminalId,
   shiftId: d.shiftId,
+  returnsStock: d.returnsStock,
   customerId: d.customerId,
   exchangeRate: d.exchangeRate.toString(),
   propinaLegal: d.propinaLegal,

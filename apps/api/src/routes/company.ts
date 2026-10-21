@@ -19,6 +19,8 @@ const companyInput = z.object({
   email: z.email("Correo inválido").max(200).nullish(),
   phone: optionalText(30),
   environment: z.enum(["TEST", "CERT", "PROD"]),
+  /** Exigir un turno abierto para vender desde una caja. */
+  requireShift: z.boolean().optional(),
 });
 
 export const company = new Hono<AppEnv>()

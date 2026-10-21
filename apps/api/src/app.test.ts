@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { createPrisma, withTenant } from "@facturacion/db";
+import { verifyPin } from "@facturacion/core";
 import { PosEngine, type FetchLike } from "@facturacion/pos-engine";
 import { createApp } from "./app";
 import { createAuth } from "./auth";
@@ -4233,7 +4234,7 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
         expect((await block(p, 10, "E32", other.terminal.id)).status).toBe(422); // de otra empresa
         expect((await block(p, 0)).status).toBe(400);
         expect((await block(p, 5001)).status).toBe(400);
-        expect((await block(p, 10, "E34")).status).toBe(400);
+        expect((await block(p, 10, "E33")).status).toBe(400);
         expect((await block(p, 10, "E31")).status).toBe(201);
         await patch(`/v1/terminals/${p.terminal.id}`, { active: false }, p.cookie);
         expect((await block(p, 10)).status).toBe(422);
@@ -4567,6 +4568,299 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       expect(sync).toMatchObject({ sales: { uploaded: 2 }, blocks: { requested: 1 } });
       expect(sell().sale.encf).toBe("E320000000497");
       engine.close();
+    });
+  });
+
+  // ───────────── Caja: PIN, turnos y devoluciones ─────────────
+
+  describe("caja: PIN, turnos y devoluciones", () => {
+    const Y = "/v1/sync";
+    const put = (path: string, body: unknown, cookie?: string) =>
+      call(path, { method: "PUT", body: JSON.stringify(body), cookie });
+    const del = (path: string, cookie?: string) => call(path, { method: "DELETE", cookie });
+
+    async function caja(label: string) {
+      const b = await billing(label, { seqs: [["E32", 1, 500], ["E34", 1, 100]] });
+      const t = (await json(await post("/v1/terminals", { branchId: b.branch.id, name: "Caja 1", code: "C1" }, b.cookie))).data as Json;
+      // Producto con inventario (10 en existencia).
+      await patch(`/v1/products/${b.product.id}`, { trackInventory: true }, b.cookie);
+      await post("/v1/inventory/receipts", { productId: b.product.id, branchId: b.branch.id, quantity: "10" }, b.cookie);
+      return { ...b, terminal: t };
+    }
+    type Caja = Awaited<ReturnType<typeof caja>>;
+    const member = async (c: Caja, label: string) => {
+      const u = await signUp(label);
+      await prisma.member.create({ data: { id: randomUUID(), organizationId: c.orgId, userId: u.userId, role: "member" } });
+      return { ...u, cookie: await setActive(c.orgId, u.cookie) };
+    };
+    const block = async (c: Caja, type: string, size = 20) => {
+      const res = await post(`${Y}/sequence-blocks`, { terminalId: c.terminal.id, ecfType: type, size }, c.cookie);
+      expect(res.status, JSON.stringify(await res.clone().json())).toBe(201);
+      return (await json(res)).data as Json;
+    };
+    const encf = (type: string, n: number) => `E${type.slice(1)}${String(n).padStart(10, "0")}`;
+    const sale = (c: Caja, n: number, over: Json = {}) => ({
+      clientId: randomUUID(),
+      terminalId: c.terminal.id,
+      type: "E32",
+      encf: encf("E32", n),
+      issuedAt: "2026-10-20T15:30:00.000Z",
+      lines: [{ productId: c.product.id, name: "Producto 118", quantity: "2", unitPrice: "118.00", tax: "ITBIS18", priceIncludesTax: true }],
+      payments: [{ method: "CASH", amount: "236.00" }],
+      total: "236.00",
+      ...over,
+    });
+    /** Nota de crédito por `qty` unidades del producto de RD$118.00. */
+    const credit = (c: Caja, n: number, original: string, qty: number, over: Json = {}) => ({
+      clientId: randomUUID(),
+      terminalId: c.terminal.id,
+      type: "E34",
+      encf: encf("E34", n),
+      issuedAt: "2026-10-20T16:00:00.000Z",
+      referencedEncf: original,
+      modificationCode: 3,
+      returnsStock: true,
+      lines: [{ productId: c.product.id, name: "Producto 118", quantity: String(qty), unitPrice: "118.00", tax: "ITBIS18", priceIncludesTax: true }],
+      payments: [{ method: "CASH", amount: (118 * qty).toFixed(2) }],
+      total: (118 * qty).toFixed(2),
+      ...over,
+    });
+    const upload = (c: Caja, body: Json, cookie = c.cookie) => post(`${Y}/sales`, body, cookie);
+    const stockOf = async (c: Caja) =>
+      ((await json(await get(`/v1/inventory/stock?branchId=${c.branch.id}`, c.cookie))).data as Json[]).find((s) => s.productId === c.product.id)?.quantity;
+
+    describe("PIN de cajero", () => {
+      it("cada quien define el suyo; el administrador define o quita el de otros y ve quién tiene", async () => {
+        const c = await caja("pn1");
+        const ana = await member(c, "pn1a");
+        const luis = await member(c, "pn1l");
+
+        expect((await put("/v1/pins/me", { pin: "2580" }, ana.cookie)).status).toBe(204);
+        expect((await put(`/v1/pins/${luis.userId}`, { pin: "4096" }, c.cookie)).status).toBe(204);
+        const list = (await json(await get("/v1/pins", c.cookie))).data as Json[];
+        expect(list.find((m) => m.userId === ana.userId)).toMatchObject({ hasPin: true, role: "member" });
+        expect(list.find((m) => m.userId === luis.userId)!.hasPin).toBe(true);
+        expect(list.find((m) => m.userId === c.userId)!.hasPin).toBe(false); // el dueño aún no
+        expect(JSON.stringify(list)).not.toMatch(/pbkdf2|2580|4096/); // nunca se devuelve el PIN ni su resumen
+
+        // Cambiarlo es sobrescribir; el cajero no administra a otros ni ve el listado.
+        expect((await put("/v1/pins/me", { pin: "7391" }, ana.cookie)).status).toBe(204);
+        expect((await put(`/v1/pins/${luis.userId}`, { pin: "7391" }, ana.cookie)).status).toBe(403);
+        expect((await get("/v1/pins", ana.cookie)).status).toBe(403);
+        expect((await del(`/v1/pins/${luis.userId}`, ana.cookie)).status).toBe(403);
+        expect((await del(`/v1/pins/${ana.userId}`, ana.cookie)).status).toBe(204); // el suyo, sí
+        expect((await del(`/v1/pins/${ana.userId}`, ana.cookie)).status).toBe(404); // ya no tenía
+        expect((await del(`/v1/pins/${luis.userId}`, c.cookie)).status).toBe(204); // admin quita el de otro
+      });
+
+      it("rechaza PIN débiles y a quien no es de la empresa", async () => {
+        const c = await caja("pn2");
+        const other = await caja("pn2b");
+        for (const pin of ["12", "1234", "1111", "abcd", "1234567", ""]) {
+          expect((await put("/v1/pins/me", { pin }, c.cookie)).status, pin).toBe(400);
+        }
+        const res = await put("/v1/pins/me", { pin: "1111" }, c.cookie);
+        expect(await error(res)).toMatch(/PIN|dígito|valor/i);
+        expect((await put(`/v1/pins/${other.userId}`, { pin: "2580" }, c.cookie)).status).toBe(404);
+        expect((await put("/v1/pins/me", { pin: "2580" })).status).toBe(401);
+      });
+
+      it("la caja baja los resúmenes: el administrador de todos, el cajero solo el suyo", async () => {
+        const c = await caja("pn3");
+        const ana = await member(c, "pn3a");
+        const luis = await member(c, "pn3l");
+        await put("/v1/pins/me", { pin: "2580" }, c.cookie);
+        await put("/v1/pins/me", { pin: "4096" }, ana.cookie);
+        await put("/v1/pins/me", { pin: "7391" }, luis.cookie);
+
+        const all = (await json(await get(`${Y}/cashiers`, c.cookie))).data as Json[];
+        expect(all.map((x) => x.userId).sort()).toEqual([c.userId, ana.userId, luis.userId].sort());
+        const mine = (await json(await get(`${Y}/cashiers`, ana.cookie))).data as Json[];
+        expect(mine.map((x) => x.userId)).toEqual([ana.userId]);
+
+        // El resumen se verifica en la caja, sin internet, con el mismo código.
+        const entry = all.find((x) => x.userId === ana.userId)!;
+        expect(await verifyPin("4096", entry.pin)).toBe(true);
+        expect(await verifyPin("2580", entry.pin)).toBe(false);
+        expect(entry).toMatchObject({ name: "Usuario pn3a", role: "member" });
+
+        // Aislamiento: otra empresa no ve nada de esta.
+        const o = await caja("pn3b");
+        expect(((await json(await get(`${Y}/cashiers`, o.cookie))).data as Json[])).toEqual([]);
+      });
+    });
+
+    describe("devoluciones (nota de crédito) desde la caja", () => {
+      it("anular un comprobante completo devuelve el inventario y no se puede repetir", async () => {
+        const c = await caja("dv1");
+        const b32 = await block(c, "E32");
+        const b34 = await block(c, "E34");
+        await upload(c, sale(c, b32.fromNumber));
+        expect(await stockOf(c)).toBe("8");
+
+        const res = await upload(c, credit(c, b34.fromNumber, encf("E32", b32.fromNumber), 2, { modificationCode: 1, returnsStock: false }));
+        expect(res.status, JSON.stringify(await res.clone().json())).toBe(201);
+        const nc = (await json(res)).data as Json;
+        expect(nc).toMatchObject({ type: "E34", status: "ISSUED", encf: encf("E34", b34.fromNumber), referencedEncf: encf("E32", b32.fromNumber), total: "236.00" });
+        expect(await stockOf(c)).toBe("10"); // código 1: vuelve lo vendido
+        expect((await upload(c, credit(c, b34.fromNumber + 1, encf("E32", b32.fromNumber), 2, { modificationCode: 1, returnsStock: false }))).status).toBe(422);
+      });
+
+      it("las devoluciones parciales con mercancía restituyen solo lo devuelto y nunca exceden lo vendido", async () => {
+        const c = await caja("dv2");
+        const b32 = await block(c, "E32");
+        const b34 = await block(c, "E34");
+        const original = encf("E32", b32.fromNumber);
+        await upload(c, sale(c, b32.fromNumber));
+        expect(await stockOf(c)).toBe("8");
+
+        expect((await upload(c, credit(c, b34.fromNumber, original, 1))).status).toBe(201);
+        expect(await stockOf(c)).toBe("9");
+        // Una corrección de montos que no devuelve mercancía no toca el inventario.
+        expect((await upload(c, credit(c, b34.fromNumber + 1, original, 1, { returnsStock: false }))).status).toBe(201);
+        expect(await stockOf(c)).toBe("9");
+        // Ya se acreditó todo: otra nota excede.
+        const over = await upload(c, credit(c, b34.fromNumber + 2, original, 1));
+        expect(over.status).toBe(422);
+        expect(await error(over)).toMatch(/excede/);
+      });
+
+      it("valida el comprobante que se modifica y el cuerpo de la nota", async () => {
+        const c = await caja("dv3");
+        const other = await caja("dv3b");
+        const b32 = await block(c, "E32");
+        const b34 = await block(c, "E34");
+        const original = encf("E32", b32.fromNumber);
+        await upload(c, sale(c, b32.fromNumber));
+
+        const missing = await upload(c, credit(c, b34.fromNumber, "E320000000999", 1));
+        expect(missing.status).toBe(422);
+        expect(await error(missing)).toMatch(/no existe en la nube/);
+        // Un comprobante de otra empresa tampoco existe para esta.
+        const ob32 = await block(other, "E32", 5); // números distintos a los de esta empresa
+        await upload(other, sale(other, ob32.fromNumber));
+        expect((await upload(c, credit(c, b34.fromNumber, encf("E32", ob32.fromNumber), 1))).status).toBe(422);
+
+        expect((await upload(c, credit(c, b34.fromNumber, original, 1, { referencedEncf: null }))).status).toBe(400);
+        expect((await upload(c, credit(c, b34.fromNumber, original, 1, { modificationCode: null }))).status).toBe(400);
+        expect((await upload(c, sale(c, b32.fromNumber + 1, { referencedEncf: original }))).status).toBe(400); // una venta no referencia nada
+        expect((await upload(c, credit(c, b34.fromNumber, original, 1, { encf: encf("E34", 500) }))).status).toBe(422); // fuera del bloque
+        expect((await upload(c, credit(c, b34.fromNumber, original, 1, { payments: [{ method: "CASH", amount: "50.00" }] }))).status).toBe(422); // no coincide con el total
+      });
+
+      it("el bloque de notas de crédito se pide igual que los demás y es idempotente al subir", async () => {
+        const c = await caja("dv4");
+        const b32 = await block(c, "E32");
+        const b34 = await block(c, "E34", 5);
+        expect(b34).toMatchObject({ ecfType: "E34", remaining: 5 });
+        await upload(c, sale(c, b32.fromNumber));
+        const body = credit(c, b34.fromNumber, encf("E32", b32.fromNumber), 1);
+        expect((await upload(c, body)).status).toBe(201);
+        expect((await upload(c, body)).status).toBe(200); // reintento
+        expect(await stockOf(c)).toBe("9"); // una sola devolución
+      });
+    });
+
+    describe("turnos subidos desde la caja", () => {
+      const shiftBody = (c: Caja, over: Json = {}) => ({
+        terminalId: c.terminal.id,
+        openedAt: "2026-10-20T13:00:00.000Z",
+        openingAmount: "1000.00",
+        ...over,
+      });
+
+      it("abre el turno, ata las ventas y al cerrarlo calcula el cuadre con lo cobrado y lo devuelto en efectivo", async () => {
+        const c = await caja("tn1");
+        const b32 = await block(c, "E32");
+        const b34 = await block(c, "E34");
+        const shiftClientId = randomUUID();
+
+        const open = await put(`${Y}/shifts/${shiftClientId}`, shiftBody(c), c.cookie);
+        expect(open.status, JSON.stringify(await open.clone().json())).toBe(200);
+        const opened = (await json(open)).data as Json;
+        expect(opened).toMatchObject({ clientId: shiftClientId, status: "OPEN", expectedCash: null });
+        // Idempotente: repetir devuelve el mismo turno.
+        expect((await json(await put(`${Y}/shifts/${shiftClientId}`, shiftBody(c), c.cookie))).data.id).toBe(opened.id);
+
+        // Dos ventas (efectivo y tarjeta) y una devolución en efectivo, todas del turno.
+        const s1 = sale(c, b32.fromNumber, { shiftClientId });
+        const s2 = sale(c, b32.fromNumber + 1, { shiftClientId, payments: [{ method: "CARD", amount: "236.00" }] });
+        expect((await upload(c, s1)).status).toBe(201);
+        expect((await upload(c, s2)).status).toBe(201);
+        expect((await upload(c, credit(c, b34.fromNumber, s1.encf, 1, { shiftClientId }))).status).toBe(201);
+        const last = (await json(await get("/v1/documents?pageSize=1", c.cookie))).data[0];
+        expect((await json(await get(`/v1/documents/${last.id}`, c.cookie))).data.shiftId).toBe(opened.id);
+
+        // Esperado: 1000 + 236 (efectivo) − 118 (devuelto en efectivo) = 1118.00; se cuentan 1100.00.
+        const close = await put(`${Y}/shifts/${shiftClientId}`, shiftBody(c, { close: { closedAt: "2026-10-20T21:00:00.000Z", countedCash: "1100.00", notes: "Faltaron 18 pesos" } }), c.cookie);
+        expect((await json(close)).data).toMatchObject({ status: "CLOSED", expectedCash: "1118.00", difference: "-18.00" });
+        const detail = (await json(await get(`/v1/shifts/${opened.id}`, c.cookie))).data;
+        expect(detail).toMatchObject({ status: "CLOSED", closedAt: "2026-10-20T21:00:00.000Z", notes: "Faltaron 18 pesos" });
+        expect(detail.report).toMatchObject({
+          documents: 3,
+          sales: { total: "472.00" },
+          credits: "118.00",
+          net: "354.00",
+          payments: { CARD: "236.00", CASH: "118.00" }, // el efectivo ya descuenta lo devuelto
+          expectedCash: "1118.00",
+          countedCash: "1100.00",
+        });
+        // Repetir el cierre no cambia nada.
+        const again = await put(`${Y}/shifts/${shiftClientId}`, shiftBody(c, { close: { closedAt: "2026-10-21T01:00:00.000Z", countedCash: "5.00" } }), c.cookie);
+        expect((await json(again)).data).toMatchObject({ status: "CLOSED", difference: "-18.00" });
+      });
+
+      it("no pisa un turno abierto en la nube y rechaza cajas inválidas; un turno desconocido no bloquea la venta", async () => {
+        const c = await caja("tn2");
+        await post("/v1/shifts", { terminalId: c.terminal.id, openingAmount: "0" }, c.cookie); // abierto desde el panel web
+        const clash = await put(`${Y}/shifts/${randomUUID()}`, shiftBody(c), c.cookie);
+        expect(clash.status).toBe(409);
+        expect(await error(clash)).toMatch(/ya tiene un turno abierto/);
+        expect((await put(`${Y}/shifts/${randomUUID()}`, shiftBody(c, { terminalId: randomUUID() }), c.cookie)).status).toBe(422);
+        expect((await put(`${Y}/shifts/no-es-uuid`, shiftBody(c), c.cookie)).status).toBe(400);
+
+        const b32 = await block(c, "E32");
+        const res = await upload(c, sale(c, b32.fromNumber, { shiftClientId: randomUUID() }));
+        expect(res.status).toBe(201);
+        expect((await json(res)).data.shiftId).toBeNull();
+      });
+    });
+
+    describe("quién vendió", () => {
+      it("atribuye la venta al cajero identificado (miembro de la empresa) aunque la sesión sea de otra persona", async () => {
+        const c = await caja("cj1");
+        const ana = await member(c, "cj1a");
+        const outsider = await caja("cj1b");
+        const b32 = await block(c, "E32");
+        expect((await upload(c, sale(c, b32.fromNumber, { cashierId: ana.userId }))).status).toBe(201);
+        expect((await upload(c, sale(c, b32.fromNumber + 1, { cashierId: outsider.userId }))).status).toBe(422);
+        expect((await upload(c, sale(c, b32.fromNumber + 2, { cashierId: "no-existe" }))).status).toBe(422);
+
+        const docs = await withTenant(prisma, c.orgId).document.findMany({ orderBy: { createdAt: "asc" }, select: { encf: true, createdById: true } });
+        expect(docs).toEqual([{ encf: encf("E32", b32.fromNumber), createdById: ana.userId }]);
+      });
+    });
+
+    describe("turno obligatorio", () => {
+      it("si la empresa lo exige, emitir desde una caja requiere un turno abierto (la facturación sin caja no)", async () => {
+        const c = await caja("rq1");
+        expect((await send("PUT", "/v1/company", { rnc: "1-01-00157-7", legalName: "Empresa de Prueba SRL", address: "Calle Principal 1, Santo Domingo", environment: "TEST", requireShift: true }, c.cookie)).status).toBe(200);
+        expect(((await json(await get(`${Y}/catalog`, c.cookie))).data.company as Json).requireShift).toBe(true);
+
+        const draft = await createDraft(c, { terminalId: c.terminal.id });
+        const blocked = await issue(c, draft.id);
+        expect(blocked.status).toBe(422);
+        expect(await error(blocked)).toMatch(/Abre un turno/);
+        expect((await json(await get(`/v1/documents/${draft.id}`, c.cookie))).data.status).toBe("DRAFT"); // no se gastó número
+
+        expect((await issue(c, (await createDraft(c)).id)).status).toBe(200); // sin caja: factura normal
+        await post("/v1/shifts", { terminalId: c.terminal.id, openingAmount: "0" }, c.cookie);
+        expect((await issue(c, draft.id)).status).toBe(200);
+
+        // Quitar la exigencia la desactiva; un PUT sin el campo la conserva.
+        await send("PUT", "/v1/company", { rnc: "1-01-00157-7", legalName: "Empresa de Prueba SRL", address: "Calle Principal 1, Santo Domingo", environment: "TEST" }, c.cookie);
+        expect((await json(await get("/v1/company", c.cookie))).data.requireShift).toBe(true);
+      });
     });
   });
 
