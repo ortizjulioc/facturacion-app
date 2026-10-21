@@ -1,3 +1,4 @@
+import { normalizePrinterConfig, type PrinterConfig } from "@facturacion/printing";
 import { ApiClient, ApiError, type FetchLike } from "./api";
 import { categories, getCompany, productByBarcode, productCount, searchCustomers, searchProducts, type Company } from "./catalog";
 import { cashierCount, cashiers, PinGate, type Cashier } from "./cashiers";
@@ -256,6 +257,18 @@ export class PosEngine {
   }
   categories() {
     return categories(this.db);
+  }
+
+  // ───────────── Impresora ─────────────
+
+  /** Configuración de la impresora de esta caja (se guarda en la base local). */
+  printerConfig(): PrinterConfig {
+    return normalizePrinterConfig(json<Partial<PrinterConfig>>(getMeta(this.db, "printer")));
+  }
+  savePrinterConfig(input: Partial<PrinterConfig>): PrinterConfig {
+    const config = normalizePrinterConfig(input);
+    setMeta(this.db, "printer", JSON.stringify(config));
+    return config;
   }
 
   // ───────────── Cajeros (PIN) ─────────────

@@ -11,7 +11,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@facturacion/core": "workspace:*"
+    "@facturacion/core": "workspace:*",
+    "@facturacion/printing": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24",
