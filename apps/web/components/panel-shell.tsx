@@ -10,6 +10,7 @@ import { authClient } from "@/lib/api";
 const NAV: { href: string; label: string; adminOnly?: boolean }[] = [
   { href: "/panel", label: "Resumen" },
   { href: "/panel/facturas", label: "Facturas" },
+  { href: "/panel/turnos", label: "Turnos de caja" },
   { href: "/panel/reportes", label: "Reportes", adminOnly: true },
   { href: "/panel/restaurante", label: "Restaurante" },
   { href: "/panel/productos", label: "Productos" },
