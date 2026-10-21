@@ -15,6 +15,7 @@
   "dependencies": {
     "@facturacion/core": "workspace:*",
     "@facturacion/pos-engine": "workspace:*",
+    "@facturacion/printing": "workspace:*",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },

@@ -3,6 +3,17 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { app, BrowserWindow, ipcMain, Menu, safeStorage, shell } from "electron";
 import { ApiError, PosEngine, type SecretBox, type SyncReport } from "@facturacion/pos-engine";
+import {
+  colsOf,
+  drawerOnly,
+  normalizePrinterConfig,
+  printBytes,
+  receiptTicket,
+  shiftTicket,
+  testTicket,
+  type PrinterConfig,
+  type ReceiptData,
+} from "@facturacion/printing";
 import { METHODS, type IpcResult, type PosApi } from "../shared/api";
 
 /**
@@ -30,6 +41,38 @@ let win: BrowserWindow | null = null;
 // Una sincronización a la vez: el temporizador y el botón comparten la misma en curso.
 let syncing: Promise<SyncReport> | null = null;
 const syncOnce = () => (syncing ??= engine.sync().finally(() => (syncing = null)));
+
+// ───────────── Impresión ─────────────
+// Una impresión a la vez (los tickets no se mezclan), y la venta nunca espera a la impresora.
+let printing: Promise<unknown> = Promise.resolve();
+const enqueue = <T>(job: () => Promise<T>): Promise<T> => {
+  const run = printing.then(job, job);
+  printing = run.catch(() => undefined);
+  return run;
+};
+
+const ticketOpts = (c: PrinterConfig, extra: { openDrawer?: boolean } = {}) => ({
+  cols: colsOf(c.paper),
+  codePage: c.codePage,
+  openDrawer: extra.openDrawer ?? false,
+});
+
+/** El comprobante tal como lo imprime la térmica; abre la gaveta si hubo efectivo y no es una reimpresión. */
+function receiptBytes(saleId: string, config: PrinterConfig, reprint: boolean) {
+  const receipt = engine.receipt(saleId);
+  if (!receipt) throw new Error("No se encontró la venta");
+  const cash = receipt.payments.some((p) => p.method === "CASH");
+  return receiptTicket(receipt as ReceiptData, ticketOpts(config, { openDrawer: !reprint && config.drawerOnCash && cash }));
+}
+
+/** Imprime sin bloquear la venta: si falla, avisa a la pantalla para que ofrezca reintentar. */
+function autoPrint(saleId: string) {
+  const config = engine.printerConfig();
+  if (config.mode === "none" || !config.autoPrint) return;
+  void enqueue(async () => printBytes(config, receiptBytes(saleId, config, false))).catch((e: unknown) => {
+    win?.webContents.send("pos:print-failed", { saleId, message: e instanceof Error ? e.message : String(e) });
+  });
+}
 
 function createWindow() {
   win = new BrowserWindow({
@@ -84,6 +127,7 @@ function register() {
     categories: () => engine.categories(),
     sell: (input) => {
       const receipt = engine.sell(input);
+      autoPrint(receipt.sale.id);
       // Intenta subirla enseguida (sin esperar): si no hay internet queda en la cola y sale en la próxima ronda.
       void syncOnce().then(notify, () => undefined);
       return receipt;
@@ -97,6 +141,7 @@ function register() {
     returnable: (saleId) => engine.returnable(saleId),
     refund: (input) => {
       const receipt = engine.refund(input);
+      autoPrint(receipt.sale.id);
       void syncOnce().then(notify, () => undefined);
       return receipt;
     },
@@ -108,6 +153,28 @@ function register() {
     },
     shifts: () => engine.shifts(),
     shiftReport: (id) => engine.shiftReport(id),
+    printers: async () => (await win!.webContents.getPrintersAsync()).map((p) => p.name),
+    printerConfig: () => engine.printerConfig(),
+    savePrinterConfig: (config) => engine.savePrinterConfig(config),
+    printReceipt: (saleId, opts) => {
+      const config = engine.printerConfig();
+      return enqueue(async () => printBytes(config, receiptBytes(saleId, config, opts?.reprint ?? false)));
+    },
+    printShift: (shiftId) => {
+      const config = engine.printerConfig();
+      const data = engine.shiftReport(shiftId);
+      if (!data) throw new Error("No hay un turno para imprimir");
+      return enqueue(async () => printBytes(config, shiftTicket({ ...data, company: engine.state().company }, ticketOpts(config))));
+    },
+    openDrawer: () => {
+      const config = engine.printerConfig();
+      return enqueue(async () => printBytes(config, drawerOnly(ticketOpts(config))));
+    },
+    // Imprime con la configuración que se está editando (aún sin guardar), para probarla.
+    testPrint: (draft) => {
+      const config = normalizePrinterConfig({ ...engine.printerConfig(), ...draft });
+      return enqueue(async () => printBytes(config, testTicket(ticketOpts(config, { openDrawer: false }))));
+    },
   };
 
   for (const name of METHODS) {

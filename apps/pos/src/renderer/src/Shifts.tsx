@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { formatDop, toCents } from "@facturacion/core";
-import type { LocalShift, ShiftReport } from "../../shared/api";
+import type { LocalShift, PrinterConfig, ShiftReport } from "../../shared/api";
+import { PrintButton } from "./Printer";
 import { errorOf, Field, Modal } from "./ui";
 
 const money = (v: string) => formatDop(toCents(v));
@@ -75,7 +76,7 @@ export function CloseShiftModal({ onClose, onDone }: { onClose: () => void; onDo
 }
 
 /** Informe X (turno abierto) o Z (cerrado), en formato de ticket para imprimir. */
-export function ShiftReportModal({ shiftId, onClose }: { shiftId?: string; onClose: () => void }) {
+export function ShiftReportModal({ shiftId, printer, onClose }: { shiftId?: string; printer: PrinterConfig | null; onClose: () => void }) {
   const [data, setData] = useState<{ shift: LocalShift; report: ShiftReport } | null | undefined>(undefined);
   useEffect(() => {
     window.pos.shiftReport(shiftId).then(setData, () => setData(null));
@@ -87,7 +88,7 @@ export function ShiftReportModal({ shiftId, onClose }: { shiftId?: string; onClo
       {data && <ShiftReportView shift={data.shift} report={data.report} />}
       {data && (
         <div className="row no-print">
-          <button onClick={() => window.print()}>Imprimir</button>
+          <PrintButton printer={printer} thermal={() => window.pos.printShift(data.shift.id)} />
           <button className="primary" onClick={onClose}>Cerrar</button>
         </div>
       )}

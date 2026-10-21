@@ -12,7 +12,9 @@ import type {
   ShiftReport,
   SyncReport,
 } from "@facturacion/pos-engine";
+import type { PrinterConfig } from "@facturacion/printing";
 
+export type { PrinterConfig };
 export type {
   Cashier,
   LocalCustomer,
@@ -53,6 +55,16 @@ export type PosApi = {
   closeShift(input: { countedCash: string; notes?: string | null }): Promise<{ shift: LocalShift; report: ShiftReport }>;
   shifts(): Promise<LocalShift[]>;
   shiftReport(id?: string): Promise<{ shift: LocalShift; report: ShiftReport } | null>;
+  /** Impresoras instaladas en Windows (para elegir una). */
+  printers(): Promise<string[]>;
+  printerConfig(): Promise<PrinterConfig>;
+  savePrinterConfig(config: Partial<PrinterConfig>): Promise<PrinterConfig>;
+  /** Imprime el ticket de una venta o nota de crédito. `reprint`: copia (no abre la gaveta). */
+  printReceipt(saleId: string, opts?: { reprint?: boolean }): Promise<void>;
+  /** Imprime el informe X/Z de un turno (el abierto si no se indica). */
+  printShift(shiftId?: string): Promise<void>;
+  openDrawer(): Promise<void>;
+  testPrint(config?: Partial<PrinterConfig>): Promise<void>;
 };
 
 /** Lista de métodos (la usan el proceso principal y el preload para registrar cada canal). */
@@ -80,6 +92,13 @@ export const METHODS = [
   "closeShift",
   "shifts",
   "shiftReport",
+  "printers",
+  "printerConfig",
+  "savePrinterConfig",
+  "printReceipt",
+  "printShift",
+  "openDrawer",
+  "testPrint",
 ] as const satisfies readonly (keyof PosApi)[];
 
 /** Error que cruza el IPC: solo viaja el mensaje (y el código HTTP, si lo hubo). */
@@ -88,4 +107,6 @@ export type IpcResult<T> = { ok: true; value: T } | { ok: false; error: { messag
 export type PosBridge = PosApi & {
   /** Avisa cada vez que la sincronización automática termina. */
   onSynced(callback: (report: SyncReport) => void): () => void;
+  /** Avisa cuando una impresión automática (al vender o devolver) falla. */
+  onPrintFailed(callback: (info: { saleId: string; message: string }) => void): () => void;
 };

@@ -4,7 +4,7 @@ import { defineConfig } from "electron-vite";
 
 // Los paquetes del monorepo se publican como TypeScript, así que se compilan dentro de cada bundle
 // (no se dejan como dependencias externas que Electron no sabría leer).
-const bundled = ["@facturacion/core", "@facturacion/pos-engine"];
+const bundled = ["@facturacion/core", "@facturacion/pos-engine", "@facturacion/printing"];
 
 export default defineConfig({
   main: {

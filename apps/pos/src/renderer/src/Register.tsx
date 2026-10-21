@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { calculateDocument, formatDop, fromCents, toCents, toMilli, type TaxCode } from "@facturacion/core";
-import type { LocalCustomer, LocalProduct, LocalSale, LocalShift, PosState, Receipt, SaleInput, ShiftReport } from "../../shared/api";
+import type { LocalCustomer, LocalProduct, LocalSale, LocalShift, PosState, PrinterConfig, Receipt, SaleInput, ShiftReport } from "../../shared/api";
 import { ReconnectModal } from "./Reconnect";
+import { PrinterModal, PrintButton, isPrintable } from "./Printer";
 import { RefundModal } from "./Refund";
 import { CloseShiftModal, OpenShiftModal, ShiftReportModal, ShiftReportView } from "./Shifts";
 import { Receipt as ReceiptView } from "./Receipt";
@@ -31,12 +32,20 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
   const [customer, setCustomer] = useState<LocalCustomer | null>(null);
   const [propina, setPropina] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const [modal, setModal] = useState<null | "pay" | "customer" | "sales" | "reconnect" | "openShift" | "closeShift" | "xreport" | "refund">(null);
+  const [modal, setModal] = useState<null | "pay" | "customer" | "sales" | "reconnect" | "openShift" | "closeShift" | "xreport" | "refund" | "printer">(null);
+  const [printer, setPrinter] = useState<PrinterConfig | null>(null);
+  const [printFailed, setPrintFailed] = useState<{ saleId: string; message: string } | null>(null);
   const [refundSale, setRefundSale] = useState<LocalSale | undefined>(undefined);
   const [zReport, setZReport] = useState<{ shift: LocalShift; report: ShiftReport } | null>(null);
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [syncing, setSyncing] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+
+  // Impresora: se lee la configuración y se avisa cuando una impresión automática falla.
+  useEffect(() => {
+    void window.pos.printerConfig().then(setPrinter, () => undefined);
+    return window.pos.onPrintFailed(setPrintFailed);
+  }, []);
 
   // Catálogo (se vuelve a leer cuando termina una sincronización: cambia `state.products`).
   useEffect(() => {
@@ -163,6 +172,10 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
           <button onClick={() => { setRefundSale(undefined); setModal("refund"); }}>Devolución</button>
           <button onClick={() => void syncNow()} disabled={syncing || !state.signedIn}>{syncing ? "Sincronizando…" : "Sincronizar"}</button>
           <button onClick={() => setModal("sales")}>Ventas</button>
+          {isPrintable(printer) && (
+            <button onClick={() => void window.pos.openDrawer().catch((e: unknown) => setMessage(errorOf(e)))} title="Abrir la gaveta de dinero">Gaveta</button>
+          )}
+          <button onClick={() => setModal("printer")} title="Configurar la impresora">Impresora</button>
           {state.pinRequired && (
             <button onClick={() => void window.pos.lock().then(reload)} title="Bloquear la caja">Bloquear</button>
           )}
@@ -189,6 +202,22 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
             </select>
           </div>
           {message && <p className="notice" role="status">{message}</p>}
+          {printFailed && (
+            <p className="notice" role="alert">
+              No se pudo imprimir el ticket: {printFailed.message}{" "}
+              <button
+                className="link"
+                onClick={() => {
+                  const id = printFailed.saleId;
+                  setPrintFailed(null);
+                  void window.pos.printReceipt(id).catch((e: unknown) => setPrintFailed({ saleId: id, message: errorOf(e) }));
+                }}
+              >
+                Reintentar
+              </button>
+              <button className="link" onClick={() => setPrintFailed(null)}>Cerrar</button>
+            </p>
+          )}
           <div className="grid">
             {products.map((p) => (
               <button key={p.id} className="tile" onClick={() => add(p)}>
@@ -306,12 +335,13 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
           onDone={(closed) => { setModal(null); setZReport(closed); void reload(); }}
         />
       )}
-      {modal === "xreport" && <ShiftReportModal onClose={() => setModal(null)} />}
+      {modal === "xreport" && <ShiftReportModal printer={printer} onClose={() => setModal(null)} />}
+      {modal === "printer" && <PrinterModal onClose={() => setModal(null)} onSaved={setPrinter} />}
       {zReport && (
         <Modal title="Turno cerrado" onClose={() => setZReport(null)}>
           <ShiftReportView shift={zReport.shift} report={zReport.report} />
           <div className="row no-print">
-            <button onClick={() => window.print()}>Imprimir</button>
+            <PrintButton printer={printer} thermal={() => window.pos.printShift(zReport.shift.id)} />
             <button className="primary" onClick={() => setZReport(null)}>Listo</button>
           </div>
         </Modal>
@@ -324,7 +354,7 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
         />
       )}
       {modal === "reconnect" && <ReconnectModal state={state} onClose={() => setModal(null)} onDone={reload} />}
-      {receipt && <ReceiptModal receipt={receipt} onClose={() => { setReceipt(null); searchRef.current?.focus(); }} />}
+      {receipt && <ReceiptModal receipt={receipt} printer={printer} onClose={() => { setReceipt(null); searchRef.current?.focus(); }} />}
     </div>
   );
 }
@@ -454,12 +484,12 @@ function PayModal({ total, onClose, onPay }: { total: bigint; onClose: () => voi
   );
 }
 
-function ReceiptModal({ receipt, onClose }: { receipt: Receipt; onClose: () => void }) {
+function ReceiptModal({ receipt, printer, onClose }: { receipt: Receipt; printer: PrinterConfig | null; onClose: () => void }) {
   return (
     <Modal title="Venta registrada" onClose={onClose}>
       <ReceiptView receipt={receipt} />
       <div className="row no-print">
-        <button onClick={() => window.print()}>Imprimir</button>
+        <PrintButton printer={printer} thermal={() => window.pos.printReceipt(receipt.sale.id, { reprint: true })} />
         <button className="primary" autoFocus onClick={onClose}>Nueva venta</button>
       </div>
     </Modal>

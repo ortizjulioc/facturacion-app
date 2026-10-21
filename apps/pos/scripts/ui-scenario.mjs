@@ -3,6 +3,8 @@
 //   2) cd apps/pos && pnpm build
 //   3) POS_SCRIPT=scripts/ui-scenario.mjs POS_SHOTS=<carpeta> pnpm smoke
 // Crea una empresa nueva en la nube, configura la caja desde la pantalla, vende, sube y deja capturas en POS_SHOTS.
+import { createServer } from "node:net";
+
 const API = process.env.POS_API ?? "http://localhost:3001";
 const ORIGIN = "app://facturacion-pos";
 
@@ -52,8 +54,41 @@ async function seed() {
   return { email, password };
 }
 
+/** Impresora de red simulada: guarda cada trabajo (conexión) que recibe. */
+async function fakePrinter() {
+  const jobs = [];
+  const sockets = new Set();
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    const chunks = [];
+    socket.on("data", (d) => chunks.push(d));
+    socket.on("close", () => {
+      sockets.delete(socket);
+      if (chunks.length) jobs.push(Buffer.concat(chunks));
+    });
+  });
+  const listen = (port = 0) => new Promise((resolve) => server.listen(port, "127.0.0.1", () => resolve(server.address().port)));
+  const port = await listen();
+  return {
+    jobs,
+    port,
+    stop: () => new Promise((resolve) => { for (const s of sockets) s.destroy(); server.close(() => resolve()); }),
+    start: () => listen(port),
+  };
+}
+const has = (buf, bytes) => buf.indexOf(Buffer.from(bytes)) >= 0;
+const summarize = (buf) => ({
+  bytes: buf.length,
+  drawer: has(buf, [0x1b, 0x70, 0x00, 0x19, 0xfa]),
+  cut: has(buf, [0x1d, 0x56, 0x42, 0x00]),
+  qr: has(buf, [0x1d, 0x28, 0x6b]),
+  title: ["FACTURA DE CONSUMO", "NOTA DE CR", "INFORME Z", "PRUEBA"].find((t) => buf.toString("latin1").includes(t)) ?? null,
+  encf: buf.toString("latin1").match(/E3\d{11}/)?.[0] ?? null,
+});
+
 export default async function scenario({ run, sleep, shot }) {
   const out = { shots: [] };
+  const printer = await fakePrinter();
   const { email, password } = await seed();
 
   // Utilidades que corren dentro de la pantalla (React: se asigna con el setter nativo y se dispara `input`).
@@ -110,6 +145,25 @@ export default async function scenario({ run, sleep, shot }) {
   })()`);
   await sleep(300);
   await snap("04-venta-vacia");
+
+  // 1d) Impresora de red (simulada): configurar desde la pantalla, imprimir la prueba y guardar.
+  out.printerSetup = await run(`(async () => {
+    __btn('Impresora').click();
+    await __wait(() => document.querySelector('.modal'));
+    const modal = () => document.querySelector('.modal');
+    __setv(modal().querySelector('select'), 'network');
+    await __wait(() => modal().querySelector('input[placeholder="192.168.1.50"]'));
+    __setv(modal().querySelector('input[placeholder="192.168.1.50"]'), '127.0.0.1');
+    const portInput = [...modal().querySelectorAll('input')].find((i) => i.inputMode === 'numeric');
+    __setv(portInput, '${printer.port}');
+    await new Promise((r) => setTimeout(r, 200));
+    __btn('Imprimir prueba', modal()).click();
+    await __wait(() => /Prueba enviada/.test(modal().innerText), 10000);
+    return modal().innerText.replace(/\\n+/g, ' / ');
+  })()`);
+  await snap("04b-impresora");
+  await run(`__btn('Guardar', document.querySelector('.modal')).click()`);
+  await sleep(400);
   out.setup = await run(`window.pos.state().then((s) => ({ stage: s.stage, products: s.products, numbers: s.numbers, terminal: s.terminal?.name, company: s.company?.legalName }))`);
 
   // 2) Venta con lector de códigos: dos escaneos del mismo producto y uno distinto.
@@ -180,10 +234,43 @@ export default async function scenario({ run, sleep, shot }) {
   await sleep(300);
   await snap("10-nota-credito");
 
-  // 5) Cierre de turno: esperado = 500 + 200 (efectivo) − 118 (devuelto) = 582; se cuentan 580 → pide el motivo.
-  out.close = await run(`(async () => {
+  // 4c) La impresora se apaga: la venta se registra igual y la pantalla avisa con la opción de reintentar.
+  await printer.stop();
+  out.printFail = await run(`(async () => {
     __btn('Nueva venta').click();
     await new Promise((r) => setTimeout(r, 300));
+    const input = document.querySelector('input[aria-label^="Buscar"]');
+    __setv(input, '7461004'); input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 400));
+    __btn('Cobrar').click();
+    await __wait(() => document.querySelector('.modal'));
+    __btn('Confirmar cobro', document.querySelector('.modal')).click();
+    await __wait(() => document.querySelector('.receipt'));
+    __btn('Nueva venta').click();
+    await __wait(() => [...document.querySelectorAll('[role=alert]')].some((a) => /No se pudo imprimir/.test(a.innerText)), 15000);
+    return [...document.querySelectorAll('[role=alert]')].map((a) => a.innerText.replace(/\\n+/g, ' ')).find((t) => /No se pudo imprimir/.test(t));
+  })()`);
+  await snap("10b-error-impresion");
+  await printer.start();
+  out.printRetry = await run(`(async () => {
+    const alertEl = () => [...document.querySelectorAll('[role=alert]')].find((a) => /No se pudo imprimir/.test(a.innerText));
+    [...alertEl().querySelectorAll('button')].find((b) => b.innerText.trim() === 'Reintentar').click();
+    await __wait(() => !alertEl(), 15000);
+    return true;
+  })()`);
+  // Vuelve a tener un ticket abierto para que siga el paso del cierre (que empieza con «Nueva venta»).
+  await run(`(async () => {
+    const input = document.querySelector('input[aria-label^="Buscar"]');
+    __setv(input, '7461004'); input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 300));
+    __btn('Vaciar').click();
+    await new Promise((r) => setTimeout(r, 200));
+    window.pos.sales({ limit: 1 }).then((s) => window.pos.receipt(s[0].id)).then(() => true);
+    return true;
+  })()`);
+
+  // 5) Cierre de turno: esperado = 500 + 200 (efectivo) − 118 (devuelto) = 582; se cuentan 580 → pide el motivo.
+  out.close = await run(`(async () => {
     __btn('Cerrar turno').click();
     await __wait(() => document.querySelector('.modal'));
     const modal = () => document.querySelector('.modal');
@@ -198,6 +285,11 @@ export default async function scenario({ run, sleep, shot }) {
   })()`);
   await sleep(300);
   await snap("11-informe-z");
+  await run(`(async () => {
+    [...document.querySelectorAll('.modal button')].find((b) => b.innerText.trim() === 'Reimprimir').click();
+    await new Promise((r) => setTimeout(r, 1200));
+    return true;
+  })()`);
   out.final = await run(`(async () => {
     __btn('Listo').click();
     await new Promise((r) => setTimeout(r, 300));
@@ -210,5 +302,8 @@ export default async function scenario({ run, sleep, shot }) {
   await run(`__btn('Bloquear').click()`);
   await sleep(500);
   await snap("12-bloqueada");
+  await sleep(500);
+  out.printJobs = printer.jobs.map(summarize);
+  await printer.stop();
   return out;
 }

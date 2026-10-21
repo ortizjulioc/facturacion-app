@@ -23,6 +23,11 @@ const bridge = {
     ipcRenderer.on("pos:synced", listener);
     return () => ipcRenderer.removeListener("pos:synced", listener);
   },
+  onPrintFailed(callback: (info: { saleId: string; message: string }) => void) {
+    const listener = (_e: unknown, info: { saleId: string; message: string }) => callback(info);
+    ipcRenderer.on("pos:print-failed", listener);
+    return () => ipcRenderer.removeListener("pos:print-failed", listener);
+  },
 } as unknown as PosBridge;
 
 contextBridge.exposeInMainWorld("pos", bridge);
