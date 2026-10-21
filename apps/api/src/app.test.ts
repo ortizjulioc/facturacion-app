@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { createPrisma, withTenant } from "@facturacion/db";
+import { PosEngine, type FetchLike } from "@facturacion/pos-engine";
 import { createApp } from "./app";
 import { createAuth } from "./auth";
 import { loadEnv } from "./env";
@@ -4390,6 +4394,179 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
         expect(((await json(await get(`${Y}/sequence-blocks?terminalId=${a.terminal.id}`, other.cookie))).data as Json[])).toEqual([]);
         expect((await post(`${Y}/sales`, saleBody(a, b.fromNumber))).status).toBe(401);
       });
+    });
+  });
+
+  // ───────────── La caja (apps/pos) contra la API real ─────────────
+
+  describe("caja offline de punta a punta", () => {
+    const PASSWORD = "una-clave-bien-larga-123";
+    const toApp = (net: { up: boolean; dropResponses?: boolean }): FetchLike => async (url, init) => {
+      if (!net.up) throw new TypeError("fetch failed");
+      const u = new URL(url);
+      const res = await app.request(u.pathname + u.search, init);
+      if (net.dropResponses && u.pathname === "/v1/sync/sales") throw new TypeError("fetch failed"); // la nube recibió, la caja no se enteró
+      return res;
+    };
+
+    /** Empresa con caja, producto con código de barras e inventario, y un cliente con RNC. */
+    async function tienda(label: string) {
+      const b = await billing(label, { seqs: [["E32", 1, 500], ["E31", 1, 100]] });
+      const t = (await json(await post("/v1/terminals", { branchId: b.branch.id, name: "Caja 1", code: "C1" }, b.cookie))).data as Json;
+      const producto = (await json(await post("/v1/products", { name: "Cafe 118", price: "118.00", barcode: "7461234", trackInventory: true }, b.cookie))).data as Json;
+      await post("/v1/inventory/receipts", { productId: producto.id, branchId: b.branch.id, quantity: "10" }, b.cookie);
+      const cliente = (await json(await post("/v1/customers", { name: "Acme SRL", documentType: "RNC", documentNumber: "131246796" }, b.cookie))).data as Json;
+      return { ...b, terminal: t, producto, cliente, email: `${label}-${tag}@example.com` };
+    }
+    type Tienda = Awaited<ReturnType<typeof tienda>>;
+
+    const policy = { types: ["E32", "E31"] as ("E32" | "E31")[], size: 50, low: 10 };
+    async function conectar(t: Tienda, net: { up: boolean; dropResponses?: boolean }, dbPath = ":memory:") {
+      const engine = PosEngine.open({ dbPath, fetch: toApp(net), policy });
+      const { organizations } = await engine.signIn({ serverUrl: "http://api.test", email: t.email, password: PASSWORD });
+      const org = organizations.find((o) => o.id === t.orgId)!;
+      const first = await engine.selectTerminal({ organization: org, terminalId: t.terminal.id });
+      return { engine, first };
+    }
+    const stockOf = async (t: Tienda) =>
+      ((await json(await get(`/v1/inventory/stock?branchId=${t.branch.id}`, t.cookie))).data as Json[]).find((s) => s.productId === t.producto.id)?.quantity;
+
+    it("configura la caja, vende sin internet y sube las ventas al volver la conexión", async () => {
+      const t = await tienda("pe1");
+      const net = { up: true };
+      const { engine, first } = await conectar(t, net);
+
+      // Primera sincronización: catálogo, datos fiscales y un bloque de e-NCF por tipo.
+      expect(first).toMatchObject({ online: true, authRequired: false, blocks: { requested: 2, error: null } });
+      expect(first.catalog!.products).toBeGreaterThanOrEqual(2);
+      let state = engine.state();
+      expect(state).toMatchObject({ stage: "ready", signedIn: true, pendingSales: 0, numbers: { E32: 50, E31: 50 } });
+      expect(state.terminal).toMatchObject({ code: "C1" });
+      expect(state.organization?.id).toBe(t.orgId);
+      expect(state.company).toMatchObject({ legalName: "Empresa de Prueba SRL" });
+
+      // Sin internet: el lector, el catálogo y la venta siguen funcionando.
+      net.up = false;
+      const cafe = engine.productByBarcode("7461234")!;
+      expect(cafe).toMatchObject({ name: "Cafe 118", priceCents: 11800 });
+      const acme = engine.customers("acme")[0]!;
+      const r1 = engine.sell({ type: "E32", lines: [{ productId: cafe.id, quantity: "2" }], payments: [{ method: "CASH", amount: "236.00" }] });
+      const r2 = engine.sell({ type: "E31", customerId: acme.id, lines: [{ productId: cafe.id, quantity: "1" }], payments: [{ method: "CARD", amount: "118.00" }] });
+      expect(r1.sale.encf).toBe("E320000000451"); // el bloque sale del final del rango general (451–500)
+      expect(r2.sale.encf).toBe("E310000000051");
+      expect(engine.state()).toMatchObject({ pendingSales: 2, numbers: { E32: 49, E31: 49 } });
+
+      const offline = await engine.sync();
+      expect(offline).toMatchObject({ online: false, sales: { pending: 2 } });
+      expect((await json(await get("/v1/documents", t.cookie))).total).toBe(0);
+
+      // Vuelve la conexión: las ventas suben con el e-NCF y la fecha que se imprimieron.
+      net.up = true;
+      const online = await engine.sync();
+      expect(online).toMatchObject({ online: true, sales: { uploaded: 2, duplicates: 0, rejected: 0, pending: 0 } });
+      const docs = (await json(await get("/v1/documents?pageSize=10", t.cookie))).data as Json[];
+      expect(docs.map((d) => d.encf).sort()).toEqual(["E310000000051", "E320000000451"]);
+      expect(docs.every((d) => d.status === "ISSUED")).toBe(true);
+      const cloud1 = docs.find((d) => d.encf === "E320000000451")!;
+      expect(cloud1.issuedAt).toBe(r1.sale.issuedAt);
+      expect(cloud1.total).toBe("236.00");
+      expect(await stockOf(t)).toBe("7"); // 10 − 2 − 1
+      expect(engine.sales().map((s) => s.status)).toEqual(["SYNCED", "SYNCED"]);
+
+      // Otra ronda no repite nada, y la nube sigue facturando en línea por el rango general sin chocar con la caja.
+      expect((await engine.sync()).sales).toMatchObject({ uploaded: 0, duplicates: 0, pending: 0 });
+      const draft = await createDraft(t, { terminalId: t.terminal.id });
+      expect((await json(await issue(t, draft.id))).data.encf).toBe("E320000000001");
+      engine.close();
+    });
+
+    it("si se pierde la respuesta de la nube, el reintento no duplica la venta", async () => {
+      const t = await tienda("pe2");
+      const net = { up: true, dropResponses: false };
+      const { engine } = await conectar(t, net);
+      const cafe = engine.productByBarcode("7461234")!;
+      engine.sell({ type: "E32", lines: [{ productId: cafe.id, quantity: "1" }], payments: [{ method: "CASH", amount: "118.00" }] });
+
+      net.dropResponses = true; // la nube guarda la venta pero la caja no recibe la respuesta
+      const lost = await engine.sync();
+      expect(lost.online).toBe(false);
+      expect(engine.state().pendingSales).toBe(1);
+      expect((await json(await get("/v1/documents", t.cookie))).total).toBe(1);
+
+      net.dropResponses = false;
+      const again = await engine.sync();
+      expect(again.sales).toMatchObject({ uploaded: 0, duplicates: 1, pending: 0 });
+      expect((await json(await get("/v1/documents", t.cookie))).total).toBe(1);
+      expect(await stockOf(t)).toBe("9"); // se descontó una sola vez
+      engine.close();
+    });
+
+    it("recuerda todo al reabrir el programa: ventas pendientes, bloques y sesión", async () => {
+      const t = await tienda("pe3");
+      const file = join(tmpdir(), `pos-${randomUUID()}.sqlite`);
+      const net = { up: true };
+      try {
+        const a = await conectar(t, net, file);
+        const cafe = a.engine.productByBarcode("7461234")!;
+        net.up = false;
+        a.engine.sell({ type: "E32", lines: [{ productId: cafe.id, quantity: "1" }], payments: [{ method: "CASH", amount: "118.00" }] });
+        a.engine.close();
+
+        // "Reinicio": la caja arranca otra vez, sin conexión primero.
+        const b = PosEngine.open({ dbPath: file, fetch: toApp(net), policy });
+        expect(b.state()).toMatchObject({ stage: "ready", pendingSales: 1, signedIn: true, numbers: { E32: 49, E31: 50 } });
+        expect(b.productByBarcode("7461234")?.name).toBe("Cafe 118");
+        const next = b.sell({ type: "E32", lines: [{ productId: cafe.id, quantity: "1" }], payments: [{ method: "CASH", amount: "118.00" }] });
+        expect(next.sale.encf).toBe("E320000000452"); // continúa la numeración, no repite
+
+        net.up = true;
+        expect((await b.sync()).sales).toMatchObject({ uploaded: 2, pending: 0 });
+        expect((await json(await get("/v1/documents", t.cookie))).total).toBe(2);
+        b.close();
+      } finally {
+        await rm(file, { force: true });
+        await rm(`${file}-wal`, { force: true });
+        await rm(`${file}-shm`, { force: true });
+      }
+    });
+
+    it("con la sesión cerrada la caja sigue vendiendo y al iniciar sesión de nuevo sincroniza lo pendiente", async () => {
+      const t = await tienda("pe4");
+      const net = { up: true };
+      const { engine } = await conectar(t, net);
+      const cafe = engine.productByBarcode("7461234")!;
+      await engine.signOut();
+      expect(engine.state().signedIn).toBe(false);
+      engine.sell({ type: "E32", lines: [{ productId: cafe.id, quantity: "1" }], payments: [{ method: "CASH", amount: "118.00" }] });
+      expect(await engine.sync()).toMatchObject({ authRequired: true, sales: { pending: 1 } });
+
+      await engine.signIn({ serverUrl: "http://api.test", email: t.email, password: PASSWORD });
+      expect(engine.state()).toMatchObject({ signedIn: true, stage: "ready", pendingSales: 1 });
+      expect((await engine.sync()).sales).toMatchObject({ uploaded: 1, pending: 0 });
+      // Una contraseña incorrecta no pierde nada.
+      await expect(engine.signIn({ serverUrl: "http://api.test", email: t.email, password: "mala-clave-123" })).rejects.toMatchObject({ status: 401 });
+      expect(engine.state().pendingSales).toBe(0);
+      engine.close();
+    });
+
+    it("al agotarse los números la caja avisa y vuelve a vender cuando la nube entrega otro bloque", async () => {
+      const t = await tienda("pe5");
+      const net = { up: true };
+      const small = { types: ["E32"] as "E32"[], size: 2, low: 1 };
+      const engine = PosEngine.open({ dbPath: ":memory:", fetch: toApp(net), policy: small });
+      const { organizations } = await engine.signIn({ serverUrl: "http://api.test", email: t.email, password: PASSWORD });
+      await engine.selectTerminal({ organization: organizations.find((o) => o.id === t.orgId)!, terminalId: t.terminal.id });
+      const cafe = engine.productByBarcode("7461234")!;
+      const sell = () => engine.sell({ type: "E32", lines: [{ productId: cafe.id, quantity: "1" }], payments: [{ method: "CASH", amount: "118.00" }] });
+      sell();
+      sell();
+      net.up = false;
+      expect(() => sell()).toThrow(/No quedan números de E32/);
+      net.up = true;
+      const sync = await engine.sync(); // sube las 2 y pide un bloque nuevo
+      expect(sync).toMatchObject({ sales: { uploaded: 2 }, blocks: { requested: 1 } });
+      expect(sell().sale.encf).toBe("E320000000497");
+      engine.close();
     });
   });
 
