@@ -106,6 +106,7 @@ model Organization {
   modifierGroups   ModifierGroup[]
   modifiers        Modifier[]
   cashShifts       CashShift[]
+  cashierPins      CashierPin[]
 
   @@map("organization")
 }
@@ -342,6 +343,8 @@ model CompanyProfile {
   environment        EcfEnvironment @default(TEST)
   /// false: no se puede emitir un comprobante si falta existencia de un producto con inventario.
   allowNegativeStock Boolean        @default(true)
+  /// true: una caja solo puede vender con un turno abierto (la app de caja y la emisión en línea con caja lo exigen).
+  requireShift       Boolean        @default(false)
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
   organization       Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -425,6 +428,8 @@ model Document {
   shift                CashShift?       @relation(fields: [shiftId], references: [id], onDelete: NoAction)
   /// Identificador generado por la caja al vender sin conexión: hace idempotente la subida (reintentos sin duplicar).
   clientId             String?          @db.Uuid
+  /// Nota de crédito que devuelve mercancía: al emitirla, las líneas con inventario vuelven a las existencias.
+  returnsStock         Boolean          @default(false)
   referencedDocument   Document?        @relation("Modifies", fields: [referencedDocumentId], references: [id], onDelete: NoAction)
   modifiedBy           Document[]       @relation("Modifies")
   lines                DocumentLine[]
@@ -885,11 +890,28 @@ model CashShift {
   notes          String?
   /// Informe Z congelado al cerrar (JSON con montos como texto).
   closingReport  Json?
+  /// Turno abierto en la app de caja sin conexión: su identificador hace idempotente la sincronización.
+  clientId       String?      @db.Uuid
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   terminal       Terminal     @relation(fields: [terminalId], references: [id], onDelete: NoAction)
   documents      Document[]
 
+  @@unique([organizationId, clientId])
   @@index([organizationId, openedAt])
   @@index([terminalId, status])
   @@map("cash_shift")
+}
+
+/// PIN de un usuario para identificarse en la caja (se verifica sin internet en la propia caja).
+/// Guarda solo el resumen PBKDF2 (`pbkdf2$sha256$iteraciones$sal$hash`), nunca el PIN.
+model CashierPin {
+  id             String       @id @default(uuid(7)) @db.Uuid
+  organizationId String
+  userId         String
+  pinHash        String
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@map("cashier_pin")
 }

@@ -5,3 +5,4 @@ export * from "./totals";
 export * from "./document";
 export * from "./ecf";
 export * from "./purchases";
+export * from "./pin";
