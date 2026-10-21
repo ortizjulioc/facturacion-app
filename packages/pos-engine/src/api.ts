@@ -125,8 +125,18 @@ export class ApiClient {
   blocks(terminalId: string) {
     return this.request<{ data: CloudBlock[] }>("GET", `/v1/sync/sequence-blocks?terminalId=${terminalId}`);
   }
-  requestBlock(terminalId: string, ecfType: "E31" | "E32", size: number) {
+  requestBlock(terminalId: string, ecfType: "E31" | "E32" | "E34", size: number) {
     return this.request<{ data: CloudBlock }>("POST", "/v1/sync/sequence-blocks", { terminalId, ecfType, size });
+  }
+  cashiers() {
+    return this.request<{ data: CashierInfo[] }>("GET", "/v1/sync/cashiers");
+  }
+  putShift(clientId: string, body: unknown) {
+    return this.request<{ data: { id: string; clientId: string; status: string; expectedCash: string | null; difference: string | null } }>(
+      "PUT",
+      `/v1/sync/shifts/${clientId}`,
+      body,
+    );
   }
   uploadSale(payload: unknown) {
     return this.request<{ data: { id: string; encf: string; duplicate: boolean } }>("POST", "/v1/sync/sales", payload);
@@ -166,6 +176,7 @@ export type CatalogResponse = {
       address: string;
       phone: string | null;
       environment: string;
+      requireShift?: boolean;
     } | null;
   };
   cursor: string;
@@ -173,10 +184,13 @@ export type CatalogResponse = {
   serverTime: string;
 };
 
+/** Una persona que puede identificarse en la caja; `pin` es el resumen PBKDF2 (nunca el PIN). */
+export type CashierInfo = { userId: string; name: string; email: string; role: string; pin: string };
+
 export type CloudBlock = {
   id: string;
   terminalId: string;
-  ecfType: "E31" | "E32";
+  ecfType: "E31" | "E32" | "E34";
   fromNumber: number;
   toNumber: number;
   nextNumber: number;

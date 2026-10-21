@@ -1,11 +1,11 @@
 import {
   buyerErrors,
   calculateDocument,
+  DOCUMENT_TYPES,
   formatDop,
   formatEncf,
   fromCents,
   fromMilli,
-  DOCUMENT_TYPES,
   toCents,
   toMilli,
   type DocumentType,
@@ -19,6 +19,7 @@ import { all, one, run, transaction, type Db } from "./store";
 export class SaleError extends Error {}
 
 export type PaymentMethod = "CASH" | "TRANSFER" | "CHECK" | "CARD" | "OTHER";
+export type SaleType = "E31" | "E32" | "E34";
 
 export type SaleInput = {
   type: "E31" | "E32";
@@ -35,13 +36,21 @@ export type SaleInput = {
 export type SalePayload = {
   clientId: string;
   terminalId: string;
-  type: "E31" | "E32";
+  type: SaleType;
   encf: string;
   issuedAt: string;
+  /** Quién vendió (identificado con su PIN). */
+  cashierId: string | null;
+  /** Turno de la caja en el que se vendió. */
+  shiftClientId: string | null;
   customerId: string | null;
   buyer: SaleInput["buyer"] | null;
   propinaLegal: boolean;
   notes: string | null;
+  /** Solo notas de crédito. */
+  referencedEncf?: string | null;
+  modificationCode?: number | null;
+  returnsStock?: boolean;
   lines: {
     productId: string;
     name: string;
@@ -50,6 +59,7 @@ export type SalePayload = {
     tax: string;
     priceIncludesTax: boolean;
   }[];
+  /** En una nota de crédito son el reembolso. */
   payments: { method: PaymentMethod; amount: string }[];
   total: string;
 };
@@ -57,13 +67,15 @@ export type SalePayload = {
 export type LocalSale = {
   id: string;
   encf: string;
-  type: "E31" | "E32";
+  type: SaleType;
   issuedAt: string;
   total: string;
   status: "PENDING" | "SYNCED" | "REJECTED";
   attempts: number;
   lastError: string | null;
   syncedAt: string | null;
+  /** e-NCF que modifica (solo notas de crédito). */
+  refundOf: string | null;
 };
 
 /** Todo lo necesario para imprimir el ticket (sin volver a calcular nada). */
@@ -75,12 +87,22 @@ export type Receipt = {
   lines: { name: string; quantity: string; unitPrice: string; total: string }[];
   totals: { subtotal: string; tax: string; propina: string; total: string };
   payments: { method: PaymentMethod; amount: string }[];
+  cashierName: string | null;
 };
 
-const todayDr = (now: Date) => new Intl.DateTimeFormat("sv-SE", { timeZone: "America/Santo_Domingo" }).format(now);
+export type SaleCtx = {
+  terminalId: string;
+  now?: Date;
+  newId?: () => string;
+  cashierId?: string | null;
+  cashierName?: string | null;
+  shiftId?: string | null;
+};
+
+export const todayDr = (now: Date) => new Intl.DateTimeFormat("sv-SE", { timeZone: "America/Santo_Domingo" }).format(now);
 
 /** Toma el siguiente número del bloque vigente que vence primero. Debe llamarse dentro de una transacción. */
-function takeEncf(db: Db, type: "E31" | "E32", now: Date): string {
+export function takeEncf(db: Db, type: SaleType, now: Date): string {
   const row = one<{ n: number }>(
     db,
     `UPDATE seq_block SET next_number = next_number + 1
@@ -94,11 +116,39 @@ function takeEncf(db: Db, type: "E31" | "E32", now: Date): string {
     todayDr(now),
   );
   if (!row) {
-    throw new SaleError(
-      `No quedan números de ${type} en esta caja. Conéctate a internet para pedir un bloque nuevo.`,
-    );
+    throw new SaleError(`No quedan números de ${type} en esta caja. Conéctate a internet para pedir un bloque nuevo.`);
   }
   return formatEncf(type, BigInt(row.n));
+}
+
+const lineInputOf = (l: SalePayload["lines"][number]): LineInput => ({
+  unitPrice: toCents(l.unitPrice),
+  quantity: toMilli(l.quantity),
+  tax: l.tax as TaxCode,
+  priceIncludesTax: l.priceIncludesTax,
+});
+
+/** Totales de un comprobante, con el mismo motor que usa la nube. */
+export const totalsOfPayload = (payload: Pick<SalePayload, "lines" | "propinaLegal">) =>
+  calculateDocument({ lines: payload.lines.map(lineInputOf), propinaLegal: payload.propinaLegal });
+
+/** Guarda una venta (o nota de crédito) ya validada, con su e-NCF, dentro de la transacción del llamador. */
+export function insertSale(db: Db, ctx: SaleCtx, payload: SalePayload, createdAt: Date) {
+  run(
+    db,
+    `INSERT INTO sale (id, encf, type, issued_at, total_cents, payload, status, created_at, shift_id, cashier_id, refund_of)
+     VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)`,
+    payload.clientId,
+    payload.encf,
+    payload.type,
+    payload.issuedAt,
+    Number(toCents(payload.total)),
+    JSON.stringify(payload),
+    createdAt.toISOString(),
+    ctx.shiftId ?? null,
+    payload.cashierId,
+    payload.referencedEncf ?? null,
+  );
 }
 
 /**
@@ -106,11 +156,7 @@ function takeEncf(db: Db, type: "E31" | "E32", now: Date): string {
  * comprador y los pagos, toma el e-NCF del bloque local y deja la venta lista para subirse. Todo en UNA transacción:
  * si algo falla no se gasta ningún número.
  */
-export function createSale(
-  db: Db,
-  ctx: { terminalId: string; now?: Date; newId?: () => string },
-  input: SaleInput,
-): Receipt {
+export function createSale(db: Db, ctx: SaleCtx, input: SaleInput): Receipt {
   const now = ctx.now ?? new Date();
   const id = (ctx.newId ?? (() => crypto.randomUUID()))();
 
@@ -130,14 +176,16 @@ export function createSale(
     if (!p.allowsDecimals && qty % 1000n !== 0n) throw new SaleError(`"${p.name}" no se vende en fracciones`);
     return { p, qty };
   });
-  const lineInputs: LineInput[] = resolved.map(({ p, qty }) => ({
-    unitPrice: BigInt(p.priceCents),
-    quantity: qty,
-    tax: p.tax as TaxCode,
+  const lines: SalePayload["lines"] = resolved.map(({ p, qty }) => ({
+    productId: p.id,
+    name: p.name,
+    quantity: fromMilli(qty),
+    unitPrice: fromCents(BigInt(p.priceCents)),
+    tax: p.tax,
     priceIncludesTax: p.priceIncludesTax,
   }));
   const propinaLegal = input.propinaLegal ?? false;
-  const totals = calculateDocument({ lines: lineInputs, propinaLegal });
+  const totals = totalsOfPayload({ lines, propinaLegal });
   if (totals.total <= 0n) throw new SaleError("El total debe ser mayor que cero");
 
   // Comprador.
@@ -146,28 +194,17 @@ export function createSale(
   const buyer = customer
     ? {
         name: customer.name,
-        docType: customer.documentType && (DOCUMENT_TYPES as readonly string[]).includes(customer.documentType) ? (customer.documentType as DocumentType) : null,
+        docType:
+          customer.documentType && (DOCUMENT_TYPES as readonly string[]).includes(customer.documentType)
+            ? (customer.documentType as DocumentType)
+            : null,
         docNumber: customer.documentNumber,
       }
     : { name: input.buyer?.name ?? null, docType: input.buyer?.docType ?? null, docNumber: input.buyer?.docNumber ?? null };
   const [problem] = buyerErrors(input.type, totals.total, { docType: buyer.docType, docNumber: buyer.docNumber });
   if (problem) throw new SaleError(problem);
 
-  // Pagos: deben sumar el total.
-  let paid = 0n;
-  for (const p of input.payments) {
-    let amount: bigint;
-    try {
-      amount = toCents(p.amount);
-    } catch {
-      throw new SaleError("Un monto de pago es inválido");
-    }
-    if (amount <= 0n) throw new SaleError("Los pagos deben ser mayores que cero");
-    paid += amount;
-  }
-  if (paid !== totals.total) {
-    throw new SaleError(`Los pagos (${formatDop(paid)}) deben sumar el total (${formatDop(totals.total)})`);
-  }
+  const payments = checkPayments(input.payments, totals.total, "Los pagos");
 
   return transaction(db, () => {
     const encf = takeEncf(db, input.type, now);
@@ -177,77 +214,52 @@ export function createSale(
       type: input.type,
       encf,
       issuedAt: now.toISOString(),
+      cashierId: ctx.cashierId ?? null,
+      shiftClientId: ctx.shiftId ?? null,
       customerId: customer?.id ?? null,
       buyer: customer ? null : (input.buyer ?? null),
       propinaLegal,
       notes: input.notes ?? null,
-      lines: resolved.map(({ p, qty }) => ({
-        productId: p.id,
-        name: p.name,
-        quantity: fromMilli(qty),
-        unitPrice: fromCents(BigInt(p.priceCents)),
-        tax: p.tax,
-        priceIncludesTax: p.priceIncludesTax,
-      })),
-      payments: input.payments.map((p) => ({ method: p.method, amount: fromCents(toCents(p.amount)) })),
+      lines,
+      payments,
       total: fromCents(totals.total),
     };
-    run(
-      db,
-      `INSERT INTO sale (id, encf, type, issued_at, total_cents, payload, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?)`,
-      id,
-      encf,
-      input.type,
-      payload.issuedAt,
-      Number(totals.total),
-      JSON.stringify(payload),
-      now.toISOString(),
-    );
-    return receiptOf(db, id, totals, buyer, payload);
+    insertSale(db, ctx, payload, now);
+    return receiptOf(db, id, buyer, ctx.cashierName ?? null);
   });
 }
 
-type Totals = ReturnType<typeof calculateDocument>;
-
-function receiptOf(
-  db: Db,
-  id: string,
-  totals: Totals,
-  buyer: { name: string | null; docNumber: string | null },
-  payload: SalePayload,
-): Receipt {
-  const sale = getSale(db, id)!;
-  return {
-    sale,
-    company: getCompany(db),
-    buyerName: buyer.name,
-    buyerDoc: buyer.docNumber,
-    lines: totals.lines.map((l, i) => ({
-      name: payload.lines[i]!.name,
-      quantity: payload.lines[i]!.quantity,
-      unitPrice: payload.lines[i]!.unitPrice,
-      total: fromCents(l.total),
-    })),
-    totals: {
-      subtotal: fromCents(totals.subtotal),
-      tax: fromCents(totals.totalTax),
-      propina: fromCents(totals.propinaLegal),
-      total: fromCents(totals.total),
-    },
-    payments: payload.payments,
-  };
+/** Valida los montos de pago (positivos y que sumen el total) y los normaliza a "123.45". */
+export function checkPayments(input: SaleInput["payments"], total: bigint, label: string) {
+  let paid = 0n;
+  const out = input.map((p) => {
+    let amount: bigint;
+    try {
+      amount = toCents(p.amount);
+    } catch {
+      throw new SaleError("Un monto de pago es inválido");
+    }
+    if (amount <= 0n) throw new SaleError(`${label} deben ser mayores que cero`);
+    paid += amount;
+    return { method: p.method, amount: fromCents(amount) };
+  });
+  if (paid !== total) {
+    throw new SaleError(`${label} (${formatDop(paid)}) deben sumar el total (${formatDop(total)})`);
+  }
+  return out;
 }
 
 type SaleRow = {
   id: string;
   encf: string;
-  type: "E31" | "E32";
+  type: SaleType;
   issued_at: string;
   total_cents: number;
   status: "PENDING" | "SYNCED" | "REJECTED";
   attempts: number;
   last_error: string | null;
   synced_at: string | null;
+  refund_of: string | null;
 };
 const saleOf = (r: SaleRow): LocalSale => ({
   id: r.id,
@@ -259,6 +271,7 @@ const saleOf = (r: SaleRow): LocalSale => ({
   attempts: r.attempts,
   lastError: r.last_error,
   syncedAt: r.synced_at,
+  refundOf: r.refund_of,
 });
 
 export function getSale(db: Db, id: string): LocalSale | null {
@@ -276,31 +289,48 @@ export function listSales(db: Db, opts: { status?: LocalSale["status"]; limit?: 
   ).map(saleOf);
 }
 
-/** El comprobante tal como se imprimió, reconstruido desde lo guardado (para reimprimir). */
-export function receiptOfSale(db: Db, id: string): Receipt | null {
-  const row = one<{ payload: string }>(db, "SELECT payload FROM sale WHERE id = ?", id);
-  if (!row) return null;
-  const payload = JSON.parse(row.payload) as SalePayload;
-  const totals = calculateDocument({
-    lines: payload.lines.map((l) => ({
-      unitPrice: toCents(l.unitPrice),
-      quantity: toMilli(l.quantity),
-      tax: l.tax as TaxCode,
-      priceIncludesTax: l.priceIncludesTax,
-    })),
-    propinaLegal: payload.propinaLegal,
-  });
-  const customer = payload.customerId ? getCustomer(db, payload.customerId) : null;
-  return receiptOf(
-    db,
-    id,
-    totals,
-    { name: customer?.name ?? payload.buyer?.name ?? null, docNumber: customer?.documentNumber ?? payload.buyer?.docNumber ?? null },
-    payload,
-  );
-}
-
 export const salePayload = (db: Db, id: string): SalePayload | null => {
   const row = one<{ payload: string }>(db, "SELECT payload FROM sale WHERE id = ?", id);
   return row ? (JSON.parse(row.payload) as SalePayload) : null;
 };
+
+/** El comprobante tal como se imprimió, reconstruido desde lo guardado (para reimprimir). */
+export function receiptOfSale(db: Db, id: string): Receipt | null {
+  const payload = salePayload(db, id);
+  if (!payload) return null;
+  const customer = payload.customerId ? getCustomer(db, payload.customerId) : null;
+  const cashier = payload.cashierId
+    ? one<{ name: string }>(db, "SELECT name FROM cashier WHERE user_id = ?", payload.cashierId)
+    : undefined;
+  return receiptOf(
+    db,
+    id,
+    { name: customer?.name ?? payload.buyer?.name ?? null, docNumber: customer?.documentNumber ?? payload.buyer?.docNumber ?? null },
+    cashier?.name ?? null,
+  );
+}
+
+function receiptOf(db: Db, id: string, buyer: { name: string | null; docNumber: string | null }, cashierName: string | null): Receipt {
+  const payload = salePayload(db, id)!;
+  const totals = totalsOfPayload(payload);
+  return {
+    sale: getSale(db, id)!,
+    company: getCompany(db),
+    buyerName: buyer.name,
+    buyerDoc: buyer.docNumber,
+    lines: totals.lines.map((l, i) => ({
+      name: payload.lines[i]!.name,
+      quantity: payload.lines[i]!.quantity,
+      unitPrice: payload.lines[i]!.unitPrice,
+      total: fromCents(l.total),
+    })),
+    totals: {
+      subtotal: fromCents(totals.subtotal),
+      tax: fromCents(totals.totalTax),
+      propina: fromCents(totals.propinaLegal),
+      total: fromCents(totals.total),
+    },
+    payments: payload.payments,
+    cashierName,
+  };
+}

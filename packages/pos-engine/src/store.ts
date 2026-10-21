@@ -72,6 +72,41 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX sale_status ON sale (status, created_at);
   `,
+  /* 2: cajeros con PIN, turnos de la caja y notas de crédito */ `
+  -- Quienes pueden identificarse en esta caja (con el resumen del PIN, que se verifica sin internet).
+  CREATE TABLE cashier (
+    user_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    role TEXT NOT NULL,
+    pin_hash TEXT NOT NULL
+  );
+
+  -- Turnos. 'id' es el clientId que se sube a la nube. Solo puede haber UNO abierto en esta caja.
+  CREATE TABLE shift (
+    id TEXT PRIMARY KEY,
+    opened_at TEXT NOT NULL,
+    opened_by TEXT,
+    opening_cents INTEGER NOT NULL CHECK (opening_cents >= 0),
+    closed_at TEXT,
+    closed_by TEXT,
+    counted_cents INTEGER,
+    expected_cents INTEGER,
+    difference_cents INTEGER,
+    notes TEXT,
+    open_synced INTEGER NOT NULL DEFAULT 0,
+    close_synced INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    CHECK ((closed_at IS NULL) = (counted_cents IS NULL))
+  );
+  CREATE UNIQUE INDEX shift_one_open ON shift ((closed_at IS NULL)) WHERE closed_at IS NULL;
+
+  ALTER TABLE sale ADD COLUMN shift_id TEXT REFERENCES shift (id);
+  ALTER TABLE sale ADD COLUMN cashier_id TEXT;
+  -- Solo notas de crédito: e-NCF del comprobante que modifican.
+  ALTER TABLE sale ADD COLUMN refund_of TEXT;
+  CREATE INDEX sale_shift ON sale (shift_id);
+  CREATE INDEX sale_refund ON sale (refund_of);
+  `,
 ];
 
 export function openDb(path: string): Db {

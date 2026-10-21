@@ -1,6 +1,9 @@
 import { ApiClient, ApiError, type FetchLike } from "./api";
 import { categories, getCompany, productByBarcode, productCount, searchCustomers, searchProducts, type Company } from "./catalog";
-import { createSale, getSale, listSales, receiptOfSale, SaleError, type LocalSale, type Receipt, type SaleInput } from "./sales";
+import { cashierCount, cashiers, PinGate, type Cashier } from "./cashiers";
+import { createRefund, returnableLines, type RefundInput } from "./refunds";
+import { createSale, getSale, listSales, receiptOfSale, SaleError, type LocalSale, type Receipt, type SaleCtx, type SaleInput } from "./sales";
+import { closeShift, currentShift, listShifts, openShift, reportOfShift, type LocalShift, type ShiftReport } from "./shifts";
 import { blocksOverview, DEFAULT_POLICY, runSync, type BlockPolicy, type SyncReport } from "./sync";
 import { getMeta, one, openDb, run, setMeta, transaction, type Db } from "./store";
 
@@ -32,9 +35,21 @@ export type PosState = {
   pendingSales: number;
   rejectedSales: number;
   products: number;
-  /** Números de e-NCF que quedan por tipo. */
-  numbers: { E31: number; E32: number };
+  /** Números de e-NCF que quedan por tipo (E34 = notas de crédito). */
+  numbers: { E31: number; E32: number; E34: number };
   company: Company | null;
+  /** Hay cajeros con PIN: para vender hay que identificarse. Sin cajeros con PIN, la caja no pide nada. */
+  pinRequired: boolean;
+  /** Quién está identificado ahora (null = bloqueada, o sin PIN configurado). */
+  cashier: Cashier | null;
+  /** Pide identificarse y nadie lo ha hecho. */
+  locked: boolean;
+  /** Turno abierto en esta caja. */
+  shift: LocalShift | null;
+  /** La empresa exige un turno abierto para vender. */
+  requireShift: boolean;
+  /** Turnos que la nube no aceptó (con su motivo). */
+  shiftErrors: string[];
 };
 
 const identityBox: SecretBox = { encrypt: (s) => s, decrypt: (s) => s };
@@ -48,8 +63,11 @@ const json = <T>(raw: string | null): T | null => (raw ? (JSON.parse(raw) as T) 
 export class PosEngine {
   readonly db: Db;
   private api: ApiClient | null = null;
+  private active: Cashier | null = null;
+  private readonly gate: PinGate;
   private constructor(private readonly opts: EngineOptions) {
     this.db = openDb(opts.dbPath);
+    this.gate = new PinGate(this.db);
   }
 
   static open(opts: EngineOptions) {
@@ -99,7 +117,15 @@ export class PosEngine {
     const blocks = blocksOverview(this.db, now).filter((b) => b.expiresAt >= today);
     const left = (t: string) => blocks.filter((b) => b.type === t).reduce((s, b) => s + b.remaining, 0);
     const count = (status: string) => one<{ n: number }>(this.db, "SELECT COUNT(*) AS n FROM sale WHERE status = ?", status)?.n ?? 0;
+    const pinRequired = cashierCount(this.db) > 0;
+    const company = getCompany(this.db);
     return {
+      pinRequired,
+      cashier: this.active,
+      locked: pinRequired && !this.active,
+      shift: currentShift(this.db),
+      requireShift: company?.requireShift ?? false,
+      shiftErrors: listShifts(this.db, 20).flatMap((sh) => (sh.syncError ? [sh.syncError] : [])),
       stage: terminal ? "ready" : "setup",
       serverUrl: getMeta(this.db, "server_url"),
       user: json(getMeta(this.db, "user")),
@@ -110,8 +136,8 @@ export class PosEngine {
       pendingSales: count("PENDING"),
       rejectedSales: count("REJECTED"),
       products: productCount(this.db),
-      numbers: { E31: left("E31"), E32: left("E32") },
-      company: getCompany(this.db),
+      numbers: { E31: left("E31"), E32: left("E32"), E34: left("E34") },
+      company,
     };
   }
 
@@ -171,7 +197,7 @@ export class PosEngine {
   /** Borra lo bajado de la nube (catálogos y bloques); conserva el historial de ventas. */
   private wipeCloudData() {
     transaction(this.db, () => {
-      for (const t of ["product", "customer", "category", "seq_block"]) run(this.db, `DELETE FROM ${t}`);
+      for (const t of ["product", "customer", "category", "seq_block", "cashier"]) run(this.db, `DELETE FROM ${t}`);
       setMeta(this.db, "catalog_cursor", null);
       setMeta(this.db, "company", null);
     });
@@ -184,6 +210,7 @@ export class PosEngine {
       // sin conexión: igual se descarta la sesión local
     }
     setMeta(this.db, "session_cookie", null);
+    this.active = null;
     this.api = this.makeApi(getMeta(this.db, "server_url") ?? "http://localhost", null);
   }
 
@@ -202,6 +229,7 @@ export class PosEngine {
         online: true,
         authRequired: true,
         catalog: null,
+        shiftErrors: [],
         blocks: { requested: 0, error: null },
         sales: { uploaded: 0, duplicates: 0, rejected: 0, pending: this.state().pendingSales },
         error: "Inicia sesión para sincronizar",
@@ -230,10 +258,76 @@ export class PosEngine {
     return categories(this.db);
   }
 
-  sell(input: SaleInput): Receipt {
+  // ───────────── Cajeros (PIN) ─────────────
+
+  cashiers() {
+    return cashiers(this.db);
+  }
+
+  /** Se identifica con el PIN. Funciona sin internet: el resumen del PIN está en la caja. */
+  async unlock(userId: string, pin: string): Promise<Cashier> {
+    this.active = await this.gate.verify(userId, pin, this.now().getTime());
+    return this.active;
+  }
+  lock() {
+    this.active = null;
+  }
+
+  /** Contexto de quien vende: el cajero identificado, o (si la empresa no usa PIN) el usuario de la sesión. */
+  private saleCtx(): SaleCtx {
     const terminal = json<{ id: string }>(getMeta(this.db, "terminal"));
     if (!terminal) throw new SaleError("Esta caja aún no está configurada");
-    return createSale(this.db, { terminalId: terminal.id, now: this.now(), newId: this.opts.newId }, input);
+    if (this.state().locked) throw new SaleError("Identifícate con tu PIN para continuar");
+    const user = json<{ id: string; name: string }>(getMeta(this.db, "user"));
+    return {
+      terminalId: terminal.id,
+      now: this.now(),
+      newId: this.opts.newId,
+      cashierId: this.active?.userId ?? user?.id ?? null,
+      cashierName: this.active?.name ?? user?.name ?? null,
+      shiftId: currentShift(this.db)?.id ?? null,
+    };
+  }
+
+  /** Una caja con turno obligatorio no vende (ni devuelve) sin un turno abierto. */
+  private requireOpenShift(ctx: SaleCtx) {
+    if (!ctx.shiftId && (getCompany(this.db)?.requireShift ?? false)) {
+      throw new SaleError("Abre un turno para poder vender");
+    }
+  }
+
+  sell(input: SaleInput): Receipt {
+    const ctx = this.saleCtx();
+    this.requireOpenShift(ctx);
+    return createSale(this.db, ctx, input);
+  }
+
+  // ───────────── Devoluciones ─────────────
+
+  /** Líneas de una venta con lo que ya se devolvió y lo que falta. */
+  returnable(saleId: string) {
+    return returnableLines(this.db, saleId);
+  }
+  refund(input: RefundInput): Receipt {
+    const ctx = this.saleCtx();
+    this.requireOpenShift(ctx);
+    return createRefund(this.db, ctx, input);
+  }
+
+  // ───────────── Turnos ─────────────
+
+  openShift(openingAmount: string): LocalShift {
+    return openShift(this.db, this.saleCtx(), openingAmount);
+  }
+  closeShift(input: { countedCash: string; notes?: string | null }): { shift: LocalShift; report: ShiftReport } {
+    return closeShift(this.db, this.saleCtx(), input);
+  }
+  shifts() {
+    return listShifts(this.db);
+  }
+  shiftReport(id?: string) {
+    const target = id ?? currentShift(this.db)?.id;
+    return target ? reportOfShift(this.db, target) : null;
   }
 
   sales(opts?: { status?: LocalSale["status"]; limit?: number }) {
@@ -248,3 +342,4 @@ export class PosEngine {
 }
 
 export { ApiError };
+export type { RefundInput };
