@@ -4432,7 +4432,7 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       ((await json(await get(`/v1/inventory/stock?branchId=${t.branch.id}`, t.cookie))).data as Json[]).find((s) => s.productId === t.producto.id)?.quantity;
 
     it("configura la caja, vende sin internet y sube las ventas al volver la conexión", async () => {
-      const t = await tienda("pe1");
+      const t = await tienda("cajaoff1");
       const net = { up: true };
       const { engine, first } = await conectar(t, net);
 
@@ -4481,7 +4481,7 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     });
 
     it("si se pierde la respuesta de la nube, el reintento no duplica la venta", async () => {
-      const t = await tienda("pe2");
+      const t = await tienda("cajaoff2");
       const net = { up: true, dropResponses: false };
       const { engine } = await conectar(t, net);
       const cafe = engine.productByBarcode("7461234")!;
@@ -4502,7 +4502,7 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     });
 
     it("recuerda todo al reabrir el programa: ventas pendientes, bloques y sesión", async () => {
-      const t = await tienda("pe3");
+      const t = await tienda("cajaoff3");
       const file = join(tmpdir(), `pos-${randomUUID()}.sqlite`);
       const net = { up: true };
       try {
@@ -4531,7 +4531,7 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     });
 
     it("con la sesión cerrada la caja sigue vendiendo y al iniciar sesión de nuevo sincroniza lo pendiente", async () => {
-      const t = await tienda("pe4");
+      const t = await tienda("cajaoff4");
       const net = { up: true };
       const { engine } = await conectar(t, net);
       const cafe = engine.productByBarcode("7461234")!;
@@ -4550,7 +4550,7 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     });
 
     it("al agotarse los números la caja avisa y vuelve a vender cuando la nube entrega otro bloque", async () => {
-      const t = await tienda("pe5");
+      const t = await tienda("cajaoff5");
       const net = { up: true };
       const small = { types: ["E32"] as "E32"[], size: 2, low: 1 };
       const engine = PosEngine.open({ dbPath: ":memory:", fetch: toApp(net), policy: small });
