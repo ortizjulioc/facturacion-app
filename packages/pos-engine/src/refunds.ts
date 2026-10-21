@@ -21,6 +21,8 @@ export type ReturnableLine = {
   productId: string;
   name: string;
   unitPrice: string;
+  tax: string;
+  priceIncludesTax: boolean;
   sold: string;
   returned: string;
   remaining: string;
@@ -48,7 +50,10 @@ function creditNotesOf(db: Db, encf: string): SalePayload[] {
 }
 
 /** Qué se puede devolver de una venta, línea por línea. */
-export function returnableLines(db: Db, saleId: string): { encf: string; lines: ReturnableLine[]; hasCredit: boolean } {
+export function returnableLines(
+  db: Db,
+  saleId: string,
+): { encf: string; propinaLegal: boolean; lines: ReturnableLine[]; hasCredit: boolean } {
   const payload = salePayload(db, saleId);
   if (!payload || payload.type === "E34") throw new SaleError("Esa venta no se puede devolver");
   const returned = new Map<string, bigint>();
@@ -68,12 +73,14 @@ export function returnableLines(db: Db, saleId: string): { encf: string; lines: 
       productId: l.productId,
       name: l.name,
       unitPrice: l.unitPrice,
+      tax: l.tax,
+      priceIncludesTax: l.priceIncludesTax,
       sold: fromMilli(sold),
       returned: fromMilli(done),
       remaining: fromMilli(sold - done),
     };
   });
-  return { encf: payload.encf, lines, hasCredit: notes.length > 0 };
+  return { encf: payload.encf, propinaLegal: payload.propinaLegal, lines, hasCredit: notes.length > 0 };
 }
 
 /**

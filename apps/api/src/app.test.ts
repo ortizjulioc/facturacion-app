@@ -4412,7 +4412,7 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
 
     /** Empresa con caja, producto con código de barras e inventario, y un cliente con RNC. */
     async function tienda(label: string) {
-      const b = await billing(label, { seqs: [["E32", 1, 500], ["E31", 1, 100]] });
+      const b = await billing(label, { seqs: [["E32", 1, 500], ["E31", 1, 100], ["E34", 1, 100]] });
       const t = (await json(await post("/v1/terminals", { branchId: b.branch.id, name: "Caja 1", code: "C1" }, b.cookie))).data as Json;
       const producto = (await json(await post("/v1/products", { name: "Cafe 118", price: "118.00", barcode: "7461234", trackInventory: true }, b.cookie))).data as Json;
       await post("/v1/inventory/receipts", { productId: producto.id, branchId: b.branch.id, quantity: "10" }, b.cookie);
@@ -4569,6 +4569,102 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       expect(sell().sale.encf).toBe("E320000000497");
       engine.close();
     });
+    it("PIN, turno y devolución: todo se hace sin internet y la nube lo recibe completo y en orden", async () => {
+      const t = await tienda("cajaoff6");
+      const put = (path: string, body: unknown, cookie: string) => call(path, { method: "PUT", body: JSON.stringify(body), cookie });
+      // La nube: PIN del dueño y de una cajera.
+      const ana = await signUp("cajaoff6a");
+      await prisma.member.create({ data: { id: randomUUID(), organizationId: t.orgId, userId: ana.userId, role: "member" } });
+      const anaCookie = await setActive(t.orgId, ana.cookie);
+      expect((await put("/v1/pins/me", { pin: "2580" }, t.cookie)).status).toBe(204);
+      expect((await put("/v1/pins/me", { pin: "4096" }, anaCookie)).status).toBe(204);
+
+      const net = { up: true };
+      const engine = PosEngine.open({ dbPath: ":memory:", fetch: toApp(net), policy: { types: ["E32", "E34"], size: 50, low: 10 } });
+      const { organizations } = await engine.signIn({ serverUrl: "http://api.test", email: t.email, password: PASSWORD });
+      await engine.selectTerminal({ organization: organizations.find((o) => o.id === t.orgId)!, terminalId: t.terminal.id });
+
+      // Con PIN configurado la caja está bloqueada hasta identificarse.
+      expect(engine.state()).toMatchObject({ pinRequired: true, locked: true, cashier: null });
+      expect(engine.cashiers().map((c) => c.name).sort()).toEqual(["Usuario cajaoff6", "Usuario cajaoff6a"]);
+      const cafe = engine.productByBarcode("7461234")!;
+      const line = { productId: cafe.id, quantity: "2" };
+      expect(() => engine.sell({ type: "E32", lines: [line], payments: [{ method: "CASH", amount: "236.00" }] })).toThrow(/Identifícate/);
+
+      // Sin internet: PIN equivocado, PIN correcto, turno, venta, devolución y cierre.
+      net.up = false;
+      await expect(engine.unlock(ana.userId, "0000")).rejects.toThrow("PIN incorrecto");
+      expect((await engine.unlock(ana.userId, "4096")).name).toBe("Usuario cajaoff6a");
+      expect(engine.state()).toMatchObject({ locked: false, cashier: { userId: ana.userId } });
+
+      const shift = engine.openShift("1000");
+      const sale = engine.sell({ type: "E32", lines: [line], payments: [{ method: "CASH", amount: "236.00" }] });
+      expect(sale.cashierName).toBe("Usuario cajaoff6a");
+      const refund = engine.refund({ saleId: sale.sale.id, items: [{ index: 0, quantity: "1" }], method: "CASH" });
+      expect(refund.sale).toMatchObject({ type: "E34", encf: "E340000000051", refundOf: sale.sale.encf, total: "118.00" });
+      const closed = engine.closeShift({ countedCash: "1118.00" }); // 1000 + 236 − 118
+      expect(closed.report).toMatchObject({ expectedCash: "1118.00", difference: "0.00", credits: "118.00", net: "118.00" });
+      engine.lock();
+      expect(() => engine.sell({ type: "E32", lines: [line], payments: [{ method: "CASH", amount: "236.00" }] })).toThrow(/Identifícate/);
+
+      // Vuelve internet: sube el turno, la venta, la nota de crédito y el cierre.
+      net.up = true;
+      const report = await engine.sync();
+      expect(report).toMatchObject({ online: true, error: null, shiftErrors: [], sales: { uploaded: 2, pending: 0 } });
+
+      const cloudShift = ((await json(await get("/v1/shifts", t.cookie))).data as Json[])[0]!;
+      expect(cloudShift).toMatchObject({ status: "CLOSED", openingAmount: "1000.00", expectedCash: "1118.00", countedCash: "1118.00", difference: "0.00" });
+      expect(cloudShift.openedBy.id).toBe(ana.userId);
+      const detail = (await json(await get(`/v1/shifts/${cloudShift.id}`, t.cookie))).data;
+      expect(detail.report).toMatchObject({ documents: 2, credits: "118.00", net: "118.00", payments: { CASH: "118.00" } });
+
+      const docs = (await json(await get("/v1/documents?pageSize=10", t.cookie))).data as Json[];
+      expect(docs.map((d) => d.type).sort()).toEqual(["E32", "E34"]);
+      const nc = docs.find((d) => d.type === "E34")!;
+      expect(nc).toMatchObject({ referencedEncf: sale.sale.encf, total: "118.00" });
+      const owners = await withTenant(prisma, t.orgId).document.findMany({ select: { type: true, createdById: true, shiftId: true, returnsStock: true } });
+      expect(owners.every((d) => d.createdById === ana.userId && d.shiftId === cloudShift.id)).toBe(true);
+      expect(owners.find((d) => d.type === "E34")!.returnsStock).toBe(true);
+      expect(await stockOf(t)).toBe("9"); // 10 − 2 vendidos + 1 devuelto
+
+      // Una segunda ronda no repite nada.
+      expect((await engine.sync()).sales).toMatchObject({ uploaded: 0, duplicates: 0, pending: 0 });
+      expect(engine.shifts()[0]).toMatchObject({ synced: true });
+
+      // La empresa exige turno: la caja no vende sin uno abierto.
+      await send("PUT", "/v1/company", { rnc: "1-01-00157-7", legalName: "Empresa de Prueba SRL", address: "Calle Principal 1, Santo Domingo", environment: "TEST", requireShift: true }, t.cookie);
+      await engine.sync();
+      await engine.unlock(ana.userId, "4096");
+      expect(engine.state().requireShift).toBe(true);
+      expect(() => engine.sell({ type: "E32", lines: [line], payments: [{ method: "CASH", amount: "236.00" }] })).toThrow(/Abre un turno/);
+      engine.openShift("0");
+      expect(engine.sell({ type: "E32", lines: [line], payments: [{ method: "CASH", amount: "236.00" }] }).sale.status).toBe("PENDING");
+      expect(shift.id).toBeTruthy();
+      engine.close();
+    });
+
+    it("la cajera ve solo su propio PIN al sincronizar, y una venta de otra persona se atribuye a quien se identificó", async () => {
+      const t = await tienda("cajaoff7");
+      const ana = await signUp("cajaoff7a");
+      await prisma.member.create({ data: { id: randomUUID(), organizationId: t.orgId, userId: ana.userId, role: "member" } });
+      const anaCookie = await setActive(t.orgId, ana.cookie);
+      await call("/v1/pins/me", { method: "PUT", body: JSON.stringify({ pin: "4096" }), cookie: anaCookie });
+      await call("/v1/pins/me", { method: "PUT", body: JSON.stringify({ pin: "2580" }), cookie: t.cookie });
+
+      // La caja se configura con la cuenta de la cajera: solo conoce su PIN.
+      const net = { up: true };
+      const engine = PosEngine.open({ dbPath: ":memory:", fetch: toApp(net), policy: { types: ["E32"], size: 10, low: 2 } });
+      await engine.signIn({ serverUrl: "http://api.test", email: `cajaoff7a-${tag}@example.com`, password: PASSWORD });
+      await engine.selectTerminal({ organization: { id: t.orgId, name: "x" }, terminalId: t.terminal.id });
+      expect(engine.cashiers().map((c) => c.userId)).toEqual([ana.userId]);
+      await engine.unlock(ana.userId, "4096");
+      const cafe = engine.productByBarcode("7461234")!;
+      engine.sell({ type: "E32", lines: [{ productId: cafe.id, quantity: "1" }], payments: [{ method: "CASH", amount: "118.00" }] });
+      expect((await engine.sync()).sales.uploaded).toBe(1);
+      expect((await withTenant(prisma, t.orgId).document.findMany({ select: { createdById: true } }))[0]!.createdById).toBe(ana.userId);
+      engine.close();
+    });
+
   });
 
   // ───────────── Caja: PIN, turnos y devoluciones ─────────────
