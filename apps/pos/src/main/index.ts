@@ -91,6 +91,23 @@ function register() {
     sales: (opts) => engine.sales(opts),
     receipt: (id) => engine.receipt(id),
     retrySale: (id) => engine.retrySale(id),
+    cashiers: () => engine.cashiers(),
+    unlock: (userId, pin) => engine.unlock(userId, pin),
+    lock: () => engine.lock(),
+    returnable: (saleId) => engine.returnable(saleId),
+    refund: (input) => {
+      const receipt = engine.refund(input);
+      void syncOnce().then(notify, () => undefined);
+      return receipt;
+    },
+    openShift: (amount) => engine.openShift(amount),
+    closeShift: (input) => {
+      const result = engine.closeShift(input);
+      void syncOnce().then(notify, () => undefined); // sube el cierre en cuanto hay conexión
+      return result;
+    },
+    shifts: () => engine.shifts(),
+    shiftReport: (id) => engine.shiftReport(id),
   };
 
   for (const name of METHODS) {

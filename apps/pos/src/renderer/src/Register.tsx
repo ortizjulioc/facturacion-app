@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { calculateDocument, formatDop, fromCents, toCents, toMilli, type TaxCode } from "@facturacion/core";
-import type { LocalCustomer, LocalProduct, LocalSale, PosState, Receipt, SaleInput } from "../../shared/api";
+import type { LocalCustomer, LocalProduct, LocalSale, LocalShift, PosState, Receipt, SaleInput, ShiftReport } from "../../shared/api";
 import { ReconnectModal } from "./Reconnect";
+import { RefundModal } from "./Refund";
+import { CloseShiftModal, OpenShiftModal, ShiftReportModal, ShiftReportView } from "./Shifts";
 import { Receipt as ReceiptView } from "./Receipt";
 import { errorOf, Field, Modal } from "./ui";
 
@@ -29,7 +31,9 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
   const [customer, setCustomer] = useState<LocalCustomer | null>(null);
   const [propina, setPropina] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const [modal, setModal] = useState<null | "pay" | "customer" | "sales" | "reconnect">(null);
+  const [modal, setModal] = useState<null | "pay" | "customer" | "sales" | "reconnect" | "openShift" | "closeShift" | "xreport" | "refund">(null);
+  const [refundSale, setRefundSale] = useState<LocalSale | undefined>(undefined);
+  const [zReport, setZReport] = useState<{ shift: LocalShift; report: ShiftReport } | null>(null);
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [syncing, setSyncing] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -129,21 +133,39 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
       <header className="topbar">
         <div className="brand">
           <strong>{state.company?.tradeName ?? state.company?.legalName ?? state.organization?.name}</strong>
-          <span className="muted">{state.terminal?.name} · {state.user?.name}</span>
+          <span className="muted">{state.terminal?.name} · {state.cashier?.name ?? state.user?.name}</span>
         </div>
         <div className="statuses">
           <span className={`badge ${online ? "ok" : "warn"}`} title={lastSync ? `Última sincronización: ${new Date(lastSync.at).toLocaleString("es-DO")}` : "Aún no se ha sincronizado"}>
             {!state.signedIn ? "Sin sesión" : online ? "En línea" : "Sin conexión"}
           </span>
+          {state.shift ? (
+            <span className="badge ok" title={`Abierto por ${state.shift.openedBy.name ?? "—"}`}>Turno abierto {new Date(state.shift.openedAt).toLocaleTimeString("es-DO", { hour: "2-digit", minute: "2-digit" })}</span>
+          ) : (
+            <span className={`badge ${state.requireShift ? "bad" : ""}`}>Sin turno</span>
+          )}
           {state.pendingSales > 0 && <span className="badge warn">{state.pendingSales} por subir</span>}
+          {state.shiftErrors.length > 0 && <span className="badge bad" title={state.shiftErrors.join(" · ")}>Turno sin subir</span>}
           {state.rejectedSales > 0 && <span className="badge bad">{state.rejectedSales} rechazadas</span>}
           <span className={`badge ${low(state.numbers.E32) ? "bad" : ""}`} title="Números de e-NCF que quedan para consumo">E32: {state.numbers.E32}</span>
           <span className={`badge ${low(state.numbers.E31) ? "bad" : ""}`} title="Números de e-NCF que quedan para crédito fiscal">E31: {state.numbers.E31}</span>
         </div>
         <div className="actions">
           {!state.signedIn && <button onClick={() => setModal("reconnect")}>Iniciar sesión</button>}
+          {state.shift ? (
+            <>
+              <button onClick={() => setModal("xreport")}>Informe X</button>
+              <button onClick={() => setModal("closeShift")}>Cerrar turno</button>
+            </>
+          ) : (
+            <button className={state.requireShift ? "primary" : ""} onClick={() => setModal("openShift")}>Abrir turno</button>
+          )}
+          <button onClick={() => { setRefundSale(undefined); setModal("refund"); }}>Devolución</button>
           <button onClick={() => void syncNow()} disabled={syncing || !state.signedIn}>{syncing ? "Sincronizando…" : "Sincronizar"}</button>
           <button onClick={() => setModal("sales")}>Ventas</button>
+          {state.pinRequired && (
+            <button onClick={() => void window.pos.lock().then(reload)} title="Bloquear la caja">Bloquear</button>
+          )}
         </div>
       </header>
 
@@ -226,12 +248,13 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
           </dl>
           <button
             className="primary big"
-            disabled={!totals || (type === "E31" && !customer)}
+            disabled={!totals || (type === "E31" && !customer) || (state.requireShift && !state.shift)}
             onClick={() => setModal("pay")}
           >
             Cobrar {totals ? money(totals.total) : ""}
           </button>
           {type === "E31" && !customer && cart.length > 0 && <p className="muted small">El crédito fiscal necesita un cliente con RNC.</p>}
+          {state.requireShift && !state.shift && <p className="muted small">Abre un turno para poder vender.</p>}
         </aside>
       </main>
 
@@ -268,7 +291,38 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
           }}
         />
       )}
-      {modal === "sales" && <SalesModal onClose={() => setModal(null)} onChange={reload} onOpen={(r) => { setModal(null); setReceipt(r); }} />}
+      {modal === "sales" && (
+        <SalesModal
+          onClose={() => setModal(null)}
+          onChange={reload}
+          onOpen={(r) => { setModal(null); setReceipt(r); }}
+          onRefund={(s) => { setRefundSale(s); setModal("refund"); }}
+        />
+      )}
+      {modal === "openShift" && <OpenShiftModal onClose={() => setModal(null)} onDone={() => { setModal(null); void reload(); }} />}
+      {modal === "closeShift" && (
+        <CloseShiftModal
+          onClose={() => setModal(null)}
+          onDone={(closed) => { setModal(null); setZReport(closed); void reload(); }}
+        />
+      )}
+      {modal === "xreport" && <ShiftReportModal onClose={() => setModal(null)} />}
+      {zReport && (
+        <Modal title="Turno cerrado" onClose={() => setZReport(null)}>
+          <ShiftReportView shift={zReport.shift} report={zReport.report} />
+          <div className="row no-print">
+            <button onClick={() => window.print()}>Imprimir</button>
+            <button className="primary" onClick={() => setZReport(null)}>Listo</button>
+          </div>
+        </Modal>
+      )}
+      {modal === "refund" && (
+        <RefundModal
+          initialSale={refundSale}
+          onClose={() => setModal(null)}
+          onDone={(r) => { setModal(null); setReceipt(r); void reload(); }}
+        />
+      )}
       {modal === "reconnect" && <ReconnectModal state={state} onClose={() => setModal(null)} onDone={reload} />}
       {receipt && <ReceiptModal receipt={receipt} onClose={() => { setReceipt(null); searchRef.current?.focus(); }} />}
     </div>
@@ -418,7 +472,7 @@ const STATUS: Record<LocalSale["status"], { label: string; tone: string }> = {
   REJECTED: { label: "Rechazada", tone: "bad" },
 };
 
-function SalesModal({ onClose, onChange, onOpen }: { onClose: () => void; onChange: () => void | Promise<void>; onOpen: (r: Receipt) => void }) {
+function SalesModal({ onClose, onChange, onOpen, onRefund }: { onClose: () => void; onChange: () => void | Promise<void>; onOpen: (r: Receipt) => void; onRefund: (s: LocalSale) => void }) {
   const [sales, setSales] = useState<LocalSale[] | null>(null);
   const load = useCallback(() => window.pos.sales({ limit: 100 }).then(setSales, () => setSales([])), []);
   useEffect(() => {
@@ -433,7 +487,7 @@ function SalesModal({ onClose, onChange, onOpen }: { onClose: () => void; onChan
         <tbody>
           {sales?.map((s) => (
             <tr key={s.id}>
-              <td className="mono">{s.encf}</td>
+              <td className="mono">{s.encf}{s.type === "E34" && <div className="small muted">Nota de crédito de {s.refundOf}</div>}</td>
               <td>{new Date(s.issuedAt).toLocaleString("es-DO")}</td>
               <td className="r tabular">{money(toCents(s.total))}</td>
               <td>
@@ -442,6 +496,9 @@ function SalesModal({ onClose, onChange, onOpen }: { onClose: () => void; onChan
               </td>
               <td className="r">
                 <button className="link" onClick={() => void window.pos.receipt(s.id).then((r) => r && onOpen(r))}>Ver</button>
+                {s.type !== "E34" && s.status !== "REJECTED" && (
+                  <button className="link" onClick={() => onRefund(s)}>Devolver</button>
+                )}
                 {s.status === "REJECTED" && (
                   <button className="link" onClick={() => void window.pos.retrySale(s.id).then(() => Promise.all([load(), onChange()]))}>Reintentar</button>
                 )}

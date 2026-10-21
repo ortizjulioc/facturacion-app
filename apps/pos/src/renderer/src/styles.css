@@ -138,3 +138,16 @@ button.icon { border: 0; background: none; padding: 4px 8px; }
   .receipt { position: absolute; left: 0; top: 0; width: 80mm; padding: 4mm; border-radius: 0; }
   .no-print { display: none !important; }
 }
+
+.lock { width: min(420px, 100%); display: grid; gap: 14px; text-align: center; }
+.lock h1 { margin: 0; font-size: 22px; }
+.who { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.who button.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.pin-dots { display: flex; gap: 12px; justify-content: center; min-height: 20px; }
+.pin-dots span { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--muted); }
+.pin-dots span.filled { background: var(--text); border-color: var(--text); }
+.keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.keypad button { font-size: 22px; padding: 16px 0; }
+.notice { margin: 0; padding: 8px 12px; border-radius: 8px; background: var(--tile); border: 1px solid var(--line); font-size: 14px; }
+.receipt .signs { display: flex; justify-content: space-between; margin-top: 28px; }
+.receipt .signs span { border-top: 1px solid #333; padding-top: 2px; width: 45%; text-align: center; }

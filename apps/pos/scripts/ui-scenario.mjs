@@ -37,11 +37,13 @@ async function seed() {
   await c.call("POST", "/api/auth/sign-up/email", { name: "Cajera Demo", email, password });
   const org = await c.call("POST", "/api/auth/organization/create", { name: "Colmado Demo", slug: `colmado-${stamp}` });
   await c.call("POST", "/api/auth/organization/set-active", { organizationId: org.id });
-  await c.call("PUT", "/v1/company", { rnc: "1-01-00157-7", legalName: "Colmado Demo SRL", tradeName: "Colmado Demo", address: "Av. Principal 12, Santo Domingo", phone: "809-555-0100", environment: "TEST" });
+  await c.call("PUT", "/v1/company", { rnc: "1-01-00157-7", legalName: "Colmado Demo SRL", tradeName: "Colmado Demo", address: "Av. Principal 12, Santo Domingo", phone: "809-555-0100", environment: "TEST", requireShift: true });
+  await c.call("PUT", "/v1/pins/me", { pin: "2580" });
   const branch = (await c.call("POST", "/v1/branches", { name: "Principal", code: "P1" })).data;
   await c.call("POST", "/v1/terminals", { branchId: branch.id, name: "Caja 1", code: "C1" });
   await c.call("POST", "/v1/sequences", { ecfType: "E32", fromNumber: 1, toNumber: 1000, expiresAt: "2099-12-31" });
   await c.call("POST", "/v1/sequences", { ecfType: "E31", fromNumber: 1, toNumber: 300, expiresAt: "2099-12-31" });
+  await c.call("POST", "/v1/sequences", { ecfType: "E34", fromNumber: 1, toNumber: 300, expiresAt: "2099-12-31" });
   const cat = (await c.call("POST", "/v1/categories", { name: "Bebidas" })).data;
   for (const [name, price, barcode] of [["Agua 500 ml", "35.00", "7461001"], ["Refresco 2 L", "118.00", "7461002"], ["Cerveza", "90.00", "7461003"], ["Pan de agua", "10.00", "7461004"], ["Arroz 5 lb", "236.00", "7461005"]]) {
     await c.call("POST", "/v1/products", { name, price, barcode, ...(name.startsWith("Agua") || name.startsWith("Ref") || name.startsWith("Cerv") ? { categoryId: cat.id } : {}) });
@@ -73,11 +75,41 @@ export default async function scenario({ run, sleep, shot }) {
     __btn('Conectar').click();
     await __wait(() => __btn('Configurar esta caja'));
     __btn('Configurar esta caja').click();
-    await __wait(() => document.querySelector('[data-screen=register]'), 20000);
+    await __wait(() => document.querySelector('[data-screen=lock]'), 20000);
     return true;
   })()`);
-  await sleep(600);
-  await snap("02-venta-vacia");
+
+  // 1b) Bloqueo con PIN: un PIN equivocado no entra; el correcto sí (con el teclado de la pantalla).
+  await sleep(500);
+  await snap("02-bloqueo");
+  out.pin = await run(`(async () => {
+    const press = async (digits) => { for (const d of digits) { __btn(d, document.querySelector('.keypad')).click(); await new Promise((r) => setTimeout(r, 60)); } __btn('OK', document.querySelector('.keypad')).click(); await new Promise((r) => setTimeout(r, 500)); };
+    await press('9999');
+    const wrong = document.querySelector('[role=alert]')?.innerText ?? null;
+    await press('2580');
+    await __wait(() => document.querySelector('[data-screen=register]'), 8000);
+    return { wrong };
+  })()`);
+  await sleep(400);
+  await snap("03-venta-sin-turno");
+
+  // 1c) La empresa exige turno: Cobrar está bloqueado hasta abrirlo.
+  out.requireShift = await run(`(async () => {
+    const input = document.querySelector('input[aria-label^="Buscar"]');
+    __setv(input, '7461004'); input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 400));
+    const blocked = __btn('Cobrar').disabled;
+    __btn('Vaciar').click();
+    await new Promise((r) => setTimeout(r, 200));
+    __btn('Abrir turno').click();
+    await __wait(() => document.querySelector('.modal'));
+    __setv(document.querySelector('.modal input'), '500');
+    __btn('Abrir turno', document.querySelector('.modal')).click();
+    await __wait(() => !document.querySelector('.modal'));
+    return { blocked, badge: document.querySelector('.statuses').innerText.replace(/\\n/g, ' · ') };
+  })()`);
+  await sleep(300);
+  await snap("04-venta-vacia");
   out.setup = await run(`window.pos.state().then((s) => ({ stage: s.stage, products: s.products, numbers: s.numbers, terminal: s.terminal?.name, company: s.company?.legalName }))`);
 
   // 2) Venta con lector de códigos: dos escaneos del mismo producto y uno distinto.
@@ -87,7 +119,7 @@ export default async function scenario({ run, sleep, shot }) {
     await scan('7461002'); await scan('7461002'); await scan('7461003');
     return [...document.querySelectorAll('.lines li')].map((l) => l.innerText.replace(/\\n/g, ' | '));
   })()`);
-  await snap("03-carrito");
+  await snap("05-carrito");
 
   // 3) Cobro: dividir el pago en efectivo y tarjeta.
   await run(`(async () => {
@@ -95,7 +127,7 @@ export default async function scenario({ run, sleep, shot }) {
     await __wait(() => document.querySelector('.modal'));
   })()`);
   await sleep(300);
-  await snap("04-cobro");
+  await snap("06-cobro");
   out.pay = await run(`(async () => {
     const modal = document.querySelector('.modal');
     __btn('Dividir el pago', modal).click();
@@ -112,7 +144,7 @@ export default async function scenario({ run, sleep, shot }) {
     return { total, enabled, receipt: document.querySelector('.receipt').innerText.replace(/\\n+/g, ' / ') };
   })()`);
   await sleep(300);
-  await snap("05-ticket");
+  await snap("07-ticket");
 
   // 4) Nueva venta, sincronizar y ver el historial.
   out.sync = await run(`(async () => {
@@ -125,7 +157,58 @@ export default async function scenario({ run, sleep, shot }) {
   })()`);
   await run(`__btn('Ventas').click()`);
   await sleep(500);
-  await snap("06-historial");
+  await snap("08-historial");
   out.sales = await run(`[...document.querySelectorAll('.sales tbody tr')].map((r) => r.innerText.replace(/\\s+/g, ' '))`);
+
+  // 4b) Devolver 1 refresco en efectivo desde el historial.
+  out.refund = await run(`(async () => {
+    [...document.querySelectorAll('.modal button')].find((b) => b.innerText.trim() === 'Devolver').click();
+    await __wait(() => document.querySelector('.modal input[aria-label^="Devolver"]'));
+    const inputs = [...document.querySelectorAll('.modal input[aria-label^="Devolver"]')];
+    __setv(inputs[0], '1'); __setv(inputs[1], '0');
+    await new Promise((r) => setTimeout(r, 300));
+    const label = [...document.querySelectorAll('.modal button')].find((b) => /^Devolver RD/.test(b.innerText.trim())).innerText.trim();
+    window.__refundLabel = label;
+    return label;
+  })()`);
+  await snap("09-devolucion");
+  out.refundDone = await run(`(async () => {
+    [...document.querySelectorAll('.modal button')].find((b) => /^Devolver RD/.test(b.innerText.trim())).click();
+    await __wait(() => document.querySelector('.receipt'));
+    return document.querySelector('.receipt').innerText.replace(/\\n+/g, ' / ');
+  })()`);
+  await sleep(300);
+  await snap("10-nota-credito");
+
+  // 5) Cierre de turno: esperado = 500 + 200 (efectivo) − 118 (devuelto) = 582; se cuentan 580 → pide el motivo.
+  out.close = await run(`(async () => {
+    __btn('Nueva venta').click();
+    await new Promise((r) => setTimeout(r, 300));
+    __btn('Cerrar turno').click();
+    await __wait(() => document.querySelector('.modal'));
+    const modal = () => document.querySelector('.modal');
+    __setv(modal().querySelector('input'), '580');
+    __btn('Cerrar turno', modal()).click();
+    await __wait(() => /diferencia/i.test(modal().innerText));
+    const asked = modal().querySelector('[role=alert]').innerText;
+    __setv(modal().querySelectorAll('input')[1], 'Faltaron 2 pesos de cambio');
+    __btn('Cerrar turno', modal()).click();
+    await __wait(() => document.querySelector('.receipt'));
+    return { asked, z: document.querySelector('.receipt').innerText.replace(/\\n+/g, ' / ') };
+  })()`);
+  await sleep(300);
+  await snap("11-informe-z");
+  out.final = await run(`(async () => {
+    __btn('Listo').click();
+    await new Promise((r) => setTimeout(r, 300));
+    __btn('Sincronizar').click();
+    await __wait(() => !/por subir|Turno sin subir/.test(document.querySelector('.statuses').innerText), 15000);
+    const s = await window.pos.state();
+    return { pending: s.pendingSales, shiftErrors: s.shiftErrors, shift: s.shift, statuses: document.querySelector('.statuses').innerText.replace(/\\n/g, ' · ') };
+  })()`);
+  // 6) Bloquear y volver a entrar.
+  await run(`__btn('Bloquear').click()`);
+  await sleep(500);
+  await snap("12-bloqueada");
   return out;
 }

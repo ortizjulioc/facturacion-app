@@ -8,6 +8,7 @@ const METHOD: Record<string, string> = { CASH: "Efectivo", CARD: "Tarjeta", TRAN
 export function Receipt({ receipt }: { receipt: Receipt }) {
   const { sale, company } = receipt;
   const pending = sale.status === "PENDING";
+  const credit = sale.type === "E34";
   return (
     <article className="receipt" aria-label="Comprobante">
       <header>
@@ -21,6 +22,7 @@ export function Receipt({ receipt }: { receipt: Receipt }) {
       <div className="center-text">
         <strong>{ECF_LABELS[sale.type as EcfType]}</strong>
         <div>e-NCF: {sale.encf}</div>
+        {credit && sale.refundOf && <div>Modifica: {sale.refundOf}</div>}
         <div>{new Date(sale.issuedAt).toLocaleString("es-DO", { timeZone: "America/Santo_Domingo" })}</div>
       </div>
       {receipt.buyerName && (
@@ -51,11 +53,13 @@ export function Receipt({ receipt }: { receipt: Receipt }) {
         <div className="grand"><dt>TOTAL</dt><dd>{m(receipt.totals.total)}</dd></div>
       </dl>
       <div className="rule" />
+      {credit && <div className="small">Reembolso</div>}
       {receipt.payments.map((p, i) => (
         <div key={i} className="pay"><span>{METHOD[p.method] ?? p.method}</span><span>{m(p.amount)}</span></div>
       ))}
+      {receipt.cashierName && <div className="small">Atendió: {receipt.cashierName}</div>}
       {pending && <p className="small center-text no-print">Pendiente de subir a la nube (se envía sola al haber conexión).</p>}
-      <p className="small center-text">¡Gracias por su compra!</p>
+      {!credit && <p className="small center-text">¡Gracias por su compra!</p>}
     </article>
   );
 }

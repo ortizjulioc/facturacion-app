@@ -1,14 +1,32 @@
 import type {
+  Cashier,
   LocalCustomer,
   LocalProduct,
   LocalSale,
+  LocalShift,
   PosState,
   Receipt,
+  RefundInput,
+  ReturnableLine,
   SaleInput,
+  ShiftReport,
   SyncReport,
 } from "@facturacion/pos-engine";
 
-export type { LocalCustomer, LocalProduct, LocalSale, PosState, Receipt, SaleInput, SyncReport };
+export type {
+  Cashier,
+  LocalCustomer,
+  LocalProduct,
+  LocalSale,
+  LocalShift,
+  PosState,
+  Receipt,
+  RefundInput,
+  ReturnableLine,
+  SaleInput,
+  ShiftReport,
+  SyncReport,
+};
 
 /** Lo que la pantalla puede pedirle al programa. Cada método viaja por IPC al proceso principal, donde vive el motor. */
 export type PosApi = {
@@ -26,6 +44,15 @@ export type PosApi = {
   sales(opts?: { status?: LocalSale["status"]; limit?: number }): Promise<LocalSale[]>;
   receipt(id: string): Promise<Receipt | null>;
   retrySale(id: string): Promise<void>;
+  cashiers(): Promise<Cashier[]>;
+  unlock(userId: string, pin: string): Promise<Cashier>;
+  lock(): Promise<void>;
+  returnable(saleId: string): Promise<{ encf: string; propinaLegal: boolean; lines: ReturnableLine[]; hasCredit: boolean }>;
+  refund(input: RefundInput): Promise<Receipt>;
+  openShift(openingAmount: string): Promise<LocalShift>;
+  closeShift(input: { countedCash: string; notes?: string | null }): Promise<{ shift: LocalShift; report: ShiftReport }>;
+  shifts(): Promise<LocalShift[]>;
+  shiftReport(id?: string): Promise<{ shift: LocalShift; report: ShiftReport } | null>;
 };
 
 /** Lista de métodos (la usan el proceso principal y el preload para registrar cada canal). */
@@ -44,6 +71,15 @@ export const METHODS = [
   "sales",
   "receipt",
   "retrySale",
+  "cashiers",
+  "unlock",
+  "lock",
+  "returnable",
+  "refund",
+  "openShift",
+  "closeShift",
+  "shifts",
+  "shiftReport",
 ] as const satisfies readonly (keyof PosApi)[];
 
 /** Error que cruza el IPC: solo viaja el mensaje (y el código HTTP, si lo hubo). */
