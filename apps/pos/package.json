@@ -1,0 +1,31 @@
+{
+  "name": "@facturacion/pos",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Caja registradora (Electron) con SQLite local: vende sin internet y sincroniza con la nube",
+  "type": "module",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "dependencies": {
+    "@facturacion/core": "workspace:*",
+    "@facturacion/pos-engine": "workspace:*",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^6.1.2",
+    "electron": "^45.0.0",
+    "electron-vite": "^6.0.0",
+    "typescript": "~5.9.3",
+    "vite": "^8.3.5"
+  }
+}

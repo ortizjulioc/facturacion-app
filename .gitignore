@@ -31,3 +31,9 @@ next-env.d.ts
 npm-debug.log*
 .pnpm-debug.log*
 .vercel
+
+# caja (Electron): capturas de las verificaciones y bases locales de prueba
+.shots/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
