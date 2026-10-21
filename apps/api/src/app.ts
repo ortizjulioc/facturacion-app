@@ -16,6 +16,7 @@ import { reports } from "./routes/reports";
 import { restaurant } from "./routes/restaurant";
 import { restaurantMenu } from "./routes/restaurant-menu";
 import { shifts } from "./routes/shifts";
+import { sync } from "./routes/sync";
 import { purchaseReports } from "./routes/reports-purchases";
 import { sequences } from "./routes/sequences";
 import { suppliers } from "./routes/suppliers";
@@ -89,6 +90,7 @@ export function createApp(deps: Deps) {
     .route("/v1/restaurant", restaurant)
     .route("/v1/restaurant", restaurantMenu)
     .route("/v1/shifts", shifts)
+    .route("/v1/sync", sync)
     .route("/v1", calculate);
 
   app.onError((err, c) => {

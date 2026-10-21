@@ -23,6 +23,7 @@ export async function allocateEncf(
       SELECT "id" FROM "sequence"
       WHERE "ecfType" = ${type}::"EcfType"
         AND "active"
+        AND NOT "offline"
         AND "nextNumber" <= "toNumber"
         AND "expiresAt" >= (now() AT TIME ZONE 'America/Santo_Domingo')::date
         AND ("terminalId" IS NULL OR "terminalId" = ${terminalId}::uuid)

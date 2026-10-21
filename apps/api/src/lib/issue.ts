@@ -17,9 +17,18 @@ const unprocessable = (message: string) => new HTTPException(422, { message });
  */
 export async function issueDocument(
   tx: TenantTx,
-  params: { id: string; organizationId: string; userId: string },
+  params: {
+    id: string;
+    organizationId: string;
+    userId: string;
+    /**
+     * Venta hecha SIN conexión en una caja: el e-NCF y la fecha ya existen (salieron del bloque de la caja y
+     * están impresos en el ticket), así que no se asigna número ni se rechaza por existencia: la venta ya ocurrió.
+     */
+    preset?: { encf: string; issuedAt: Date };
+  },
 ): Promise<DocumentFull> {
-  const { id, organizationId, userId } = params;
+  const { id, organizationId, userId, preset } = params;
 
   const draft = await tx.document.findFirst({ where: { id }, include: FULL });
   if (!draft) throw new HTTPException(404, { message: "Comprobante no encontrado" });
@@ -90,11 +99,12 @@ export async function issueDocument(
     }
   }
 
-  const encf = await allocateEncf(tx, draft.type, draft.terminalId);
+  const encf = preset?.encf ?? (await allocateEncf(tx, draft.type, draft.terminalId));
   // Si la caja tiene un turno abierto, el comprobante queda en ese turno. FOR SHARE: el cierre del turno
   // (FOR UPDATE) espera a las emisiones en curso, así que ningún comprobante se escapa del informe Z.
   let shiftId: string | null = null;
-  if (draft.terminalId) {
+  // Las ventas subidas desde una caja offline no se atan al turno abierto de hoy: pasaron antes (turnos sincronizados: pendiente).
+  if (draft.terminalId && !preset) {
     const open = await tx.$queryRaw<{ id: string }[]>`
       SELECT "id" FROM "cash_shift"
       WHERE "terminalId" = ${draft.terminalId}::uuid AND "status" = 'OPEN' FOR SHARE`;
@@ -102,11 +112,11 @@ export async function issueDocument(
   }
   const issued = await tx.document.update({
     where: { id },
-    data: { status: "ISSUED", encf, issuedAt: new Date(), shiftId, ...buyer },
+    data: { status: "ISSUED", encf, issuedAt: preset?.issuedAt ?? new Date(), shiftId, ...buyer },
     include: FULL,
   });
   // Descuenta (o reingresa) las existencias en la misma transacción: si no hay stock, no se emite.
-  await applyDocumentStock(tx, issued, userId, profile.allowNegativeStock);
+  await applyDocumentStock(tx, issued, userId, preset ? true : profile.allowNegativeStock);
   await tx.auditLog.create({
     data: auditRow({ organizationId, userId }, "document.issue", "document", id, {
       encf,

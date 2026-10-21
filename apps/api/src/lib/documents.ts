@@ -21,7 +21,7 @@ import type { TenantTx } from "../types";
 
 // ───────────── Entrada ─────────────
 
-const lineInput = z.object({
+export const lineInput = z.object({
   productId: z.uuid().nullish(),
   // Obligatorios solo cuando la línea no viene de un producto.
   name: z.string().trim().min(1).max(200).optional(),

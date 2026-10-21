@@ -4092,6 +4092,307 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     });
   });
 
+  // ───────────── Sincronización con la caja ─────────────
+
+  describe("sincronización con la caja", () => {
+    const Y = "/v1/sync";
+
+    async function pos(label: string, seqTo = 100) {
+      const b = await billing(label, { seqs: [["E32", 1, seqTo], ["E31", 1, 50]] });
+      const t = await post("/v1/terminals", { branchId: b.branch.id, name: "Caja 1", code: "C1" }, b.cookie);
+      expect(t.status).toBe(201);
+      return { ...b, terminal: (await json(t)).data as Json };
+    }
+    type Pos = Awaited<ReturnType<typeof pos>>;
+
+    const block = (p: Pos, size: number, type = "E32", terminalId = p.terminal.id, cookie = p.cookie) =>
+      post(`${Y}/sequence-blocks`, { terminalId, ecfType: type, size }, cookie);
+    const encfOf = (type: string, n: number) => `E${type.slice(1)}${String(n).padStart(10, "0")}`;
+    const saleBody = (p: Pos, n: number, over: Json = {}) => ({
+      clientId: randomUUID(),
+      terminalId: p.terminal.id,
+      type: "E32",
+      encf: encfOf("E32", n),
+      issuedAt: "2026-10-20T15:30:00.000Z",
+      lines: [{ productId: p.product.id, name: "Producto 118", quantity: "2", unitPrice: "118.00", tax: "ITBIS18", priceIncludesTax: true }],
+      payments: [{ method: "CASH", amount: "236.00" }],
+      total: "236.00",
+      ...over,
+    });
+    const upload = (p: Pos, body: Json, cookie = p.cookie) => post(`${Y}/sales`, body, cookie);
+
+    describe("catálogo", () => {
+      it("baja productos, clientes, categorías y datos fiscales, y luego solo lo que cambió", async () => {
+        const p = await pos("sy1");
+        await post("/v1/categories", { name: "Bebidas" }, p.cookie);
+        await post("/v1/customers", { name: "Cliente Uno", documentType: "RNC", documentNumber: "131246796" }, p.cookie);
+
+        const first = (await json(await get(`${Y}/catalog`, p.cookie))) as Json;
+        expect(first.hasMore).toBe(false);
+        expect(first.data.products.map((x: Json) => x.name)).toEqual(["Producto 118"]);
+        expect(first.data.products[0]).toMatchObject({ price: "118.00", tax: "ITBIS18", priceIncludesTax: true, active: true, barcode: null });
+        expect(first.data.customers[0]).toMatchObject({ name: "Cliente Uno", documentType: "RNC", documentNumber: "131246796" });
+        expect(first.data.categories.map((x: Json) => x.name)).toEqual(["Bebidas"]);
+        expect(first.data.company).toMatchObject({ legalName: "Empresa de Prueba SRL", rnc: "101001577" });
+
+        // Sin cambios: nada nuevo y el cursor se conserva.
+        const same = (await json(await get(`${Y}/catalog?cursor=${first.cursor}`, p.cookie))) as Json;
+        expect(same.data.products).toEqual([]);
+        expect(same.data.customers).toEqual([]);
+        expect(same.cursor).toBe(first.cursor);
+
+        // Un cambio y un producto nuevo (y uno desactivado, que también baja).
+        await patch(`/v1/products/${p.product.id}`, { price: "130.00" }, p.cookie);
+        const nuevo = (await json(await post("/v1/products", { name: "Agua", price: "50.00", barcode: "7461" }, p.cookie))).data;
+        await call(`/v1/products/${nuevo.id}`, { method: "DELETE", cookie: p.cookie });
+        const delta = (await json(await get(`${Y}/catalog?cursor=${first.cursor}`, p.cookie))) as Json;
+        expect(delta.data.products.map((x: Json) => `${x.name}:${x.price}:${x.active}`)).toEqual(["Producto 118:130.00:true", "Agua:50.00:false"]);
+        expect(delta.data.customers).toEqual([]);
+      });
+
+      it("pagina con límite sin saltarse ni repetir filas", async () => {
+        const p = await pos("sy2");
+        for (let i = 0; i < 6; i++) await post("/v1/products", { name: `Prod ${i}`, price: "10.00" }, p.cookie);
+        const seen: string[] = [];
+        let cursor = "";
+        for (let guard = 0; guard < 10; guard++) {
+          const page = (await json(await get(`${Y}/catalog?limit=3${cursor ? `&cursor=${cursor}` : ""}`, p.cookie))) as Json;
+          seen.push(...page.data.products.map((x: Json) => x.id));
+          cursor = page.cursor;
+          if (!page.hasMore) break;
+        }
+        expect(seen).toHaveLength(7); // el de billing() + 6
+        expect(new Set(seen).size).toBe(7);
+      });
+
+      it("valida el cursor y aísla por empresa", async () => {
+        const a = await pos("sy3a");
+        const b = await pos("sy3b");
+        expect((await get(`${Y}/catalog?cursor=basura`, a.cookie)).status).toBe(422);
+        expect((await get(`${Y}/catalog?limit=0`, a.cookie)).status).toBe(400);
+        expect((await get(`${Y}/catalog`)).status).toBe(401);
+        await post("/v1/products", { name: "Solo de A", price: "1.00" }, a.cookie);
+        const names = ((await json(await get(`${Y}/catalog`, b.cookie))).data.products as Json[]).map((x) => x.name);
+        expect(names).not.toContain("Solo de A");
+      });
+    });
+
+    describe("bloques de e-NCF", () => {
+      it("corta un bloque del final del rango general y lo entrega a la caja", async () => {
+        const p = await pos("sy4");
+        const res = await block(p, 30);
+        expect(res.status, JSON.stringify(await res.clone().json())).toBe(201);
+        const b = (await json(res)).data as Json;
+        expect(b).toMatchObject({ terminalId: p.terminal.id, ecfType: "E32", fromNumber: 71, toNumber: 100, nextNumber: 71, remaining: 30 });
+
+        const seqs = ((await json(await get("/v1/sequences", p.cookie))).data as Json[]).filter((s) => s.ecfType === "E32");
+        const general = seqs.find((s) => !s.terminalId)!;
+        expect(general).toMatchObject({ fromNumber: 1, toNumber: 70 });
+        expect((await json(await get(`${Y}/sequence-blocks?terminalId=${p.terminal.id}`, p.cookie))).data).toHaveLength(1);
+
+        // La nube nunca asigna números del bloque: al agotar el rango general ya no se puede emitir en línea.
+        const sell = async () => {
+          const d = await createDraft(p, { terminalId: p.terminal.id });
+          return (await issue(p, d.id)).status;
+        };
+        expect(await sell()).toBe(200);
+        const next = (await json(await post("/v1/documents/" + (await createDraft(p)).id + "/issue", {}, p.cookie))).data.encf;
+        expect(next).toBe(encfOf("E32", 2)); // sigue por el general, no por el bloque
+      });
+
+      it("la emisión en línea no toca el bloque de la caja", async () => {
+        const p = await pos("sy5", 10);
+        expect((await block(p, 9)).status).toBe(201); // general queda con 1 número
+        const d1 = await createDraft(p, { terminalId: p.terminal.id });
+        expect((await json(await issue(p, d1.id))).data.encf).toBe(encfOf("E32", 1));
+        const d2 = await createDraft(p, { terminalId: p.terminal.id });
+        const second = await issue(p, d2.id);
+        expect(second.status).toBe(422); // los 9 números del bloque pertenecen a la caja
+        expect(await error(second)).toMatch(/No hay una secuencia vigente/);
+      });
+
+      it("no entrega más de lo que hay y los bloques simultáneos no se solapan", async () => {
+        const p = await pos("sy6", 100);
+        expect((await block(p, 101)).status).toBe(422);
+        const results = await Promise.all([block(p, 40), block(p, 40), block(p, 40)]);
+        expect(results.map((r) => r.status).sort()).toEqual([201, 201, 422]);
+        const blocks = (await Promise.all(results.filter((r) => r.status === 201).map(async (r) => (await json(r)).data))) as Json[];
+        const [a, b] = blocks.sort((x, y) => x.fromNumber - y.fromNumber);
+        expect(a!.toNumber).toBeLessThan(b!.fromNumber);
+        expect(a!.toNumber - a!.fromNumber + 1).toBe(40);
+      });
+
+      it("rechaza cajas inválidas, tipos que no son de venta y tamaños fuera de rango", async () => {
+        const p = await pos("sy7");
+        const other = await pos("sy7b");
+        expect((await block(p, 10, "E32", randomUUID())).status).toBe(422);
+        expect((await block(p, 10, "E32", other.terminal.id)).status).toBe(422); // de otra empresa
+        expect((await block(p, 0)).status).toBe(400);
+        expect((await block(p, 5001)).status).toBe(400);
+        expect((await block(p, 10, "E34")).status).toBe(400);
+        expect((await block(p, 10, "E31")).status).toBe(201);
+        await patch(`/v1/terminals/${p.terminal.id}`, { active: false }, p.cookie);
+        expect((await block(p, 10)).status).toBe(422);
+      });
+
+      it("el cajero (member) puede pedir el bloque de su caja", async () => {
+        const p = await pos("sy8");
+        const u = await signUp("sy8c");
+        await prisma.member.create({ data: { id: randomUUID(), organizationId: p.orgId, userId: u.userId, role: "member" } });
+        const cookie = await setActive(p.orgId, u.cookie);
+        expect((await block(p, 10, "E32", p.terminal.id, cookie)).status).toBe(201);
+      });
+    });
+
+    describe("subida de ventas", () => {
+      it("crea el comprobante emitido con el e-NCF y la fecha de la caja, y avanza el bloque", async () => {
+        const p = await pos("sy9");
+        const b = (await json(await block(p, 20))).data as Json; // 81..100
+        const body = saleBody(p, b.fromNumber);
+        const res = await upload(p, body);
+        expect(res.status, JSON.stringify(await res.clone().json())).toBe(201);
+        const doc = (await json(res)).data as Json;
+        expect(doc).toMatchObject({ status: "ISSUED", encf: encfOf("E32", 81), type: "E32", duplicate: false, total: "236.00" });
+        expect(doc.issuedAt).toBe("2026-10-20T15:30:00.000Z");
+        expect(doc.totals).toMatchObject({ subtotal: "200.00", tax: "36.00", total: "236.00" });
+
+        const detail = (await json(await get(`/v1/documents/${doc.id}`, p.cookie))).data;
+        expect(detail).toMatchObject({ terminalId: p.terminal.id, shiftId: null });
+        expect(detail.payments).toHaveLength(1);
+        const after = ((await json(await get(`${Y}/sequence-blocks?terminalId=${p.terminal.id}`, p.cookie))).data as Json[])[0]!;
+        expect(after).toMatchObject({ nextNumber: 82, remaining: 19 });
+      });
+
+      it("reintentar la misma venta no duplica nada", async () => {
+        const p = await pos("sy10");
+        const b = (await json(await block(p, 10))).data as Json;
+        const body = saleBody(p, b.fromNumber);
+        const first = await upload(p, body);
+        const again = await upload(p, body);
+        expect(first.status).toBe(201);
+        expect(again.status).toBe(200);
+        const [x, y] = [(await json(first)).data, (await json(again)).data];
+        expect(y).toMatchObject({ id: x.id, encf: x.encf, duplicate: true });
+        expect((await json(await get("/v1/documents", p.cookie))).total).toBe(1);
+      });
+
+      it("subidas simultáneas de la misma venta dan un solo comprobante", async () => {
+        const p = await pos("sy11");
+        const b = (await json(await block(p, 10))).data as Json;
+        const body = saleBody(p, b.fromNumber);
+        const results = await Promise.all(Array.from({ length: 4 }, () => upload(p, body)));
+        expect(results.every((r) => r.status === 200 || r.status === 201)).toBe(true);
+        expect(new Set(await Promise.all(results.map(async (r) => (await json(r)).data.id))).size).toBe(1);
+        expect((await json(await get("/v1/documents", p.cookie))).total).toBe(1);
+      });
+
+      it("solo acepta e-NCF del bloque de esa caja, del tipo correcto y sin usar", async () => {
+        const p = await pos("sy12");
+        const other = (await json(await post("/v1/terminals", { branchId: p.branch.id, name: "Caja 2", code: "C2" }, p.cookie))).data as Json;
+        const mine = (await json(await block(p, 10))).data as Json; // 91..100
+        const theirs = (await json(await block(p, 10, "E32", other.id))).data as Json; // 81..90
+
+        const outside = await upload(p, saleBody(p, 5));
+        expect(outside.status).toBe(422);
+        expect(await error(outside)).toMatch(/no pertenece a un bloque/);
+        expect((await upload(p, saleBody(p, theirs.fromNumber))).status).toBe(422); // número de la otra caja
+        expect((await upload(p, saleBody(p, mine.fromNumber, { encf: "E310000000091" }))).status).toBe(422); // tipo distinto del e-NCF
+        expect((await upload(p, saleBody(p, mine.fromNumber, { encf: "basura" }))).status).toBe(400);
+        expect((await upload(p, saleBody(p, mine.fromNumber, { terminalId: randomUUID() }))).status).toBe(422);
+
+        expect((await upload(p, saleBody(p, mine.fromNumber))).status).toBe(201);
+        const reused = await upload(p, saleBody(p, mine.fromNumber)); // otro clientId con el mismo número
+        expect(reused.status).toBe(409);
+        // Y no se pierde el siguiente número.
+        expect((await upload(p, saleBody(p, mine.fromNumber + 1))).status).toBe(201);
+      });
+
+      it("el total de la caja debe coincidir con el de la nube", async () => {
+        const p = await pos("sy13");
+        const b = (await json(await block(p, 10))).data as Json;
+        const bad = await upload(p, saleBody(p, b.fromNumber, { total: "235.00" }));
+        expect(bad.status).toBe(422);
+        expect(await error(bad)).toMatch(/no coincide/);
+        const short = await upload(p, saleBody(p, b.fromNumber, { payments: [{ method: "CASH", amount: "100.00" }] }));
+        expect(short.status).toBe(422); // los pagos no suman
+        expect((await json(await get("/v1/documents", p.cookie))).total).toBe(0);
+        // Nada se quemó: el mismo número sirve después.
+        expect((await upload(p, saleBody(p, b.fromNumber))).status).toBe(201);
+      });
+
+      it("respeta los precios impresos aunque el producto cambie o se desactive, y no rechaza por inventario", async () => {
+        const p = await pos("sy14");
+        await patch("/v1/inventory/settings", { allowNegativeStock: false }, p.cookie);
+        await patch(`/v1/products/${p.product.id}`, { trackInventory: true }, p.cookie);
+        const b = (await json(await block(p, 10))).data as Json;
+
+        await patch(`/v1/products/${p.product.id}`, { price: "999.00", active: false }, p.cookie);
+        const res = await upload(p, saleBody(p, b.fromNumber));
+        expect(res.status, JSON.stringify(await res.clone().json())).toBe(201);
+        const doc = (await json(await get(`/v1/documents/${(await json(res)).data.id}`, p.cookie))).data;
+        expect(doc.lines[0]).toMatchObject({ unitPrice: "118.00", quantity: "2" });
+        // La venta ya ocurrió: el inventario queda en negativo en vez de rechazarla.
+        const moves = (await json(await get(`/v1/inventory/movements?productId=${p.product.id}&type=SALE`, p.cookie))).data as Json[];
+        expect(moves.map((m) => m.quantity)).toEqual(["-2"]);
+        expect(moves[0]!.balanceAfter).toBe("-2");
+      });
+
+      it("aplica las reglas del comprador y usa al cliente sincronizado", async () => {
+        const p = await pos("sy15");
+        const b = (await json(await block(p, 20, "E31"))).data as Json; // 31..50
+        const e31 = (n: number, over: Json = {}) => saleBody(p, n, { type: "E31", encf: encfOf("E31", n), ...over });
+        const noRnc = await upload(p, e31(b.fromNumber));
+        expect(noRnc.status).toBe(422);
+        expect(await error(noRnc)).toMatch(/RNC/);
+
+        const customer = (await json(await post("/v1/customers", { name: "Acme SRL", documentType: "RNC", documentNumber: "131246796" }, p.cookie))).data;
+        const ok = await upload(p, e31(b.fromNumber, { customerId: customer.id }));
+        expect(ok.status, JSON.stringify(await ok.clone().json())).toBe(201);
+        expect((await json(ok)).data).toMatchObject({ type: "E31", buyerName: "Acme SRL", encf: encfOf("E31", b.fromNumber) });
+      });
+
+      it("la propina legal y los pagos mixtos se suben tal como se cobraron", async () => {
+        const p = await pos("sy16");
+        const b = (await json(await block(p, 10))).data as Json;
+        const res = await upload(
+          p,
+          saleBody(p, b.fromNumber, {
+            propinaLegal: true,
+            total: "259.60", // 236.00 + 10 % de 200.00 (subtotal sin ITBIS) = 256.00; con ITBIS de la propina no aplica
+            payments: [{ method: "CASH", amount: "100.00" }, { method: "CARD", amount: "156.00" }],
+          }),
+        );
+        expect(res.status, JSON.stringify(await res.clone().json())).toBe(422);
+        const ok = await upload(
+          p,
+          saleBody(p, b.fromNumber, {
+            propinaLegal: true,
+            total: "256.00",
+            payments: [{ method: "CASH", amount: "100.00" }, { method: "CARD", amount: "156.00" }],
+          }),
+        );
+        expect(ok.status, JSON.stringify(await ok.clone().json())).toBe(201);
+        expect((await json(ok)).data.totals).toMatchObject({ propina: "20.00", total: "256.00" });
+      });
+
+      it("las ventas subidas no se atan al turno abierto y cada empresa queda aislada", async () => {
+        const a = await pos("sy17a");
+        const other = await pos("sy17b");
+        const b = (await json(await block(a, 10))).data as Json;
+        await post("/v1/shifts", { terminalId: a.terminal.id, openingAmount: "0" }, a.cookie);
+        const doc = (await json(await upload(a, saleBody(a, b.fromNumber)))).data;
+        expect((await json(await get(`/v1/documents/${doc.id}`, a.cookie))).data.shiftId).toBeNull();
+
+        // Otra empresa no puede subir al bloque ajeno ni ver el comprobante.
+        expect((await upload(other, saleBody(a, b.fromNumber, { terminalId: a.terminal.id }), other.cookie)).status).toBe(422);
+        expect((await get(`/v1/documents/${doc.id}`, other.cookie)).status).toBe(404);
+        expect((await get(`${Y}/sequence-blocks?terminalId=${a.terminal.id}`, other.cookie)).status).toBe(200);
+        expect(((await json(await get(`${Y}/sequence-blocks?terminalId=${a.terminal.id}`, other.cookie))).data as Json[])).toEqual([]);
+        expect((await post(`${Y}/sales`, saleBody(a, b.fromNumber))).status).toBe(401);
+      });
+    });
+  });
+
   describe("bitácora", () => {
     it("registra cada cambio, de forma atómica con el cambio", async () => {
       const { cookie, orgId } = await owner("log");

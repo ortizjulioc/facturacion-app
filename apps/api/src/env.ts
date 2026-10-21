@@ -25,7 +25,12 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   return parsed.data;
 }
 
-export const webOrigins = (env: Env) =>
-  env.WEB_ORIGIN.split(",")
+/** Origen con el que la app de caja (Electron) se identifica: un esquema propio que ninguna página web puede usar. */
+export const POS_ORIGIN = "app://facturacion-pos";
+
+export const webOrigins = (env: Env) => [
+  ...env.WEB_ORIGIN.split(",")
     .map((o) => o.trim())
-    .filter(Boolean);
+    .filter(Boolean),
+  POS_ORIGIN,
+];
