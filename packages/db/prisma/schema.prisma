@@ -105,6 +105,7 @@ model Organization {
   restaurantOrders RestaurantOrder[]
   modifierGroups   ModifierGroup[]
   modifiers        Modifier[]
+  cashShifts       CashShift[]
 
   @@map("organization")
 }
@@ -178,6 +179,7 @@ model Terminal {
   branch         Branch       @relation(fields: [branchId], references: [id], onDelete: NoAction)
   sequences      Sequence[]
   documents      Document[]
+  shifts         CashShift[]
 
   @@unique([organizationId, code])
   @@index([branchId])
@@ -416,6 +418,9 @@ model Document {
   /// Si nació del cobro de una mesa del restaurante.
   orderId              String?          @db.Uuid
   order                RestaurantOrder? @relation(fields: [orderId], references: [id], onDelete: NoAction)
+  /// Turno de caja en el que se emitió (si la caja tenía un turno abierto).
+  shiftId              String?          @db.Uuid
+  shift                CashShift?       @relation(fields: [shiftId], references: [id], onDelete: NoAction)
   referencedDocument   Document?        @relation("Modifies", fields: [referencedDocumentId], references: [id], onDelete: NoAction)
   modifiedBy           Document[]       @relation("Modifies")
   lines                DocumentLine[]
@@ -428,6 +433,7 @@ model Document {
   @@index([customerId])
   @@index([branchId])
   @@index([referencedDocumentId])
+  @@index([shiftId])
   @@map("document")
 }
 
@@ -847,4 +853,38 @@ model ComboComponent {
   @@unique([comboId, productId])
   @@index([organizationId])
   @@map("combo_component")
+}
+
+enum ShiftStatus {
+  OPEN
+  CLOSED
+}
+
+/// Turno de una caja: se abre con un fondo, se vende, y se cierra contando el efectivo (cuadre).
+model CashShift {
+  id             String       @id @default(uuid(7)) @db.Uuid
+  organizationId String
+  terminalId     String       @db.Uuid
+  status         ShiftStatus  @default(OPEN)
+  openedById     String
+  openedAt       DateTime     @default(now())
+  /// Fondo de caja con el que abre, en centavos.
+  openingAmount  BigInt
+  closedById     String?
+  closedAt       DateTime?
+  /// Al cerrar: efectivo contado, efectivo esperado (fondo + cobros en efectivo) y la diferencia (contado − esperado).
+  countedCash    BigInt?
+  expectedCash   BigInt?
+  difference     BigInt?
+  /// Motivo de la diferencia u observaciones del cierre.
+  notes          String?
+  /// Informe Z congelado al cerrar (JSON con montos como texto).
+  closingReport  Json?
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  terminal       Terminal     @relation(fields: [terminalId], references: [id], onDelete: NoAction)
+  documents      Document[]
+
+  @@index([organizationId, openedAt])
+  @@index([terminalId, status])
+  @@map("cash_shift")
 }

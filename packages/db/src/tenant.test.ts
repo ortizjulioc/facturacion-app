@@ -873,6 +873,76 @@ describe.skipIf(!process.env.DATABASE_URL)("RLS multiempresa", () => {
     });
   });
 
+  describe("turnos de caja", () => {
+    const base = async (org: string) => {
+      const as = withTenant(prisma, org);
+      const branch = await as.branch.findFirstOrThrow();
+      const terminal = await as.terminal.create({
+        data: { organizationId: org, branchId: branch.id, name: "Caja", code: `T${randomUUID().slice(0, 6)}` },
+      });
+      const open = (over: object = {}, terminalId = terminal.id) =>
+        as.cashShift.create({
+          data: { organizationId: org, terminalId, openedById: "cajero", openingAmount: 100_000n, ...over },
+        });
+      const closeData = (over: object = {}) => ({
+        status: "CLOSED" as const,
+        closedById: "cajero",
+        closedAt: new Date(),
+        countedCash: 120_000n,
+        expectedCash: 100_000n,
+        difference: 20_000n,
+        ...over,
+      });
+      return { as, terminal, open, closeData };
+    };
+
+    it("los turnos están aislados por empresa y no se escribe en nombre de otra", async () => {
+      const a = await base(orgA);
+      const b = await base(orgB);
+      await a.open();
+      expect(await a.as.cashShift.count({ where: { terminalId: a.terminal.id } })).toBe(1);
+      expect(await b.as.cashShift.count({ where: { organizationId: orgA } })).toBe(0);
+      await expect(
+        b.as.cashShift.create({ data: { organizationId: orgA, terminalId: b.terminal.id, openedById: "x", openingAmount: 0n } }),
+      ).rejects.toThrow();
+    });
+
+    it("una caja tiene un solo turno abierto; al cerrarlo se puede abrir otro", async () => {
+      const { as, open, closeData } = await base(orgA);
+      const first = await open();
+      await expect(open()).rejects.toThrow();
+      await as.cashShift.update({ where: { id: first.id }, data: closeData() });
+      const second = await open({ openingAmount: 0n });
+      expect(second.status).toBe("OPEN");
+    });
+
+    it("valida el fondo y la coherencia de abierto/cerrado", async () => {
+      const { as, open, closeData } = await base(orgA);
+      await expect(open({ openingAmount: -1n })).rejects.toThrow();
+      // Abierto con datos de cierre, o cerrado a medias.
+      await expect(open({ countedCash: 1n })).rejects.toThrow();
+      await expect(open({ closedAt: new Date() })).rejects.toThrow();
+      const shift = await open();
+      await expect(as.cashShift.update({ where: { id: shift.id }, data: { status: "CLOSED" } })).rejects.toThrow();
+      await expect(as.cashShift.update({ where: { id: shift.id }, data: closeData({ difference: 5n }) })).rejects.toThrow(); // no cuadra
+      await expect(as.cashShift.update({ where: { id: shift.id }, data: closeData({ countedCash: -1n, difference: -101_000n, expectedCash: 100_000n }) })).rejects.toThrow();
+      await as.cashShift.update({ where: { id: shift.id }, data: closeData() });
+    });
+
+    it("la apertura no se reescribe, y un turno cerrado queda congelado y no se borra", async () => {
+      const { as, open, closeData, terminal } = await base(orgA);
+      const shift = await open();
+      await expect(as.cashShift.update({ where: { id: shift.id }, data: { openingAmount: 1n } })).rejects.toThrow();
+      await expect(as.cashShift.update({ where: { id: shift.id }, data: { openedById: "otro" } })).rejects.toThrow();
+      await expect(as.cashShift.delete({ where: { id: shift.id } })).rejects.toThrow();
+
+      await as.cashShift.update({ where: { id: shift.id }, data: closeData() });
+      await expect(as.cashShift.update({ where: { id: shift.id }, data: { notes: "tarde" } })).rejects.toThrow();
+      await expect(as.cashShift.delete({ where: { id: shift.id } })).rejects.toThrow();
+      expect((await as.cashShift.findUniqueOrThrow({ where: { id: shift.id } })).terminalId).toBe(terminal.id);
+    });
+  });
+
   it("la bitácora es inmutable para el rol de la app", async () => {
     const asA = withTenant(prisma, orgA);
     const log = await asA.auditLog.create({
