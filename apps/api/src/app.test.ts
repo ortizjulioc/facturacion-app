@@ -3848,6 +3848,250 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     });
   });
 
+  // ───────────── Turnos de caja ─────────────
+
+  describe("turnos de caja", () => {
+    const S = "/v1/shifts";
+    /** Empresa con una caja y secuencias E32/E34. */
+    async function caja(label: string) {
+      const b = await billing(label, { seqs: [["E32", 1, 100], ["E34", 1, 50]] });
+      const res = await post("/v1/terminals", { branchId: b.branch.id, name: "Caja 1", code: "C1" }, b.cookie);
+      expect(res.status).toBe(201);
+      const terminal = (await json(res)).data as Json;
+      return { ...b, terminal };
+    }
+    type Caja = Awaited<ReturnType<typeof caja>>;
+
+    const open = (c: Caja, amount = "1000.00", cookie = c.cookie) =>
+      post(S, { terminalId: c.terminal.id, openingAmount: amount }, cookie);
+    const close = (c: Caja, id: string, body: Json, cookie = c.cookie) => post(`${S}/${id}/close`, body, cookie);
+    const current = async (c: Caja, cookie = c.cookie) =>
+      (await json(await get(`${S}/current?terminalId=${c.terminal.id}`, cookie))).data as Json | null;
+    /** Vende RD$236.00 en la caja (dos productos de RD$118.00) con el medio de pago indicado. */
+    async function sell(c: Caja, method = "CASH") {
+      const d = await createDraft(c, { terminalId: c.terminal.id, payments: [{ method, amount: "236.00" }] });
+      const res = await issue(c, d.id);
+      expect(res.status, JSON.stringify(await res.clone().json())).toBe(200);
+      return (await json(res)).data as Json;
+    }
+    const cashier = async (c: Caja, label: string) => {
+      const u = await signUp(label);
+      await prisma.member.create({ data: { id: randomUUID(), organizationId: c.orgId, userId: u.userId, role: "member" } });
+      return setActive(c.orgId, u.cookie);
+    };
+
+    describe("apertura", () => {
+      it("abre un turno con su fondo y lo muestra como el turno actual", async () => {
+        const c = await caja("sh1");
+        expect(await current(c)).toBeNull();
+        const res = await open(c, "1500.50");
+        expect(res.status, JSON.stringify(await res.clone().json())).toBe(201);
+        const shift = (await json(res)).data as Json;
+        expect(shift).toMatchObject({ status: "OPEN", openingAmount: "1500.50", closedAt: null, countedCash: null });
+        expect(shift.terminal).toMatchObject({ code: "C1" });
+        expect(shift.openedBy.name).toMatch(/Usuario/);
+
+        const now = (await current(c))!;
+        expect(now.id).toBe(shift.id);
+        expect(now.report).toMatchObject({ documents: 0, openingAmount: "1500.50", expectedCash: "1500.50", cashReceived: "0.00", net: "0.00" });
+      });
+
+      it("el fondo es opcional (cero) y no puede ser negativo", async () => {
+        const c = await caja("sh2");
+        expect((await post(S, { terminalId: c.terminal.id, openingAmount: "-5" }, c.cookie)).status).toBe(400);
+        expect((await post(S, { terminalId: c.terminal.id, openingAmount: "abc" }, c.cookie)).status).toBe(400);
+        const res = await post(S, { terminalId: c.terminal.id }, c.cookie);
+        expect((await json(res)).data.openingAmount).toBe("0.00");
+      });
+
+      it("una caja tiene un solo turno abierto, aunque lo intenten a la vez", async () => {
+        const c = await caja("sh3");
+        const results = await Promise.all(Array.from({ length: 4 }, () => open(c)));
+        expect(results.map((r) => r.status).sort()).toEqual([201, 409, 409, 409]);
+        expect((await open(c)).status).toBe(409);
+      });
+
+      it("rechaza cajas inexistentes, inactivas o de otra empresa", async () => {
+        const c = await caja("sh4");
+        const other = await caja("sh4b");
+        expect((await post(S, { terminalId: randomUUID() }, c.cookie)).status).toBe(422);
+        expect((await post(S, { terminalId: other.terminal.id }, c.cookie)).status).toBe(422);
+        await patch(`/v1/terminals/${c.terminal.id}`, { active: false }, c.cookie);
+        expect((await open(c)).status).toBe(422);
+        expect((await get(S)).status).toBe(401);
+      });
+    });
+
+    describe("informe y cierre", () => {
+      it("el informe suma ventas por forma de pago, resta notas de crédito y calcula el efectivo esperado", async () => {
+        const c = await caja("sh5");
+        const shift = (await json(await open(c, "1000.00"))).data as Json;
+        const first = await sell(c, "CASH");
+        await sell(c, "CARD");
+        const note = await createDraft(c, {
+          type: "E34",
+          terminalId: c.terminal.id,
+          referencedDocumentId: first.id,
+          modificationCode: 3,
+          lines: [{ name: "Ajuste", unitPrice: "50.00", tax: "EXENTO", quantity: "1" }],
+          payments: [],
+        });
+        expect((await issue(c, note.id)).status).toBe(200);
+
+        const x = (await current(c))!.report;
+        expect(x).toMatchObject({
+          documents: 3,
+          sales: { subtotal: "400.00", tax: "72.00", propina: "0.00", total: "472.00" },
+          credits: "50.00",
+          net: "422.00",
+          payments: { CARD: "236.00", CASH: "236.00" },
+          cashReceived: "236.00",
+          expectedCash: "1236.00",
+        });
+        expect(x.byType.E32).toEqual({ count: 2, total: "472.00" });
+        expect(x.byType.E34).toEqual({ count: 1, total: "50.00" });
+        // Los comprobantes quedan marcados con su turno.
+        const doc = (await json(await get(`/v1/documents/${first.id}`, c.cookie))).data;
+        expect(doc.shiftId).toBe(shift.id);
+      });
+
+      it("cierra con el cuadre y congela el informe Z; el turno cerrado no se toca más", async () => {
+        const c = await caja("sh6");
+        const shift = (await json(await open(c, "1000.00"))).data as Json;
+        await sell(c, "CASH");
+
+        const res = await close(c, shift.id, { countedCash: "1236.00" });
+        expect(res.status, JSON.stringify(await res.clone().json())).toBe(200);
+        const closed = (await json(res)).data as Json;
+        expect(closed).toMatchObject({ status: "CLOSED", countedCash: "1236.00", expectedCash: "1236.00", difference: "0.00" });
+        expect(closed.closedBy.id).toBe(closed.openedBy.id);
+        expect(closed.report).toMatchObject({ documents: 1, expectedCash: "1236.00", countedCash: "1236.00", difference: "0.00" });
+
+        expect((await close(c, shift.id, { countedCash: "1.00" })).status).toBe(409);
+        expect(await current(c)).toBeNull();
+        const detail = (await json(await get(`${S}/${shift.id}`, c.cookie))).data;
+        expect(detail.report).toEqual(closed.report);
+        // Lo que se venda después ya no entra en ese turno; el siguiente turno parte de cero.
+        const later = await sell(c, "CASH");
+        expect((await json(await get(`/v1/documents/${later.id}`, c.cookie))).data.shiftId).toBeNull();
+        const next = (await json(await open(c, "200.00"))).data as Json;
+        expect((await current(c))!.report).toMatchObject({ documents: 0, expectedCash: "200.00" });
+        expect(next.id).not.toBe(shift.id);
+      });
+
+      it("una diferencia de efectivo exige el motivo y queda registrada", async () => {
+        const c = await caja("sh7");
+        const shift = (await json(await open(c, "1000.00"))).data as Json;
+        await sell(c, "CASH"); // esperado 1236.00
+
+        const short = await close(c, shift.id, { countedCash: "1200.00" });
+        expect(short.status).toBe(422);
+        expect(await error(short)).toMatch(/diferencia/);
+        expect((await current(c))!.status).toBe("OPEN"); // nada cambió
+
+        const ok = await close(c, shift.id, { countedCash: "1200.00", notes: "Faltaron 36 pesos del cambio" });
+        expect((await json(ok)).data).toMatchObject({ difference: "-36.00", notes: "Faltaron 36 pesos del cambio" });
+
+        const c2 = await caja("sh7b");
+        const s2 = (await json(await open(c2, "100.00"))).data as Json;
+        const over = await close(c2, s2.id, { countedCash: "150.00", notes: "Propina en la gaveta" });
+        expect((await json(over)).data.difference).toBe("50.00");
+        expect((await close(c2, s2.id, { countedCash: "-1", notes: "x" })).status).toBe(400);
+      });
+
+      it("un comprobante preparado antes de abrir el turno entra al turno en que se emite", async () => {
+        const c = await caja("sh8");
+        const draft = await createDraft(c, { terminalId: c.terminal.id, payments: [{ method: "CASH", amount: "236.00" }] });
+        const shift = (await json(await open(c))).data as Json;
+        const issued = (await json(await issue(c, draft.id))).data;
+        expect(issued.shiftId).toBe(shift.id);
+        // Sin terminal (facturación desde el back-office) no hay turno.
+        const web = await createDraft(c);
+        expect((await json(await issue(c, web.id))).data.shiftId).toBeNull();
+        expect((await current(c))!.report.documents).toBe(1);
+      });
+
+      it("emisiones y cierre simultáneos: cada comprobante cae en el informe o fuera del turno, nunca se pierde", async () => {
+        const c = await caja("sh9");
+        const shift = (await json(await open(c, "0"))).data as Json;
+        const drafts = await Promise.all(
+          Array.from({ length: 5 }, () => createDraft(c, { terminalId: c.terminal.id, payments: [{ method: "CASH", amount: "236.00" }] })),
+        );
+        const [closeRes, ...issues] = await Promise.all([
+          close(c, shift.id, { countedCash: "0.00", notes: "Cierre durante ventas" }),
+          ...drafts.map((d) => issue(c, d.id)),
+        ]);
+        expect(issues.every((r) => r.status === 200)).toBe(true);
+        expect(closeRes.status, JSON.stringify(await closeRes.clone().json())).toBe(200);
+
+        // Lo contado en el informe Z es exactamente lo que quedó atado al turno.
+        const z = (await json(await get(`${S}/${shift.id}`, c.cookie))).data.report;
+        const docs = (await json(await get("/v1/documents?pageSize=50", c.cookie))).data as Json[];
+        const attached = docs.filter((d) => d.shiftId === shift.id).length;
+        expect(z.documents).toBe(attached);
+      });
+    });
+
+    describe("permisos", () => {
+      it("el cajero abre su turno y lo cierra; otro cajero no ve ni cierra turnos ajenos, el administrador sí", async () => {
+        const c = await caja("sh10");
+        const ana = await cashier(c, "sh10a");
+        const luis = await cashier(c, "sh10l");
+
+        const shift = (await json(await open(c, "500.00", ana))).data as Json;
+        expect((await current(c, ana))!.id).toBe(shift.id);
+        expect((await get(`${S}/current?terminalId=${c.terminal.id}`, luis)).status).toBe(403);
+        expect((await get(`${S}/${shift.id}`, luis)).status).toBe(404);
+        expect((await close(c, shift.id, { countedCash: "500.00" }, luis)).status).toBe(403);
+        expect((await open(c, "0", luis)).status).toBe(409); // la caja está en uso
+
+        const mine = (await json(await get(S, luis))).data as Json[];
+        expect(mine).toEqual([]);
+        expect(((await json(await get(S, ana))).data as Json[]).map((s) => s.id)).toEqual([shift.id]);
+        expect(((await json(await get(S, c.cookie))).data as Json[]).map((s) => s.id)).toEqual([shift.id]);
+
+        // El administrador puede cerrar el turno de otra persona.
+        const res = await close(c, shift.id, { countedCash: "500.00" }, c.cookie);
+        expect(res.status).toBe(200);
+        const closedShift = (await json(res)).data;
+        expect(closedShift.openedBy.id).not.toBe(closedShift.closedBy.id);
+        // Y el cajero cierra el suyo.
+        const own = (await json(await open(c, "10.00", luis))).data as Json;
+        expect((await close(c, own.id, { countedCash: "10.00" }, luis)).status).toBe(200);
+      });
+
+      it("filtra el listado por caja, estado y fechas, y pagina", async () => {
+        const c = await caja("sh11");
+        const a = (await json(await open(c, "1.00"))).data as Json;
+        await close(c, a.id, { countedCash: "1.00" });
+        await open(c, "2.00");
+
+        const list = async (q: string) => (await json(await get(`${S}${q}`, c.cookie))) as Json;
+        expect((await list("")).data.map((s: Json) => s.openingAmount)).toEqual(["2.00", "1.00"]); // el más reciente primero
+        expect((await list("?status=OPEN")).data).toHaveLength(1);
+        expect((await list("?status=CLOSED")).data[0].id).toBe(a.id);
+        expect((await list(`?terminalId=${randomUUID()}`)).total).toBe(0);
+        const today = new Intl.DateTimeFormat("sv-SE", { timeZone: "America/Santo_Domingo" }).format(new Date());
+        expect((await list(`?from=${today}&to=${today}`)).total).toBe(2);
+        expect((await list("?from=2020-01-01&to=2020-01-02")).total).toBe(0);
+        const page = await list("?pageSize=1&page=2");
+        expect(page).toMatchObject({ total: 2, page: 2, pageSize: 1 });
+        expect(page.data).toHaveLength(1);
+        expect((await get(`${S}?status=otro`, c.cookie)).status).toBe(400);
+      });
+
+      it("cada empresa ve solo sus turnos", async () => {
+        const a = await caja("sh12a");
+        const b = await caja("sh12b");
+        const shift = (await json(await open(a))).data as Json;
+        expect((await get(`${S}/${shift.id}`, b.cookie)).status).toBe(404);
+        expect((await close(b, shift.id, { countedCash: "0" })).status).toBe(404);
+        expect(((await json(await get(S, b.cookie))).data as Json[])).toEqual([]);
+        expect(await current({ ...b, terminal: a.terminal } as Caja, b.cookie)).toBeNull();
+      });
+    });
+  });
+
   describe("bitácora", () => {
     it("registra cada cambio, de forma atómica con el cambio", async () => {
       const { cookie, orgId } = await owner("log");

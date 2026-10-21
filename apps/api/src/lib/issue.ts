@@ -91,9 +91,18 @@ export async function issueDocument(
   }
 
   const encf = await allocateEncf(tx, draft.type, draft.terminalId);
+  // Si la caja tiene un turno abierto, el comprobante queda en ese turno. FOR SHARE: el cierre del turno
+  // (FOR UPDATE) espera a las emisiones en curso, así que ningún comprobante se escapa del informe Z.
+  let shiftId: string | null = null;
+  if (draft.terminalId) {
+    const open = await tx.$queryRaw<{ id: string }[]>`
+      SELECT "id" FROM "cash_shift"
+      WHERE "terminalId" = ${draft.terminalId}::uuid AND "status" = 'OPEN' FOR SHARE`;
+    shiftId = open[0]?.id ?? null;
+  }
   const issued = await tx.document.update({
     where: { id },
-    data: { status: "ISSUED", encf, issuedAt: new Date(), ...buyer },
+    data: { status: "ISSUED", encf, issuedAt: new Date(), shiftId, ...buyer },
     include: FULL,
   });
   // Descuenta (o reingresa) las existencias en la misma transacción: si no hay stock, no se emite.
