@@ -361,6 +361,8 @@ model Sequence {
   expiresAt      DateTime     @db.Date
   /// null = sirve a toda la empresa; con valor, solo a esa caja.
   terminalId     String?      @db.Uuid
+  /// true = bloque entregado a una caja para facturar SIN conexión: solo la caja lo usa (la nube nunca asigna de aquí).
+  offline        Boolean      @default(false)
   active         Boolean      @default(true)
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
@@ -421,6 +423,8 @@ model Document {
   /// Turno de caja en el que se emitió (si la caja tenía un turno abierto).
   shiftId              String?          @db.Uuid
   shift                CashShift?       @relation(fields: [shiftId], references: [id], onDelete: NoAction)
+  /// Identificador generado por la caja al vender sin conexión: hace idempotente la subida (reintentos sin duplicar).
+  clientId             String?          @db.Uuid
   referencedDocument   Document?        @relation("Modifies", fields: [referencedDocumentId], references: [id], onDelete: NoAction)
   modifiedBy           Document[]       @relation("Modifies")
   lines                DocumentLine[]
@@ -428,6 +432,7 @@ model Document {
   stockMovements       StockMovement[]
 
   @@unique([organizationId, encf])
+  @@unique([organizationId, clientId])
   @@index([organizationId, status])
   @@index([organizationId, createdAt])
   @@index([customerId])
