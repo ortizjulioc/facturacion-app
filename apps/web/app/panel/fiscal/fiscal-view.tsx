@@ -10,6 +10,7 @@ import {
 import {
   Badge,
   Button,
+  Checkbox,
   EmptyState,
   ErrorNote,
   Field,
@@ -233,6 +234,7 @@ function CompanyForm({
             email: text("email") || null,
             phone: text("phone"),
             environment: text("environment") as "TEST" | "CERT" | "PROD",
+            requireShift: f.get("requireShift") === "on",
           },
         }),
       );
@@ -322,6 +324,14 @@ function CompanyForm({
             <Input name="phone" type="tel" defaultValue={company?.phone ?? ""} />
           </Field>
         </div>
+        <Checkbox
+          name="requireShift"
+          label="Exigir un turno abierto para vender desde una caja"
+          defaultChecked={company?.requireShift ?? false}
+        />
+        <p className="-mt-2 text-xs text-zinc-500">
+          La caja registradora y la facturación con caja no emiten comprobantes si no hay un turno abierto (se abre con el fondo y se cierra con el cuadre).
+        </p>
       </fieldset>
       <ErrorNote message={error} />
       {canManage ? (

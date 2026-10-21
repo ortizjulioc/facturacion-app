@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useCallback, useState, type FormEvent } from "react";
 import { useDialogs } from "@/components/dialogs";
 import {
   Badge,
@@ -15,7 +15,7 @@ import {
   tableStyles,
 } from "@/components/ui";
 import { usePanel } from "@/components/panel-context";
-import { authClient, errorMessage } from "@/lib/api";
+import { api, authClient, errorMessage, expectOk, unwrap } from "@/lib/api";
 import { formatDate } from "@/lib/format";
 import { useQuery } from "@/lib/use-query";
 
@@ -49,6 +49,15 @@ export function EquipoView() {
   const { data: session } = authClient.useSession();
   const { confirm, prompt, toast } = useDialogs();
   const team = useQuery(loadTeam);
+  // Quién tiene PIN de caja (solo los administradores ven la lista; cada quien puede definir el suyo).
+  const pins = useQuery(
+    useCallback(async () => {
+      if (!canManage) return new Map<string, boolean>();
+      const res = await unwrap(await api.v1.pins.$get());
+      return new Map(res.data.map((p) => [p.userId, p.hasPin]));
+    }, [canManage]),
+  );
+  const [pinFor, setPinFor] = useState<{ userId: string; name: string; self: boolean } | null>(null);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
@@ -107,6 +116,7 @@ export function EquipoView() {
               <tr>
                 <th className={tableStyles.th}>Persona</th>
                 <th className={tableStyles.th}>Rol</th>
+                <th className={tableStyles.th}>PIN de caja</th>
                 {canManage && <th className={tableStyles.th} />}
               </tr>
             </thead>
@@ -147,6 +157,41 @@ export function EquipoView() {
                         <Badge tone={isOwner ? "success" : "neutral"}>
                           {roleLabel(m.role)}
                         </Badge>
+                      )}
+                    </td>
+                    <td className={tableStyles.td}>
+                      {canManage && (
+                        <Badge tone={pins.data?.get(m.userId) ? "success" : "neutral"}>
+                          {pins.data?.get(m.userId) ? "Con PIN" : "Sin PIN"}
+                        </Badge>
+                      )}
+                      {(canManage || isMe) && (
+                        <Button
+                          variant="ghost"
+                          onClick={() => setPinFor({ userId: m.userId, name: m.user.name, self: isMe })}
+                        >
+                          {isMe ? "Mi PIN" : pins.data?.get(m.userId) ? "Cambiar" : "Definir"}
+                        </Button>
+                      )}
+                      {canManage && !isMe && pins.data?.get(m.userId) && (
+                        <Button
+                          variant="ghost"
+                          onClick={async () => {
+                            if (!(await confirm({ title: `Quitar el PIN de ${m.user.name}`, message: "Ya no podrá identificarse en la caja.", confirmLabel: "Quitar", danger: true }))) return;
+                            await run(async () => {
+                              try {
+                                await expectOk(await api.v1.pins[":userId"].$delete({ param: { userId: m.userId } }));
+                                pins.reload();
+                                return {};
+                              } catch (e) {
+                                return { error: { message: errorMessage(e) } };
+                              }
+                            });
+                            toast("PIN eliminado");
+                          }}
+                        >
+                          Quitar
+                        </Button>
                       )}
                     </td>
                     {canManage && (
@@ -233,6 +278,23 @@ export function EquipoView() {
       )}
 
       <Modal
+        open={pinFor !== null}
+        onClose={() => setPinFor(null)}
+        title={pinFor?.self ? "Mi PIN de caja" : `PIN de ${pinFor?.name ?? ""}`}
+      >
+        {pinFor && (
+          <PinForm
+            who={pinFor}
+            onDone={() => {
+              setPinFor(null);
+              toast("PIN guardado");
+              pins.reload();
+            }}
+          />
+        )}
+      </Modal>
+
+      <Modal
         open={inviteOpen}
         onClose={() => setInviteOpen(false)}
         title="Invitar persona"
@@ -248,6 +310,40 @@ export function EquipoView() {
         )}
       </Modal>
     </>
+  );
+}
+
+/** PIN de 4 a 6 dígitos con el que la persona se identifica en la caja registradora. */
+function PinForm({ who, onDone }: { who: { userId: string; self: boolean }; onDone: () => void }) {
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  async function onSubmit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setError(null);
+    setSaving(true);
+    const pin = String(new FormData(e.currentTarget).get("pin") ?? "").trim();
+    try {
+      await expectOk(
+        who.self
+          ? await api.v1.pins.me.$put({ json: { pin } })
+          : await api.v1.pins[":userId"].$put({ param: { userId: who.userId }, json: { pin } }),
+      );
+      onDone();
+    } catch (err) {
+      setError(errorMessage(err));
+      setSaving(false);
+    }
+  }
+  return (
+    <form onSubmit={onSubmit} className="space-y-4">
+      <Field label="PIN (4 a 6 dígitos)" hint="Sin repetir el mismo dígito ni secuencias como 1234.">
+        <Input name="pin" type="password" inputMode="numeric" autoComplete="off" pattern="[0-9]{4,6}" maxLength={6} required autoFocus />
+      </Field>
+      <ErrorNote message={error} />
+      <div className="flex justify-end">
+        <Button disabled={saving}>{saving ? "Guardando…" : "Guardar PIN"}</Button>
+      </div>
+    </form>
   );
 }
 
