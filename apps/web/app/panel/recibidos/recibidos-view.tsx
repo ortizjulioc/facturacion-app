@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useState } from "react";
 import { formatDocument } from "@facturacion/core";
 import {
@@ -313,6 +315,8 @@ function Detail({ id, canManage, onClose, onChanged }: { id: string; canManage: 
             <p className="text-zinc-600 dark:text-zinc-400">Las facturas de consumo no llevan aprobación comercial.</p>
           )}
 
+          <PurchasePanel id={id} receivedPurchaseId={r.purchaseId} canManage={canManage} onChanged={() => { reload(); onChanged(); }} />
+
           <ErrorNote message={actionError} />
           <div className="flex justify-between">
             <a className="text-sm underline" href={`${API_URL}/v1/received/${id}/xml`} target="_blank" rel="noreferrer">
@@ -343,5 +347,101 @@ function Delivery({ label, at, error }: { label: string; at: string | Date | nul
       {label}: {at ? <span className="text-emerald-700 dark:text-emerald-400">entregado {formatDateTime(at)}</span> : <span>pendiente</span>}
       {error && <span className="text-amber-700 dark:text-amber-300"> · {error}</span>}
     </p>
+  );
+}
+
+/** Registrar el e-CF como compra: proveedor, ITBIS por línea y entrada al inventario de lo que se reconoce como producto. */
+function PurchasePanel({ id, receivedPurchaseId, canManage, onChanged }: { id: string; receivedPurchaseId: string | null; canManage: boolean; onChanged: () => void }) {
+  const { toast } = useDialogs();
+  const router = useRouter();
+  const [branchId, setBranchId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const loadBranches = useCallback(async () => (await unwrap(await api.v1.branches.$get({ query: {} }))).data, []);
+  const branches = useQuery(loadBranches);
+  const loadPlan = useCallback(
+    async () => (receivedPurchaseId || !canManage ? null : (await unwrap(await api.v1.received[":id"]["purchase-plan"].$get({ param: { id }, query: branchId ? { branchId } : {} }))).data),
+    [id, branchId, receivedPurchaseId, canManage],
+  );
+  const { data: plan, error } = useQuery(loadPlan);
+
+  if (receivedPurchaseId) {
+    return (
+      <p className="text-sm">
+        Registrado como compra.{" "}
+        <Link className="underline" href={`/panel/compras/${receivedPurchaseId}`}>
+          Ver la compra
+        </Link>
+      </p>
+    );
+  }
+  if (!canManage) return null;
+
+  const needsBranch = !!error && /sucursal/i.test(error);
+  async function register(post: boolean) {
+    setActionError(null);
+    setBusy(true);
+    try {
+      const res = await unwrap(await api.v1.received[":id"].purchase.$post({ param: { id }, json: { post, ...(branchId ? { branchId } : {}) } }));
+      toast(post ? "Compra registrada" : "Borrador de compra creado");
+      if (!post) router.push(`/panel/compras/${res.data.purchase.id}`);
+      else onChanged();
+    } catch (e) {
+      setActionError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="space-y-2 rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
+      <p className="text-xs uppercase tracking-wide text-zinc-500">Compra</p>
+      {needsBranch && branches.data && (
+        <Field label="Sucursal a la que entra la mercancía">
+          <Select value={branchId} onChange={(e) => setBranchId(e.target.value)}>
+            <option value="">Elige una…</option>
+            {branches.data.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.name}
+              </option>
+            ))}
+          </Select>
+        </Field>
+      )}
+      {error && !needsBranch && <p className="text-zinc-600 dark:text-zinc-400">{error}</p>}
+      {plan && (
+        <>
+          <p className="text-zinc-600 dark:text-zinc-400">
+            Proveedor: {plan.supplier.name} {plan.supplier.willCreate ? <Badge>Se creará</Badge> : <Badge tone="success">Ya existe</Badge>}
+          </p>
+          <ul className="space-y-0.5">
+            {plan.lines.map((l) => (
+              <li key={l.lineNumber} className="flex justify-between gap-3">
+                <span>
+                  {l.quantity} × {l.name}
+                  <span className="ml-2 text-xs text-zinc-500">{l.match ? `→ ${l.match.productName}` : "sin producto (gasto)"}</span>
+                </span>
+                <span className="tabular-nums">{money(l.total, "DOP")}</span>
+              </li>
+            ))}
+          </ul>
+          {plan.warnings.map((w) => (
+            <p key={w} className="text-amber-700 dark:text-amber-300">
+              {w}
+            </p>
+          ))}
+          <ErrorNote message={actionError} />
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button variant="secondary" disabled={busy} onClick={() => register(false)}>
+              Crear borrador y revisar
+            </Button>
+            <Button disabled={busy} onClick={() => register(true)}>
+              Registrar compra
+            </Button>
+          </div>
+        </>
+      )}
+      {needsBranch && !plan && <ErrorNote message={actionError} />}
+    </section>
   );
 }
