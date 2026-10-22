@@ -5925,6 +5925,168 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       expect(await list(b, "?q=proveedor")).toHaveLength(2);
     });
 
+    // ───────────── Registrar como compra ─────────────
+
+    describe("registrar un e-CF recibido como compra", () => {
+      const lines = [
+        { name: "Café molido", code: "CAF-01", quantity: 10_000n, unitPrice: toCents("150.00"), tax: "ITBIS18" as const },
+        { name: "Arroz", quantity: 5_000n, unitPrice: toCents("40.00"), tax: "EXENTO" as const },
+        { name: "Flete", quantity: 1_000n, unitPrice: toCents("100.00"), tax: "ITBIS18" as const, isService: true },
+      ];
+      /** Lo que el proveedor factura: café (código CAF-01), arroz (solo coincide por nombre) y un flete sin producto. */
+      function conLineas(buyer: Comprador, over: { propina?: boolean; type?: "E31" | "E32" } = {}) {
+        const type = over.type ?? "E31";
+        const base = {
+          type,
+          encf: `E${type.slice(1)}${String(++encfN).padStart(10, "0")}`,
+          sequenceExpiry: type === "E31" ? "2027-12-31" : null,
+          issuedAt: new Date("2026-10-20T15:00:00Z"),
+          seller: { ...proveedor, email: "ventas@proveedor.example", phones: ["809-555-0100"] },
+          buyer: { docType: "RNC" as const, docNumber: buyer.rnc, name: "Empresa compradora SRL" },
+          lines,
+          ...(over.propina ? { propinaLegal: true } : {}),
+        };
+        const total = buildEcf({ ...base, payments: [{ method: "TRANSFER", amount: 1n }] }).amounts.total;
+        return signEcf(buildEcf({ ...base, payments: [{ method: "TRANSFER", amount: total }] }).xml, supplierCert, new Date("2026-10-20T15:00:05Z")).xml;
+      }
+      async function conProductos(label: string) {
+        const b = await comprador(label);
+        const mk = async (body: Json) => (await json(await post("/v1/products", { trackInventory: true, ...body }, b.cookie))).data as Json;
+        const cafe = await mk({ name: "Café 1 lb", sku: "CAF-01", price: "250.00", tax: "ITBIS18" });
+        const arroz = await mk({ name: "ARROZ", price: "60.00", tax: "EXENTO", allowsDecimals: true });
+        const flete = await mk({ name: "Servicio de transporte", price: "150.00", tax: "ITBIS18", trackInventory: false });
+        return { ...b, cafe, arroz, flete };
+      }
+      type ConProductos = Awaited<ReturnType<typeof conProductos>>;
+      const recibir = async (b: Comprador, xml: string) => {
+        expect(estado(await (await receive(xml)).text())).toBe("0");
+        return (await list(b))[0]!;
+      };
+      const onHand = async (b: ConProductos, productId: string) =>
+        ((await json(await get(`/v1/inventory/stock?branchId=${b.branch.id}`, b.cookie))).data as Json[]).find((r) => r.productId === productId)?.quantity as string | undefined;
+      const toPurchase = (b: Comprador, id: string, body: Json = {}) => post(`/v1/received/${id}/purchase`, body, b.cookie);
+
+      it("de un clic: crea el proveedor, arma las líneas con su ITBIS y da entrada al inventario", async () => {
+        const b = await conProductos("rxrp1");
+        const row = await recibir(b, conLineas(b));
+        expect(row.purchaseId).toBeNull();
+
+        const res = await toPurchase(b, row.id);
+        expect(res.status, JSON.stringify(await res.clone().json())).toBe(201);
+        const { purchase, received: after } = (await json(res)).data;
+        expect(purchase).toMatchObject({
+          kind: "SUPPLIER_INVOICE",
+          status: "POSTED",
+          ncf: row.encf,
+          supplierName: "Proveedor SRL",
+          supplierDocNumber: "101672919",
+          invoiceDate: "2026-10-20",
+          paymentMethod: "TRANSFER",
+          notes: expect.stringContaining(row.encf),
+        });
+        // 10 × 150 + 1 × 100 con ITBIS 18 % = 1,600 + 288; 5 × 40 exento = 200.
+        expect(purchase.totals).toMatchObject({ base18: "1600.00", tax18: "288.00", baseExempt: "200.00", total: "2088.00" });
+        expect(purchase.lines.map((l: Json) => [l.name, l.quantity, l.unitCost, l.tax])).toEqual([
+          ["Café molido", "10", "150.00", "ITBIS18"],
+          ["Arroz", "5", "40.00", "EXENTO"],
+          ["Flete", "1", "100.00", "ITBIS18"],
+        ]);
+        expect(after.purchaseId).toBe(purchase.id);
+        expect(purchase.lines[0].productId).toBe(b.cafe.id); // por el código del proveedor
+        expect(purchase.lines[1].productId).toBe(b.arroz.id); // por el nombre
+        expect(purchase.lines[2].productId).toBeNull(); // el flete no es un producto
+
+        // Entró al inventario lo que se reconoció, y el proveedor quedó en el catálogo.
+        expect(await onHand(b, b.cafe.id)).toBe("10");
+        expect(await onHand(b, b.arroz.id)).toBe("5");
+        const suppliers = (await json(await get("/v1/suppliers", b.cookie))).data as Json[];
+        expect(suppliers.filter((s) => s.documentNumber === "101672919")).toHaveLength(1);
+        expect(suppliers.find((s) => s.documentNumber === "101672919")).toMatchObject({ name: "Proveedor SRL", email: "ventas@proveedor.example", phone: "809-555-0100" });
+        expect((await json(await get(`/v1/purchases/${purchase.id}`, b.cookie))).data.status).toBe("POSTED");
+
+        // Una vez registrada no se registra otra vez.
+        expect((await toPurchase(b, row.id)).status).toBe(409);
+        expect((await detail(b, row.id)).purchaseId).toBe(purchase.id);
+      });
+
+      it("muestra antes cómo quedaría: proveedor, líneas y qué producto es cada una", async () => {
+        const b = await conProductos("rxrp2");
+        const row = await recibir(b, conLineas(b));
+        const plan = (await json(await get(`/v1/received/${row.id}/purchase-plan`, b.cookie))).data;
+        expect(plan.supplier).toMatchObject({ id: null, name: "Proveedor SRL", rnc: "101672919", willCreate: true });
+        expect(plan.lines.map((l: Json) => l.match && [l.match.productName, l.match.by])).toEqual([["Café 1 lb", "code"], ["ARROZ", "name"], null]);
+        expect(plan).toMatchObject({ reportedTotal: "2088.00", computedTotal: "2088.00", warnings: [] });
+        expect(plan.input).toBeUndefined();
+        // Solo mira: nada se creó.
+        expect(((await json(await get("/v1/suppliers", b.cookie))).data as Json[]).some((s) => s.documentNumber === "101672919")).toBe(false);
+        expect((await detail(b, row.id)).purchaseId).toBeNull();
+      });
+
+      it("usa el proveedor que ya existe y respeta los productos que se elijan a mano", async () => {
+        const b = await conProductos("rxrp3");
+        const existing = (await json(await post("/v1/suppliers", { name: "Proveedor (ficha propia)", documentType: "RNC", documentNumber: "101672919" }, b.cookie))).data;
+        const row = await recibir(b, conLineas(b));
+        const res = await toPurchase(b, row.id, { mappings: { "1": null, "3": b.flete.id } });
+        expect(res.status, JSON.stringify(await res.clone().json())).toBe(201);
+        const { purchase } = (await json(res)).data;
+        expect(purchase).toMatchObject({ supplierId: existing.id, supplierName: "Proveedor (ficha propia)" });
+        expect(purchase.lines.map((l: Json) => l.productId)).toEqual([null, b.arroz.id, b.flete.id]);
+        expect(await onHand(b, b.cafe.id)).toBe("0"); // el café se descartó a mano: no entró
+        expect(await onHand(b, b.arroz.id)).toBe("5");
+        expect(((await json(await get("/v1/suppliers", b.cookie))).data as Json[]).filter((s) => s.documentNumber === "101672919")).toHaveLength(1);
+      });
+
+      it("puede dejar la compra en borrador para revisarla, y el inventario entra al registrarla", async () => {
+        const b = await conProductos("rxrp4");
+        const row = await recibir(b, conLineas(b));
+        const { purchase } = (await json(await toPurchase(b, row.id, { post: false }))).data;
+        expect(purchase.status).toBe("DRAFT");
+        expect(await onHand(b, b.cafe.id)).toBe("0");
+        expect((await post(`/v1/purchases/${purchase.id}/post`, {}, b.cookie)).status).toBe(200);
+        expect(await onHand(b, b.cafe.id)).toBe("10");
+      });
+
+      it("pide la sucursal cuando hay varias, y rechaza lo que ya existe o no cuadra", async () => {
+        const b = await conProductos("rxrp5");
+        const second = (await json(await post("/v1/branches", { name: "Segunda", code: "S2" }, b.cookie))).data;
+        const row = await recibir(b, conLineas(b));
+        const ambiguous = await toPurchase(b, row.id);
+        expect(ambiguous.status).toBe(422);
+        expect(await error(ambiguous)).toMatch(/sucursal/);
+        expect((await toPurchase(b, row.id, { branchId: second.id })).status).toBe(201);
+        expect(await onHand({ ...b, branch: second }, b.cafe.id)).toBe("10");
+
+        // El mismo NCF de ese proveedor ya registrado a mano.
+        const c = await conProductos("rxrp5b");
+        const dupRow = await recibir(c, conLineas(c));
+        const sup = (await json(await post("/v1/suppliers", { name: "Proveedor", documentType: "RNC", documentNumber: "101672919" }, c.cookie))).data;
+        await post("/v1/purchases", { kind: "SUPPLIER_INVOICE", branchId: c.branch.id, supplierId: sup.id, ncf: dupRow.encf, invoiceDate: "2026-10-20", lines: [{ name: "x", quantity: "1", unitCost: "10.00", tax: "EXENTO" }] }, c.cookie);
+        const dup = await toPurchase(c, dupRow.id);
+        expect(dup.status).toBe(409);
+        expect(await error(dup)).toMatch(/Ya registraste/);
+
+        // Con impuestos adicionales el total del e-CF no sale de sus líneas: se pide registrarlo a mano.
+        const d = await conProductos("rxrp5c");
+        const withTip = await recibir(d, conLineas(d, { propina: true }));
+        const mismatch = await toPurchase(d, withTip.id);
+        expect(mismatch.status).toBe(422);
+        expect(await error(mismatch)).toMatch(/no coincide con el del e-CF/);
+        expect((await detail(d, withTip.id)).purchaseId).toBeNull();
+      });
+
+      it("las facturas de consumo del proveedor también se registran, y solo un administrador puede", async () => {
+        const b = await conProductos("rxrp6");
+        const row = await recibir(b, conLineas(b, { type: "E32" }));
+        expect(row.ecfType).toBe("32");
+        const cashier = await signUp("rxrp6c");
+        await prisma.member.create({ data: { id: randomUUID(), organizationId: b.orgId, userId: cashier.userId, role: "member" } });
+        const cookie = await setActive(b.orgId, cashier.cookie);
+        expect((await post(`/v1/received/${row.id}/purchase`, {}, cookie)).status).toBe(403);
+        expect((await get(`/v1/received/${row.id}/purchase-plan`, cookie)).status).toBe(403);
+        expect((await toPurchase(b, row.id)).status).toBe(201);
+      });
+    });
+
     // ───────────── Aprobaciones que nos mandan nuestros clientes ─────────────
 
     describe("aprobación de un cliente sobre lo que emitimos", () => {

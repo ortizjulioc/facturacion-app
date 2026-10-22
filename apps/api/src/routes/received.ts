@@ -3,6 +3,9 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { fromCents } from "@facturacion/core";
 import type { Prisma } from "@facturacion/db";
+import { auditEntry } from "../lib/audit";
+import { purchaseDto } from "../lib/purchases";
+import { planPurchase, registerPurchase } from "../lib/received-purchase";
 import { decide, formatDmyUtc, ReceiverError, resendApproval } from "../lib/receiver";
 import { listQuery, pageOf, uuidParam } from "../lib/schemas";
 import { zv } from "../lib/validator";
@@ -37,6 +40,8 @@ export const receivedDto = (r: Row) => ({
   peerError: r.peerError,
   dgiiSentAt: r.dgiiSentAt,
   dgiiError: r.dgiiError,
+  /** Compra en la que ya se registró este e-CF. */
+  purchaseId: r.purchaseId,
 });
 
 const query = listQuery.omit({ active: true }).extend({
@@ -45,6 +50,16 @@ const query = listQuery.omit({ active: true }).extend({
 });
 
 const body = z.object({ approved: z.boolean(), reason: z.string().trim().max(250).nullish() });
+
+const purchaseBody = z.object({
+  branchId: z.uuid().nullish(),
+  expenseType: z.number().int().min(1).max(11).nullish(),
+  paymentMethod: z.enum(["CASH", "TRANSFER", "CHECK", "CARD", "CREDIT", "OTHER"]).nullish(),
+  /** Producto de cada línea (por número de línea); null = ninguno aunque el sistema lo reconozca. */
+  mappings: z.record(z.string(), z.uuid().nullable()).optional(),
+  /** true (lo usual): registrar la compra y dar entrada al inventario; false: dejarla en borrador para revisarla. */
+  post: z.boolean().default(true),
+});
 
 const fail = (e: unknown): never => {
   if (e instanceof ReceiverError) throw new HTTPException(e.status, { message: e.message });
@@ -107,6 +122,34 @@ export const received = new Hono<AppEnv>()
     } catch (e) {
       return fail(e);
     }
+  })
+  // Cómo quedaría la compra que sale de este e-CF (proveedor, líneas, impuestos y productos reconocidos).
+  .get("/:id/purchase-plan", requireRole("owner", "admin"), zv("param", uuidParam), zv("query", z.object({ branchId: z.uuid().optional() })), async (c) => {
+    const { branchId } = c.req.valid("query");
+    const data = await c.get("run")(async (tx) => {
+      const { plan } = await planPurchase(tx, c.req.valid("param").id, { branchId: branchId ?? null });
+      const { input: _input, ...rest } = plan;
+      return rest;
+    });
+    return c.json({ data });
+  })
+  // Registra este e-CF como compra: crea el proveedor si falta, arma las líneas con su ITBIS y da entrada al inventario.
+  .post("/:id/purchase", requireRole("owner", "admin"), zv("param", uuidParam), zv("json", purchaseBody), async (c) => {
+    const { id } = c.req.valid("param");
+    const input = c.req.valid("json");
+    const organizationId = c.get("organizationId");
+    const result = await c.get("run")(async (tx) => {
+      const purchase = await registerPurchase(tx, organizationId, c.get("user").id, id, {
+        branchId: input.branchId ?? null,
+        expenseType: input.expenseType ?? null,
+        paymentMethod: input.paymentMethod ?? null,
+        ...(input.mappings ? { mappings: input.mappings } : {}),
+        post: input.post,
+      });
+      await tx.auditLog.create({ data: auditEntry(c, "receiver.purchase", "purchase", purchase.id, { receivedId: id, posted: input.post }) });
+      return { purchase, received: await tx.receivedDocument.findFirstOrThrow({ where: { id } }) };
+    });
+    return c.json({ data: { purchase: purchaseDto(result.purchase), received: receivedDto(result.received) } }, 201);
   })
   // Reintenta entregar una respuesta cuya entrega falló.
   .post("/:id/resend", requireRole("owner", "admin"), zv("param", uuidParam), async (c) => {

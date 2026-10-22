@@ -2,6 +2,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import {
   calculateDocument,
+  convertCents,
   DEFAULT_EXPENSE_TYPE,
   EXPENSE_TYPES,
   fromCents,
@@ -11,10 +12,14 @@ import {
   TAX_CODES,
   toCents,
   toMilli,
+  unitCostFromBase,
   type DocumentTotals,
   type LineInput,
 } from "@facturacion/core";
 import { Prisma } from "@facturacion/db";
+import { auditRow } from "./audit";
+import { allocateEncf } from "./encf";
+import { moveStock } from "./stock";
 import { isoDate, money, optionalText, quantity } from "./schemas";
 import type { TenantTx } from "../types";
 
@@ -340,3 +345,93 @@ export const purchaseDto = (p: PurchaseFull) => ({
     total: m(l.total),
   })),
 });
+
+const notFound = () => new HTTPException(404, { message: "Compra no encontrada" });
+
+/**
+ * Entrada al inventario por una compra registrada (salvo gastos menores).
+ * El costo guardado es el unitario NETO (sin impuesto) y en pesos; también actualiza el "último costo"
+ * del producto, aunque no controle inventario.
+ */
+async function applyPurchaseStock(tx: TenantTx, purchase: PurchaseFull, userId: string) {
+  const perProduct = new Map<string, { qty: bigint; base: bigint }>();
+  for (const line of purchase.lines) {
+    if (!line.productId) continue;
+    const acc = perProduct.get(line.productId) ?? { qty: 0n, base: 0n };
+    acc.qty += line.quantity;
+    acc.base += convertCents(line.base, purchase.exchangeRate.toString());
+    perProduct.set(line.productId, acc);
+  }
+  if (perProduct.size === 0) return;
+
+  const products = await tx.product.findMany({
+    where: { id: { in: [...perProduct.keys()] } },
+    select: { id: true, name: true, trackInventory: true },
+  });
+  // Orden estable: evita bloqueos cruzados entre registros concurrentes.
+  for (const product of products.sort((a, b) => a.id.localeCompare(b.id))) {
+    const { qty, base } = perProduct.get(product.id)!;
+    const unitCost = unitCostFromBase(base, qty);
+    if (product.trackInventory) {
+      await moveStock(tx, {
+        organizationId: purchase.organizationId,
+        userId,
+        productId: product.id,
+        productName: product.name,
+        branchId: purchase.branchId,
+        delta: qty,
+        type: "RECEIPT",
+        allowNegative: true,
+        unitCost,
+        purchaseId: purchase.id,
+        reason: `Compra ${purchase.ncf ?? ""}`.trim(),
+      });
+    }
+    await tx.product.update({ where: { id: product.id }, data: { lastCost: unitCost } });
+  }
+}
+
+/**
+ * Registra una compra en borrador: asigna el e-NCF (E41/E43), da entrada al inventario y la congela. La usan el botón
+ * «Registrar» de una compra y el registro de un e-CF recibido como compra.
+ */
+export async function postPurchase(tx: TenantTx, organizationId: string, id: string, userId: string): Promise<PurchaseFull> {
+  const draft = await tx.purchase.findFirst({ where: { id }, include: FULL });
+  if (!draft) throw notFound();
+  if (draft.status !== "DRAFT") throw new HTTPException(409, { message: "Esta compra ya está registrada" });
+  if (draft.total <= 0n) throw unprocessable("El total de la compra debe ser mayor que cero");
+
+  // El proveedor se refresca desde su ficha: pudo cambiar desde que se creó el borrador.
+  let supplier = {
+    supplierName: draft.supplierName,
+    supplierDocType: draft.supplierDocType,
+    supplierDocNumber: draft.supplierDocNumber,
+  };
+  if (draft.supplierId) {
+    const s = await tx.supplier.findFirst({ where: { id: draft.supplierId } });
+    if (s) {
+      supplier = { supplierName: s.name, supplierDocType: s.documentType, supplierDocNumber: s.documentNumber };
+    }
+  }
+
+  let ncf = draft.ncf;
+  if (draft.kind !== "SUPPLIER_INVOICE") {
+    if (draft.kind === "E41" && !supplier.supplierDocNumber) {
+      throw unprocessable("El comprobante de compras exige que el proveedor tenga cédula o RNC");
+    }
+    const profile = await tx.companyProfile.findFirst();
+    if (!profile) throw unprocessable("Registra los datos fiscales de la empresa antes de emitir comprobantes");
+    ncf = await allocateEncf(tx, draft.kind, null);
+  }
+
+  const posted = await tx.purchase.update({
+    where: { id },
+    data: { status: "POSTED", postedAt: new Date(), ncf, ...supplier },
+    include: FULL,
+  });
+  if (draft.kind !== "E43") await applyPurchaseStock(tx, posted, userId);
+  await tx.auditLog.create({
+    data: auditRow({ organizationId, userId }, "purchase.post", "purchase", id, { kind: posted.kind, ncf, total: fromCents(posted.total) }),
+  });
+  return posted;
+}
