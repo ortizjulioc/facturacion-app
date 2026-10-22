@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createPrisma, withTenant } from "@facturacion/db";
-import { verifyPin } from "@facturacion/core";
-import { securityCodeOf, verifyEcfSignature } from "@facturacion/ecf";
+import { toCents, verifyPin } from "@facturacion/core";
+import { buildEcf, loadCertificate, securityCodeOf, signEcf, verifyEcfSignature, type EcfCertificate } from "@facturacion/ecf";
 import { testP12 } from "@facturacion/ecf/testing";
 import { PosEngine, type FetchLike } from "@facturacion/pos-engine";
 import { createApp } from "./app";
@@ -5521,6 +5521,118 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       const q = (await json(await get("/v1/fiscal/queue", b.cookie))).data;
       expect(q.FAILED).toBe(1);
       expect(q.failed[0]).toMatchObject({ documentId: doc.id, encf: doc.encf, error: "Estructura inválida" });
+    });
+  });
+
+  describe("firma local de la caja", () => {
+    const Y = "/v1/sync";
+    /** Empresa con certificado en la nube y una caja con un bloque de e-NCF. */
+    async function tienda(label: string) {
+      const b = await billing(label, { seqs: [["E32", 1, 100]] });
+      const { p12, password } = testP12();
+      expect((await send("PUT", "/v1/company/certificate", { p12: Buffer.from(p12).toString("base64"), password }, b.cookie)).status).toBe(200);
+      const t = (await json(await post("/v1/terminals", { branchId: b.branch.id, name: "Caja 1", code: "C1" }, b.cookie))).data;
+      const first = BigInt((await json(await post(`${Y}/sequence-blocks`, { terminalId: t.id, ecfType: "E32", size: 10 }, b.cookie))).data.fromNumber);
+      return { ...b, terminal: t, first, cert: loadCertificate(p12, password) };
+    }
+    type Tienda = Awaited<ReturnType<typeof tienda>>;
+
+    const encfOf = (n: bigint) => `E32${String(n).padStart(10, "0")}`;
+    const saleBody = (t: Tienda, n: bigint, over: Json = {}) => ({
+      clientId: randomUUID(),
+      terminalId: t.terminal.id,
+      type: "E32",
+      encf: encfOf(n),
+      issuedAt: "2026-10-20T15:30:00.000Z",
+      lines: [{ productId: t.product.id, name: "Producto 118", quantity: "2", unitPrice: "118.00", tax: "ITBIS18", priceIncludesTax: true }],
+      payments: [{ method: "CASH", amount: "236.00" }],
+      total: "236.00",
+      ...over,
+    });
+    /** El e-CF de esa venta firmado por la caja con `cert`. */
+    const signedBy = (cert: EcfCertificate, n: bigint, over: { total?: string; at?: string } = {}) => {
+      const issuedAt = new Date("2026-10-20T15:30:00.000Z");
+      const built = buildEcf({
+        type: "E32",
+        encf: encfOf(n),
+        issuedAt,
+        seller: { rnc: "101001577", legalName: "Empresa de Prueba SRL", address: "Calle Principal 1, Santo Domingo" },
+        lines: [{ name: "Producto 118", quantity: 2000n, unitPrice: toCents(over.total ?? "118.00"), priceIncludesTax: true, tax: "ITBIS18" }],
+        payments: [{ method: "CASH", amount: toCents(over.total ? String(Number(over.total) * 2) : "236.00") }],
+      });
+      const signed = signEcf(built.xml, cert, new Date(over.at ?? "2026-10-20T15:30:02.000Z"));
+      return { xml: signed.xml, securityCode: signed.securityCode, signedAt: signed.signedAt.toISOString() };
+    };
+    const storedDoc = (t: Tienda, id: string) => withTenant(prisma, t.orgId).document.findFirstOrThrow({ where: { id } });
+
+    it("entrega el certificado solo a un administrador, solo cuando cambió, y avisa si ya no hay", async () => {
+      const t = await tienda("lc1");
+      const first = await json(await get(`${Y}/certificate`, t.cookie));
+      expect(first.data).toMatchObject({ status: "updated", subject: "EMISOR DE PRUEBA SRL" });
+      expect(Buffer.from(first.data.p12, "base64").length).toBeGreaterThan(100);
+      expect(first.data.password).toBeTruthy();
+      expect(loadCertificate(Buffer.from(first.data.p12, "base64"), first.data.password).subject).toBe("EMISOR DE PRUEBA SRL");
+
+      expect((await json(await get(`${Y}/certificate?version=${encodeURIComponent(first.data.version)}`, t.cookie))).data).toEqual({ status: "unchanged", version: first.data.version });
+      const logs = await withTenant(prisma, t.orgId).auditLog.findMany({ where: { action: "sync.certificate" } });
+      expect(logs).toHaveLength(1); // solo la entrega real queda en la bitácora
+
+      // Un cajero (miembro sin rol de administrador) no recibe la llave privada.
+      const cashier = await signUp("lc1c");
+      await prisma.member.create({ data: { id: randomUUID(), organizationId: t.orgId, userId: cashier.userId, role: "member" } });
+      const cookie = await setActive(t.orgId, cashier.cookie);
+      const denied = await get(`${Y}/certificate`, cookie);
+      expect(denied.status).toBe(403);
+      expect(JSON.stringify(await denied.json())).not.toContain(first.data.password);
+
+      await call("/v1/company/certificate", { method: "DELETE", cookie: t.cookie });
+      expect((await json(await get(`${Y}/certificate?version=${encodeURIComponent(first.data.version)}`, t.cookie))).data).toEqual({ status: "none" });
+      expect((await get(`${Y}/certificate`)).status).toBe(401);
+    });
+
+    it("guarda el e-CF que la caja firmó (el del QR impreso) y no firma otro", async () => {
+      const t = await tienda("lc2");
+      const local = signedBy(t.cert, t.first);
+      const res = await post(`${Y}/sales`, saleBody(t, t.first, { ecf: local }), t.cookie);
+      expect(res.status, JSON.stringify(await res.clone().json())).toBe(201);
+      const data = (await json(res)).data;
+      expect(data.ecf.securityCode).toBe(local.securityCode);
+      expect(new Date(data.ecf.signedAt).toISOString()).toBe(local.signedAt);
+      const row = await storedDoc(t, data.id);
+      expect(row.ecfXml).toBe(local.xml);
+      expect(row.securityCode).toBe(local.securityCode);
+      expect(verifyEcfSignature(row.ecfXml!)).toBe(true);
+    });
+
+    it("no acepta una firma de otro certificado, de otro monto o con datos que no cuadran: firma la nube y lo anota", async () => {
+      const t = await tienda("lc3");
+      const stranger = loadCertificate(...(Object.values(testP12({ cn: "OTRO" })) as [Uint8Array, string]));
+      const cases: [string, Json][] = [
+        ["otro certificado", signedBy(stranger, t.first)],
+        ["otro monto", signedBy(t.cert, t.first + 1n, { total: "100.00" })],
+        ["otro e-NCF", signedBy(t.cert, t.first + 5n)],
+        ["fecha de firma distinta", { ...signedBy(t.cert, t.first + 3n), signedAt: "2026-10-20T15:31:00.000Z" }],
+        ["código distinto", { ...signedBy(t.cert, t.first + 4n), securityCode: "ZZZZZZ" }],
+        ["XML alterado", (() => { const s = signedBy(t.cert, t.first + 5n); return { ...s, xml: s.xml.replace("<MontoTotal>236.00", "<MontoTotal>9.00") }; })()],
+      ];
+      for (const [label, ecf] of cases) {
+        const n = t.first + BigInt(cases.findIndex((c) => c[0] === label));
+        const res = await post(`${Y}/sales`, saleBody(t, n, { ecf }), t.cookie);
+        expect(res.status, label).toBe(201);
+        const doc = (await json(res)).data;
+        expect(doc.ecf.securityCode, label).toHaveLength(6);
+        expect(doc.ecf.securityCode, label).not.toBe(ecf.securityCode);
+        expect(verifyEcfSignature((await storedDoc(t, doc.id)).ecfXml!), label).toBe(true); // la que firmó la nube sí es válida
+      }
+      const logs = await withTenant(prisma, t.orgId).auditLog.findMany({ where: { action: "document.local_signature_rejected" } });
+      expect(logs).toHaveLength(cases.length);
+    });
+
+    it("una venta sin firma local sigue firmándose en la nube como antes", async () => {
+      const t = await tienda("lc4");
+      const res = await post(`${Y}/sales`, saleBody(t, t.first), t.cookie);
+      expect(res.status).toBe(201);
+      expect((await json(res)).data.ecf.securityCode).toHaveLength(6);
     });
   });
 

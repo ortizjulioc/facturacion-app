@@ -6,6 +6,7 @@ import { Prisma } from "@facturacion/db";
 import { auditEntry } from "../lib/audit";
 import { buildDraft, documentDto, FULL, lineInput, paymentInput, type DocumentInput } from "../lib/documents";
 import { issueDocument } from "../lib/issue";
+import { readCertificateFile } from "../lib/signing";
 import { frozenReport, shiftReport } from "../lib/shifts";
 import { money, optionalText } from "../lib/schemas";
 import { zv } from "../lib/validator";
@@ -110,6 +111,17 @@ const saleBody = z.object({
   payments: z.array(paymentInput).min(1).max(20),
   /** Total que la caja imprimió: debe coincidir con el que calcula la nube. */
   total: money,
+  /**
+   * e-CF que la caja firmó localmente con el certificado de la empresa (la representación impresa ya lleva su código de
+   * seguridad). La nube lo guarda tal cual si es válido; si no, firma ella.
+   */
+  ecf: z
+    .object({
+      xml: z.string().min(100).max(2_000_000),
+      securityCode: z.string().length(6),
+      signedAt: z.iso.datetime(),
+    })
+    .nullish(),
 }).superRefine((v, ctx) => {
   if (v.type === "E34") {
     if (!v.referencedEncf) ctx.addIssue({ code: "custom", path: ["referencedEncf"], message: "La nota de crédito debe indicar el comprobante que modifica" });
@@ -184,6 +196,10 @@ export const sync = new Hono<AppEnv>()
               rnc: company.rnc,
               address: company.address,
               phone: company.phone,
+              email: company.email,
+              economicActivity: company.economicActivity,
+              province: company.province,
+              municipality: company.municipality,
               environment: company.environment,
               requireShift: company.requireShift,
             }
@@ -194,6 +210,23 @@ export const sync = new Hono<AppEnv>()
       hasMore: products.length === limit || customers.length === limit,
       serverTime: new Date().toISOString(),
     });
+  })
+  // Certificado digital de la empresa para que la caja firme sin conexión. Solo lo recibe un administrador (la sesión
+  // con la que se configuró la caja): es una llave privada. `version` es la que la caja ya tiene.
+  .get("/certificate", zv("query", z.object({ version: z.string().max(64).optional() })), async (c) => {
+    if (!isAdmin(c.get("role"))) throw new HTTPException(403, { message: "Solo un administrador puede bajar el certificado a la caja" });
+    const { version } = c.req.valid("query");
+    const organizationId = c.get("organizationId");
+    const out = await c.get("run")(async (tx) => {
+      const row = await tx.companyCertificate.findFirst({ select: { updatedAt: true } });
+      if (!row) return { status: "none" as const };
+      const current = row.updatedAt.toISOString();
+      if (version === current) return { status: "unchanged" as const, version: current };
+      const cert = await readCertificateFile(tx, c.get("deps").env, organizationId);
+      await tx.auditLog.create({ data: auditEntry(c, "sync.certificate", "company_certificate", organizationId, { subject: cert.subject }) });
+      return { status: "updated" as const, version: current, ...cert };
+    });
+    return c.json({ data: out });
   })
   // Bloques de e-NCF de una caja (con lo que queda).
   .get("/sequence-blocks", zv("query", z.object({ terminalId: z.uuid() })), async (c) => {
@@ -431,7 +464,12 @@ export const sync = new Hono<AppEnv>()
         organizationId,
         userId,
         env: c.get("deps").env,
-        preset: { encf: input.encf, issuedAt: new Date(input.issuedAt), shiftId: shift?.id ?? null },
+        preset: {
+          encf: input.encf,
+          issuedAt: new Date(input.issuedAt),
+          shiftId: shift?.id ?? null,
+          ...(input.ecf ? { local: { xml: input.ecf.xml, securityCode: input.ecf.securityCode, signedAt: new Date(input.ecf.signedAt) } } : {}),
+        },
       });
       // La nube registra hasta dónde llegó la caja (nunca retrocede).
       if (block.nextNumber <= n) await tx.sequence.update({ where: { id: block.id }, data: { nextNumber: n + 1n } });

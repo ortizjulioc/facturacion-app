@@ -4,7 +4,7 @@ import { auditRow } from "./audit";
 import { asSalesType, FULL, type DocumentFull } from "./documents";
 import { allocateEncf } from "./encf";
 import { enqueueIfAuto } from "./fiscal-queue";
-import { signDocumentData, type Signature } from "./signing";
+import { acceptLocalSignature, signDocumentData, type LocalSignature, type Signature } from "./signing";
 import { applyDocumentStock } from "./stock";
 import type { Env } from "../env";
 import type { TenantTx } from "../types";
@@ -29,7 +29,7 @@ export async function issueDocument(
      * Venta hecha SIN conexión en una caja: el e-NCF y la fecha ya existen (salieron del bloque de la caja y
      * están impresos en el ticket), así que no se asigna número ni se rechaza por existencia: la venta ya ocurrió.
      */
-    preset?: { encf: string; issuedAt: Date; shiftId?: string | null };
+    preset?: { encf: string; issuedAt: Date; shiftId?: string | null; local?: LocalSignature };
   },
 ): Promise<DocumentFull> {
   const { id, organizationId, userId, env, preset } = params;
@@ -123,7 +123,18 @@ export async function issueDocument(
   // de caja sin conexión ya ocurrió (y está impresa): si no se puede firmar, queda emitida sin firma y se firma después.
   let signature: Signature | null = null;
   try {
-    signature = await signDocumentData(tx, env, organizationId, { ...draft, encf, issuedAt, ...buyer }, profile);
+    if (preset?.local) {
+      // La caja ya firmó (y el ticket lleva ese código de seguridad): se guarda su XML. Si no es válido se anota y
+      // se firma aquí, aunque el código impreso ya no coincida con el del comprobante.
+      const accepted = await acceptLocalSignature(tx, env, organizationId, { type: draft.type, encf, total: draft.total }, profile, preset.local);
+      if (accepted.ok) signature = accepted.signature;
+      else {
+        await tx.auditLog.create({
+          data: auditRow({ organizationId, userId }, "document.local_signature_rejected", "document", id, { encf, reason: accepted.reason }),
+        });
+      }
+    }
+    signature ??= await signDocumentData(tx, env, organizationId, { ...draft, encf, issuedAt, ...buyer }, profile);
   } catch (e) {
     if (!preset) throw e;
     await tx.auditLog.create({

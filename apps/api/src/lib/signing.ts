@@ -1,8 +1,15 @@
 import { HTTPException } from "hono/http-exception";
-import { parseEncf, type EcfType, type ModificationCode } from "@facturacion/core";
+import { fromCents, parseEncf, type EcfType, type ModificationCode } from "@facturacion/core";
 import {
   buildEcf,
   buildRfce,
+  certificateBase64,
+  formatDateTime,
+  readSignedEcf,
+  securityCodeOf,
+  sellerOf,
+  signerCertificateOf,
+  verifyEcfSignature,
   certificateProblem,
   EcfError,
   loadCertificate,
@@ -67,6 +74,13 @@ function infoOf(row: { subject: string; notBefore: Date; notAfter: Date; updated
   };
 }
 
+/** El .p12 y su contraseña en claro, SOLO para entregarlos a una caja de la empresa (ver `GET /v1/sync/certificate`). */
+export async function readCertificateFile(tx: TenantTx, env: Env, organizationId: string) {
+  const row = await tx.companyCertificate.findFirstOrThrow();
+  const { p12, password } = JSON.parse(open(env, organizationId, row.secret).toString("utf8")) as { p12: string; password: string };
+  return { p12, password, subject: row.subject, notAfter: row.notAfter.toISOString() };
+}
+
 export async function certificateInfo(tx: TenantTx): Promise<CertificateInfo | null> {
   const row = await tx.companyCertificate.findFirst({
     select: { subject: true, notBefore: true, notAfter: true, updatedAt: true },
@@ -94,15 +108,6 @@ export async function loadSigner(tx: TenantTx, env: Env, organizationId: string)
 }
 
 // ───────────── Del comprobante al e-CF ─────────────
-
-/** Teléfono en el formato xxx-xxx-xxxx de la DGII, o null si no tiene 10 dígitos. */
-function phoneOf(raw: string | null): string | null {
-  const digits = (raw ?? "").replace(/\D/g, "");
-  const local = digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
-  return local.length === 10 ? `${local.slice(0, 3)}-${local.slice(3, 6)}-${local.slice(6)}` : null;
-}
-
-const codeOf = (v: string | null) => (v && /^\d{6}$/.test(v.trim()) ? v.trim() : null);
 
 /** Vencimiento de la secuencia a la que pertenece el número (AAAA-MM-DD). */
 async function sequenceExpiry(tx: TenantTx, encf: string): Promise<string | null> {
@@ -132,17 +137,7 @@ async function ecfInputFor(tx: TenantTx, doc: DocumentFull, profile: Profile): P
     encf: doc.encf,
     sequenceExpiry: type === "E31" || type === "E33" ? await sequenceExpiry(tx, doc.encf) : null,
     issuedAt: doc.issuedAt,
-    seller: {
-      rnc: profile.rnc,
-      legalName: profile.legalName,
-      tradeName: profile.tradeName,
-      address: profile.address,
-      municipalityCode: codeOf(profile.municipality),
-      provinceCode: codeOf(profile.province),
-      phones: phoneOf(profile.phone) ? [phoneOf(profile.phone)!] : [],
-      email: profile.email,
-      economicActivity: profile.economicActivity,
-    },
+    seller: sellerOf(profile),
     buyer:
       doc.buyerDocType && doc.buyerDocNumber
         ? { docType: doc.buyerDocType, docNumber: doc.buyerDocNumber, name: doc.buyerName }
@@ -161,6 +156,36 @@ async function ecfInputFor(tx: TenantTx, doc: DocumentFull, profile: Profile): P
     payments: doc.payments.map((p) => ({ method: p.method, amount: p.amount })),
     reference,
   };
+}
+
+/** Firma que trae una venta hecha en la caja sin conexión. */
+export type LocalSignature = { xml: string; securityCode: string; signedAt: Date };
+
+/**
+ * Acepta el e-CF que la caja firmó localmente (la representación impresa ya lleva su código de seguridad, así que la
+ * nube tiene que guardar ESE XML y no firmar otro). Se comprueba que sea íntegro, que sea de esta venta y que lo haya
+ * firmado el certificado de la empresa. Devuelve la firma lista para guardar, o el motivo por el que no se acepta.
+ */
+export async function acceptLocalSignature(
+  tx: TenantTx,
+  env: Env,
+  organizationId: string,
+  doc: { type: string; encf: string; total: bigint },
+  profile: Pick<Profile, "rnc">,
+  local: LocalSignature,
+): Promise<{ ok: true; signature: Signature } | { ok: false; reason: string }> {
+  const cert = await loadSigner(tx, env, organizationId);
+  if (!cert) return { ok: false, reason: "la empresa no tiene un certificado cargado en la nube" };
+  const facts = readSignedEcf(local.xml);
+  if (facts.root !== "ECF") return { ok: false, reason: "el XML no es un e-CF" };
+  if (!verifyEcfSignature(local.xml)) return { ok: false, reason: "la firma no es válida" };
+  if (signerCertificateOf(local.xml) !== certificateBase64(cert)) return { ok: false, reason: "lo firmó otro certificado" };
+  if (facts.type !== doc.type.slice(1) || facts.encf !== doc.encf) return { ok: false, reason: "no corresponde al e-NCF de la venta" };
+  if (facts.total !== fromCents(doc.total)) return { ok: false, reason: "el monto no coincide con el de la venta" };
+  if (facts.rnc !== profile.rnc) return { ok: false, reason: "el RNC del emisor no coincide" };
+  if (securityCodeOf(local.xml) !== local.securityCode) return { ok: false, reason: "el código de seguridad no corresponde a la firma" };
+  if (facts.signedAt !== formatDateTime(local.signedAt)) return { ok: false, reason: "la fecha de firma no coincide" };
+  return { ok: true, signature: { ecfXml: local.xml, securityCode: local.securityCode, signedAt: local.signedAt } };
 }
 
 export type Signature = { ecfXml: string; securityCode: string; signedAt: Date };
