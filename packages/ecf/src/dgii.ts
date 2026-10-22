@@ -5,6 +5,8 @@ import {
   type FiscalMessage,
   type FiscalProvider,
   type FiscalStatus,
+  type ApprovalResult,
+  type DirectoryEntry,
   type SubmitInput,
   type SubmitResult,
   type SummaryResult,
@@ -57,6 +59,10 @@ function messagesOf(raw: unknown): FiscalMessage[] {
 function messageOf(body: unknown, fallback: string): string {
   if (body && typeof body === "object") {
     const b = body as Record<string, unknown>;
+    if (Array.isArray(b.mensaje)) {
+      const joined = (b.mensaje as unknown[]).flatMap((m) => asString(m) ?? []).join(" · ");
+      if (joined) return joined;
+    }
     const direct = asString(b.mensaje) ?? asString(b.message) ?? asString(b.error) ?? asString(b.title);
     if (direct) return direct;
     const list = messagesOf(b.mensajes);
@@ -159,6 +165,28 @@ export class DgiiClient implements FiscalProvider {
     const q = `RNC_Emisor=${encodeURIComponent(rnc)}&ENCF=${encodeURIComponent(encf)}&Cod_Seguridad_eCF=${encodeURIComponent(securityCode)}`;
     const b = await this.authorized("GET", `${this.urls.summaryQuery}/api/Consultas/Consulta?${q}`);
     return summaryOf(b, "La DGII no devolvió el estado del resumen");
+  }
+
+  async submitApproval(input: SubmitInput): Promise<ApprovalResult> {
+    const form = new FormData();
+    form.append("xml", new Blob([input.xml], { type: "text/xml" }), `${input.rnc}${input.encf}.xml`);
+    const b = (await this.authorized("POST", `${this.urls.approval}/api/aprobacioncomercial`, { form })) as Record<string, unknown> | null;
+    const code = asString(b?.codigo) ?? "";
+    const messages = Array.isArray(b?.mensaje) ? (b.mensaje as unknown[]).flatMap((m) => asString(m) ?? []) : asString(b?.mensaje) ? [asString(b?.mensaje)!] : [];
+    return { approved: code === "1", status: asString(b?.estado) ?? "", code, messages };
+  }
+
+  async directoryOf(rnc: string): Promise<DirectoryEntry | null> {
+    const body = await this.authorized("GET", `${this.urls.directory}/api/consultas/obtenerdirectorioporrnc?RNC=${encodeURIComponent(rnc)}`);
+    const row = (Array.isArray(body) ? body[0] : body) as Record<string, unknown> | null | undefined;
+    if (!row || typeof row !== "object" || !asString(row.rnc)) return null;
+    return {
+      name: asString(row.nombre) ?? "",
+      rnc: asString(row.rnc)!,
+      receptionUrl: asString(row.urlRecepcion) || null,
+      approvalUrl: asString(row.urlAceptacion) || null,
+      authenticationUrl: asString(row.urlOpcional) || null,
+    };
   }
 
   async trackIdsOf(rnc: string, encf: string): Promise<TrackSummary[]> {

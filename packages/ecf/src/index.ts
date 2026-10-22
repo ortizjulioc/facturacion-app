@@ -22,6 +22,8 @@ export {
   FiscalError,
   isFinalStatus,
   isFiscallyValid,
+  type ApprovalResult,
+  type DirectoryEntry,
   type FiscalMessage,
   type FiscalProvider,
   type FiscalStatus,
@@ -33,3 +35,18 @@ export {
 } from "./provider";
 export { formatDate, formatDateTime } from "./format";
 export { phoneOf, sellerOf, type CompanyData } from "./profile";
+export { PeerClient, peerEndpoint } from "./peer";
+export {
+  buildAcecf,
+  buildArecf,
+  inspectIncomingApproval,
+  inspectIncomingEcf,
+  NOT_RECEIVED_REASONS,
+  signReply,
+  type AcknowledgementInput,
+  type ApprovalInput,
+  type IncomingApproval,
+  type IncomingEcf,
+  type Inspection,
+  type NotReceivedReason,
+} from "./receiver";

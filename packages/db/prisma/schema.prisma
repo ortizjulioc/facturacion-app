@@ -109,6 +109,8 @@ model Organization {
   cashierPins      CashierPin[]
   certificate      CompanyCertificate?
   fiscalSubmissions FiscalSubmission[]
+  receivedDocuments ReceivedDocument[]
+  issuedApprovals  IssuedApproval[]
 
   @@map("organization")
 }
@@ -441,6 +443,7 @@ model Document {
   /// Instante de la firma (FechaHoraFirma del e-CF).
   signedAt             DateTime?
   fiscalSubmission     FiscalSubmission?
+  issuedApproval       IssuedApproval?
   referencedDocument   Document?        @relation("Modifies", fields: [referencedDocumentId], references: [id], onDelete: NoAction)
   modifiedBy           Document[]       @relation("Modifies")
   lines                DocumentLine[]
@@ -995,4 +998,82 @@ model FiscalSubmission {
   @@index([state, nextAttemptAt])
   @@index([organizationId, state])
   @@map("fiscal_submission")
+}
+
+/// Estado del envío de una aprobación o rechazo comercial (al emisor y a la DGII).
+enum ApprovalState {
+  /// El comprador aún no decidió.
+  NONE
+  /// Decidido: falta entregarlo al emisor y/o a la DGII.
+  PENDING
+  /// Entregado a las dos partes.
+  SENT
+  /// No se pudo entregar y no se reintenta solo (el emisor no está en el directorio, la DGII lo rechazó…).
+  FAILED
+}
+
+/// e-CF que un proveedor (otro contribuyente electrónico) nos envió por el servicio de recepción. El acuse de recibo se
+/// contesta en el mismo pedido; después el comprador aprueba o rechaza comercialmente.
+model ReceivedDocument {
+  id                  String        @id @default(uuid(7)) @db.Uuid
+  organizationId      String
+  emitterRnc          String
+  emitterName         String?
+  /// Tipo de comprobante tal como viene en el XML: «31», «33», «41»…
+  ecfType             String
+  encf                String
+  issuedOn            DateTime      @db.Date
+  total               BigInt
+  totalItbis          BigInt        @default(0)
+  /// El e-CF completo, tal como llegó.
+  xml                 String
+  /// ¿La firma digital es íntegra? (no dice si el certificado es de confianza: eso lo valida la DGII).
+  signatureValid      Boolean
+  securityCode        String?
+  /// FechaHoraFirma del e-CF, «dd-MM-AAAA HH:mm:ss».
+  signedAtText        String?
+  receivedAt          DateTime      @default(now())
+  /// Acuse de recibo firmado que se devolvió al emisor.
+  ackXml              String
+  /// Decisión comercial: null = pendiente; true = aprobado; false = rechazado.
+  approved            Boolean?
+  approvalReason      String?
+  decidedAt           DateTime?
+  decidedById         String?
+  /// ACECF firmado.
+  approvalXml         String?
+  approvalState       ApprovalState @default(NONE)
+  peerSentAt          DateTime?
+  peerError           String?
+  dgiiSentAt          DateTime?
+  dgiiError           String?
+  approvalAttempts    Int           @default(0)
+  approvalNextAt      DateTime?
+  approvalLockedUntil DateTime?
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  organization        Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, emitterRnc, encf])
+  @@index([organizationId, receivedAt])
+  @@index([approvalState, approvalNextAt])
+  @@map("received_document")
+}
+
+/// Aprobación o rechazo comercial que un cliente nos envió sobre un comprobante que emitimos nosotros.
+model IssuedApproval {
+  id             String       @id @default(uuid(7)) @db.Uuid
+  organizationId String
+  documentId     String       @unique @db.Uuid
+  approved       Boolean
+  reason         String?
+  /// FechaHoraAprobacionComercial, «dd-MM-AAAA HH:mm:ss».
+  approvedAtText String?
+  signatureValid Boolean
+  xml            String
+  receivedAt     DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  document       Document     @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@map("issued_approval")
 }

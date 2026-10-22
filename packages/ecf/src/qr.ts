@@ -20,6 +20,8 @@ export function serviceUrls(env: EcfEnvironment) {
     authentication: `${ECF_HOST}/${path}/autenticacion`,
     reception: `${ECF_HOST}/${path}/recepcion`,
     summaryReception: `${FC_HOST}/${path}/recepcionfc`,
+    approval: `${ECF_HOST}/${path}/aprobacioncomercial`,
+    directory: `${ECF_HOST}/${path}/consultadirectorio`,
     summaryQuery: `${FC_HOST}/${path}/consultarfce`,
     result: `${ECF_HOST}/${path}/consultaresultado`,
     trackIds: `${ECF_HOST}/${path}/consultatrackids`,

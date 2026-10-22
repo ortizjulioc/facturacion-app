@@ -75,6 +75,12 @@ export type SummaryResult = {
   messages: FiscalMessage[];
 };
 
+/** Un contribuyente electrónico del directorio de la DGII y los servicios (hosts) donde recibe. */
+export type DirectoryEntry = { name: string; rnc: string; receptionUrl: string | null; approvalUrl: string | null; authenticationUrl: string | null };
+
+/** Respuesta de la DGII a una aprobación comercial. */
+export type ApprovalResult = { approved: boolean; status: string; code: string; messages: string[] };
+
 export type TrackSummary = { trackId: string; status: FiscalStatus; statusText: string; receivedAt: string | null };
 
 export interface FiscalProvider {
@@ -89,6 +95,10 @@ export interface FiscalProvider {
   submitSummary(input: SubmitInput): Promise<SummaryResult>;
   /** Estado de un resumen ya enviado, por RNC, e-NCF y código de seguridad. */
   summaryResult(rnc: string, encf: string, securityCode: string): Promise<SummaryResult>;
+  /** Entrega a la DGII la copia de una aprobación o rechazo comercial (ACECF firmado). */
+  submitApproval(input: SubmitInput): Promise<ApprovalResult>;
+  /** Servicios de recepción y aprobación de un contribuyente electrónico (null si no está en el directorio). */
+  directoryOf(rnc: string): Promise<DirectoryEntry | null>;
   /** Todos los envíos que la DGII tiene de un e-NCF (puede haber varios si se reenvió). */
   trackIdsOf(rnc: string, encf: string): Promise<TrackSummary[]>;
 }
