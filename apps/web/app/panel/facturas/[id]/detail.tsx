@@ -12,6 +12,8 @@ import {
   type TaxCode,
 } from "@facturacion/core";
 import { useDialogs } from "@/components/dialogs";
+import { QrCode } from "@/components/qr-code";
+import { usePanel } from "@/components/panel-context";
 import { Badge, Button, ErrorNote, PageHeader, tableStyles } from "@/components/ui";
 import { api, errorMessage, expectOk, unwrap } from "@/lib/api";
 import {
@@ -30,6 +32,7 @@ const linkButton =
 export function InvoiceDetail({ id }: { id: string }) {
   const router = useRouter();
   const { confirm, toast } = useDialogs();
+  const { canManage } = usePanel();
   const load = useMemo(
     () => async () => {
       const [doc, company] = await Promise.all([
@@ -108,6 +111,21 @@ export function InvoiceDetail({ id }: { id: string }) {
                   <Button variant="secondary" onClick={() => window.print()}>
                     Imprimir
                   </Button>
+                  {!doc.ecf && canManage && doc.currency === "DOP" && (
+                    <Button
+                      variant="secondary"
+                      disabled={busy}
+                      onClick={() =>
+                        run(async () => {
+                          await unwrap(await api.v1.documents[":id"].sign.$post({ param: { id: doc.id } }));
+                          toast("e-CF firmado");
+                          reload();
+                        })
+                      }
+                    >
+                      Firmar e-CF
+                    </Button>
+                  )}
                   {!isDebitCredit(type) && (
                     <>
                       <Link
@@ -262,6 +280,20 @@ export function InvoiceDetail({ id }: { id: string }) {
             </div>
           </div>
         </div>
+        {doc.ecf && (
+          <footer className="flex items-center gap-4 border-t border-zinc-200 pt-4 text-sm dark:border-zinc-800">
+            {doc.ecf.qrUrl && <QrCode text={doc.ecf.qrUrl} label="Código QR para verificar el comprobante en la DGII" />}
+            <div className="space-y-1">
+              <p className="font-medium">Comprobante firmado electrónicamente</p>
+              <p className="text-zinc-600 dark:text-zinc-400">
+                Código de seguridad: <span className="font-mono">{doc.ecf.securityCode}</span>
+                <br />
+                Fecha de firma: {formatDateTime(doc.ecf.signedAt)}
+              </p>
+              {doc.ecf.qrUrl && <p className="text-xs text-zinc-500">Escanee el código para verificarlo en la DGII.</p>}
+            </div>
+          </footer>
+        )}
       </article>
 
       {draft && (

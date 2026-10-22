@@ -24,6 +24,7 @@ import { useDialogs } from "@/components/dialogs";
 import { usePanel } from "@/components/panel-context";
 import { api, errorMessage, unwrap } from "@/lib/api";
 import { useQuery } from "@/lib/use-query";
+import { CertificateCard } from "./certificate-card";
 
 const ENVIRONMENTS = [
   { value: "TEST", label: "Pruebas (TesteCF)" },
@@ -89,6 +90,8 @@ export function FiscalView() {
           <CompanyForm company={data.company} canManage={canManage} onSaved={reload} />
         )}
       </section>
+
+      {data?.company && <CertificateCard canManage={canManage} />}
 
       <section className="space-y-4">
         <div className="flex items-center justify-between gap-4">
