@@ -3,7 +3,9 @@ import { buyerErrors, formatDop, isModifier, remainingCredit } from "@facturacio
 import { auditRow } from "./audit";
 import { asSalesType, FULL, type DocumentFull } from "./documents";
 import { allocateEncf } from "./encf";
+import { signDocumentData, type Signature } from "./signing";
 import { applyDocumentStock } from "./stock";
+import type { Env } from "../env";
 import type { TenantTx } from "../types";
 
 const unprocessable = (message: string) => new HTTPException(422, { message });
@@ -21,6 +23,7 @@ export async function issueDocument(
     id: string;
     organizationId: string;
     userId: string;
+    env: Env;
     /**
      * Venta hecha SIN conexión en una caja: el e-NCF y la fecha ya existen (salieron del bloque de la caja y
      * están impresos en el ticket), así que no se asigna número ni se rechaza por existencia: la venta ya ocurrió.
@@ -28,7 +31,7 @@ export async function issueDocument(
     preset?: { encf: string; issuedAt: Date; shiftId?: string | null };
   },
 ): Promise<DocumentFull> {
-  const { id, organizationId, userId, preset } = params;
+  const { id, organizationId, userId, env, preset } = params;
 
   const draft = await tx.document.findFirst({ where: { id }, include: FULL });
   if (!draft) throw new HTTPException(404, { message: "Comprobante no encontrado" });
@@ -113,9 +116,26 @@ export async function issueDocument(
     }
   }
   const encf = preset?.encf ?? (await allocateEncf(tx, draft.type, draft.terminalId));
+  const issuedAt = preset?.issuedAt ?? new Date();
+
+  // Si la empresa tiene certificado digital, el e-CF se firma en el mismo instante en que se emite. Una venta
+  // de caja sin conexión ya ocurrió (y está impresa): si no se puede firmar, queda emitida sin firma y se firma después.
+  let signature: Signature | null = null;
+  try {
+    signature = await signDocumentData(tx, env, organizationId, { ...draft, encf, issuedAt, ...buyer }, profile);
+  } catch (e) {
+    if (!preset) throw e;
+    await tx.auditLog.create({
+      data: auditRow({ organizationId, userId }, "document.sign_failed", "document", id, {
+        encf,
+        reason: e instanceof Error ? e.message : String(e),
+      }),
+    });
+  }
+
   const issued = await tx.document.update({
     where: { id },
-    data: { status: "ISSUED", encf, issuedAt: preset?.issuedAt ?? new Date(), shiftId, ...buyer },
+    data: { status: "ISSUED", encf, issuedAt, shiftId, ...buyer, ...signature },
     include: FULL,
   });
   // Descuenta (o reingresa) las existencias en la misma transacción: si no hay stock, no se emite.

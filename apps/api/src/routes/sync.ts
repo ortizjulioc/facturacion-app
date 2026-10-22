@@ -430,6 +430,7 @@ export const sync = new Hono<AppEnv>()
         id: draft.id,
         organizationId,
         userId,
+        env: c.get("deps").env,
         preset: { encf: input.encf, issuedAt: new Date(input.issuedAt), shiftId: shift?.id ?? null },
       });
       // La nube registra hasta dónde llegó la caja (nunca retrocede).
@@ -451,5 +452,7 @@ export const sync = new Hono<AppEnv>()
       if (!winner) throw e;
       result = { doc: winner, duplicate: true };
     }
-    return c.json({ data: { ...documentDto(result.doc), duplicate: result.duplicate } }, result.duplicate ? 200 : 201);
+    // Si la empresa ya tiene certificado, la venta vuelve firmada: la caja guarda el código de seguridad y el QR.
+    const profile = await c.get("db").companyProfile.findFirst({ select: { rnc: true, environment: true } });
+    return c.json({ data: { ...documentDto(result.doc, profile), duplicate: result.duplicate } }, result.duplicate ? 200 : 201);
   });

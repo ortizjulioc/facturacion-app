@@ -623,7 +623,7 @@ export const restaurant = new Hono<AppEnv>()
         },
         select: { id: true },
       });
-      const issued = await issueDocument(tx, { id: draft.id, organizationId, userId });
+      const issued = await issueDocument(tx, { id: draft.id, organizationId, userId, env: c.get("deps").env });
 
       // Los componentes de un combo cobrado salen del inventario (el combo mismo no lo lleva).
       const profile = await tx.companyProfile.findFirst({ select: { allowNegativeStock: true } });
@@ -679,7 +679,7 @@ export const restaurant = new Hono<AppEnv>()
     });
 
     return c.json(
-      { data: { document: documentDto(result.issued), order: orderDto(result.order), closed: result.closed } },
+      { data: { document: documentDto(result.issued, await c.get("db").companyProfile.findFirst({ select: { rnc: true, environment: true } })), order: orderDto(result.order), closed: result.closed } },
       201,
     );
   })

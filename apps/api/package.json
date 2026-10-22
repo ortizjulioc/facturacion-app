@@ -30,6 +30,7 @@
   "devDependencies": {
     "@facturacion/core": "workspace:*",
     "@facturacion/db": "workspace:*",
+    "@facturacion/ecf": "workspace:*",
     "@facturacion/pos-engine": "workspace:*",
     "@types/node": "^24",
     "pino-pretty": "^13.2.0",

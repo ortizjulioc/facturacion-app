@@ -5,11 +5,14 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { createPrisma, withTenant } from "@facturacion/db";
 import { verifyPin } from "@facturacion/core";
+import { securityCodeOf, verifyEcfSignature } from "@facturacion/ecf";
+import { testP12 } from "@facturacion/ecf/testing";
 import { PosEngine, type FetchLike } from "@facturacion/pos-engine";
 import { createApp } from "./app";
 import { createAuth } from "./auth";
 import { loadEnv } from "./env";
 import { createLogger } from "./logger";
+import { open } from "./lib/secrets";
 
 const hasDb = Boolean(process.env.DATABASE_URL && process.env.BETTER_AUTH_SECRET);
 
@@ -4031,7 +4034,8 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
 
         // Lo contado en el informe Z es exactamente lo que quedó atado al turno.
         const z = (await json(await get(`${S}/${shift.id}`, c.cookie))).data.report;
-        const docs = (await json(await get("/v1/documents?pageSize=50", c.cookie))).data as Json[];
+        // (El listado no trae el turno: se consulta el detalle de cada comprobante.)
+        const docs = await Promise.all(drafts.map(async (d) => (await json(await get(`/v1/documents/${d.id}`, c.cookie))).data as Json));
         const attached = docs.filter((d) => d.shiftId === shift.id).length;
         expect(z.documents).toBe(attached);
       });
@@ -4959,6 +4963,202 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       });
     });
   });
+
+  describe("firma del e-CF", () => {
+    const certBody = (over: Json = {}) => {
+      const { p12, password } = testP12();
+      return { p12: Buffer.from(p12).toString("base64"), password, ...over };
+    };
+    const putCert = (b: Billing, body: Json) => send("PUT", "/v1/company/certificate", body, b.cookie);
+    const docOf = async (b: Billing, id: string) => (await json(await get(`/v1/documents/${id}`, b.cookie))).data as Json;
+    const rawDoc = (b: Billing, id: string) => withTenant(prisma, b.orgId).document.findFirstOrThrow({ where: { id } });
+
+    it("guarda el certificado cifrado, sin devolver el archivo ni la contraseña", async () => {
+      const b = await billing("sig1");
+      expect((await json(await get("/v1/company/certificate", b.cookie))).data).toBeNull();
+
+      const body = certBody();
+      const res = await putCert(b, body);
+      expect(res.status, JSON.stringify(await res.clone().json())).toBe(200);
+      const info = (await json(res)).data;
+      expect(info).toMatchObject({ subject: "EMISOR DE PRUEBA SRL", problem: null });
+      expect(JSON.stringify(info)).not.toContain(body.password);
+      expect((await json(await get("/v1/company/certificate", b.cookie))).data.subject).toBe("EMISOR DE PRUEBA SRL");
+
+      // En la base de datos no queda ni la contraseña ni el .p12 en claro, y solo esa empresa lo abre.
+      const row = await withTenant(prisma, b.orgId).companyCertificate.findFirstOrThrow();
+      const stored = Buffer.from(row.secret);
+      expect(stored.includes(Buffer.from(body.password))).toBe(false);
+      expect(stored.includes(Buffer.from(body.p12.slice(0, 40)))).toBe(false);
+      expect(JSON.parse(open(env, b.orgId, row.secret).toString()).password).toBe(body.password);
+      expect(() => open(env, "otra-empresa", row.secret)).toThrow();
+
+      expect((await call("/v1/company/certificate", { method: "DELETE", cookie: b.cookie })).status).toBe(204);
+      expect((await json(await get("/v1/company/certificate", b.cookie))).data).toBeNull();
+      expect((await call("/v1/company/certificate", { method: "DELETE", cookie: b.cookie })).status).toBe(404);
+    });
+
+    it("rechaza contraseñas incorrectas, archivos inválidos, certificados vencidos y falta de datos fiscales", async () => {
+      const b = await billing("sig2");
+      const wrong = await putCert(b, certBody({ password: "otra-clave" }));
+      expect(wrong.status).toBe(422);
+      expect(await error(wrong)).toMatch(/contraseña/);
+      const junk = await putCert(b, { p12: Buffer.alloc(300, 7).toString("base64"), password: "x" });
+      expect(junk.status).toBe(422);
+      const old = testP12({ notBefore: new Date("2020-01-01"), notAfter: new Date("2021-01-01") });
+      const expired = await putCert(b, { p12: Buffer.from(old.p12).toString("base64"), password: old.password });
+      expect(expired.status).toBe(422);
+      expect(await error(expired)).toMatch(/vencido/);
+
+      const sinDatos = await billing("sig2b", { profile: false });
+      const res = await putCert(sinDatos, certBody());
+      expect(res.status).toBe(422);
+      expect(await error(res)).toMatch(/datos fiscales/i);
+    });
+
+    it("firma al emitir: guarda el XML, el código de seguridad y la fecha, y arma el QR", async () => {
+      const b = await billing("sig3", { seqs: [["E32", 1, 10]] });
+      expect((await putCert(b, certBody())).status).toBe(200);
+      const res = await issue(b, (await createDraft(b)).id);
+      expect(res.status, JSON.stringify(await res.clone().json())).toBe(200);
+      const doc = (await json(res)).data;
+
+      expect(doc.ecf.securityCode).toMatch(/^.{6}$/);
+      expect(doc.ecf.signedAt).toBeTruthy();
+      // Factura de consumo menor a RD$250,000: consulta del resumen.
+      expect(doc.ecf.qrUrl).toContain("https://fc.dgii.gov.do/testecf/consultatimbrefc?rncemisor=101001577&encf=E320000000001&montototal=236.00");
+      expect(doc.ecf.qrUrl).toContain(`codigoseguridad=${encodeURIComponent(doc.ecf.securityCode)}`);
+
+      const row = await rawDoc(b, doc.id);
+      expect(row.securityCode).toBe(doc.ecf.securityCode);
+      expect(row.ecfXml).toContain("<eNCF>E320000000001</eNCF>");
+      expect(row.ecfXml).toContain("<MontoTotal>236.00</MontoTotal>");
+      expect(row.ecfXml).toContain("<FechaHoraFirma>");
+      expect(verifyEcfSignature(row.ecfXml!)).toBe(true);
+      expect(securityCodeOf(row.ecfXml!)).toBe(row.securityCode);
+
+      // Aparece al consultar el comprobante, y el XML no sale por la API.
+      const again = await docOf(b, doc.id);
+      expect(again.ecf).toEqual(doc.ecf);
+      expect(JSON.stringify(again)).not.toContain("SignatureValue");
+      // La firma queda congelada junto con el comprobante.
+      await expect(
+        withTenant(prisma, b.orgId).document.update({ where: { id: doc.id }, data: { securityCode: "AAAAAA" } }),
+      ).rejects.toThrow(/firma|modificar/i);
+    });
+
+    it("el crédito fiscal lleva el RNC del comprador en el QR y el vencimiento de la secuencia en el XML", async () => {
+      const b = await billing("sig4", { seqs: [["E31", 1, 10]] });
+      await putCert(b, certBody());
+      const cust = (
+        await json(await post("/v1/customers", { name: "Cliente Fiscal", documentType: "RNC", documentNumber: "131246796" }, b.cookie))
+      ).data;
+      const doc = (await json(await issue(b, (await createDraft(b, { type: "E31", customerId: cust.id })).id))).data;
+      expect(doc.ecf.qrUrl).toContain("https://ecf.dgii.gov.do/testecf/consultatimbre?rncemisor=101001577&rnccomprador=131246796&encf=E310000000001");
+      const xml = (await rawDoc(b, doc.id)).ecfXml!;
+      expect(xml).toContain("<RNCComprador>131246796</RNCComprador>");
+      expect(xml).toMatch(/<FechaVencimientoSecuencia>\d{2}-\d{2}-\d{4}<\/FechaVencimientoSecuencia>/);
+    });
+
+    it("sin certificado se emite sin firma, y después se firma uno por uno o todos a la vez", async () => {
+      const b = await billing("sig5", { seqs: [["E32", 1, 10]] });
+      const first = (await json(await issue(b, (await createDraft(b)).id))).data;
+      const second = (await json(await issue(b, (await createDraft(b)).id))).data;
+      expect(first.ecf).toBeNull();
+      expect((await rawDoc(b, first.id)).ecfXml).toBeNull();
+
+      // Sin certificado no hay con qué firmar.
+      const none = await post(`/v1/documents/${first.id}/sign`, {}, b.cookie);
+      expect(none.status).toBe(422);
+      expect(await error(none)).toMatch(/certificado/i);
+
+      await putCert(b, certBody());
+      const signed = await post(`/v1/documents/${first.id}/sign`, {}, b.cookie);
+      expect(signed.status, JSON.stringify(await signed.clone().json())).toBe(200);
+      expect((await json(signed)).data.ecf.securityCode).toHaveLength(6);
+      expect((await post(`/v1/documents/${first.id}/sign`, {}, b.cookie)).status).toBe(409);
+
+      const rest = await json(await post("/v1/documents/sign-pending", {}, b.cookie));
+      expect(rest.data).toMatchObject({ signed: 1, failed: [] });
+      expect((await docOf(b, second.id)).ecf.securityCode).toHaveLength(6);
+      expect((await json(await post("/v1/documents/sign-pending", {}, b.cookie))).data.signed).toBe(0);
+      // Un borrador no se firma.
+      const draft = await createDraft(b);
+      expect((await post(`/v1/documents/${draft.id}/sign`, {}, b.cookie)).status).toBe(409);
+    });
+
+    it("un dato que impide armar el e-CF cancela la emisión sin gastar el número", async () => {
+      const b = await billing("sig6", { seqs: [["E32", 1, 10]] });
+      await putCert(b, certBody());
+      const odd = await createDraft(b, {
+        lines: [{ name: "Queso", quantity: "1.255", unitPrice: "100.00", tax: "ITBIS18" }],
+        payments: [{ method: "CASH", amount: "148.09" }],
+      });
+      const res = await issue(b, odd.id);
+      expect(res.status).toBe(422);
+      expect(await error(res)).toMatch(/no se pudo firmar.*2 decimales/i);
+      expect((await docOf(b, odd.id)).status).toBe("DRAFT");
+      // El siguiente comprobante recibe el número 1: el rechazado no consumió ninguno.
+      expect((await json(await issue(b, (await createDraft(b)).id))).data.encf).toBe("E320000000001");
+    });
+
+    it("una nota de crédito se firma con la referencia al comprobante original", async () => {
+      const b = await billing("sig7", { seqs: [["E32", 1, 10], ["E34", 1, 10]] });
+      await putCert(b, certBody());
+      const original = (await json(await issue(b, (await createDraft(b)).id))).data;
+      const note = await createDraft(b, {
+        type: "E34",
+        referencedDocumentId: original.id,
+        modificationCode: 3,
+        lines: [{ productId: b.product.id, quantity: "1" }],
+        payments: [{ method: "CASH", amount: "118.00" }],
+      });
+      const res = await issue(b, note.id);
+      expect(res.status, JSON.stringify(await res.clone().json())).toBe(200);
+      const xml = (await rawDoc(b, note.id)).ecfXml!;
+      expect(xml).toContain("<TipoeCF>34</TipoeCF>");
+      expect(xml).toContain("<NCFModificado>E320000000001</NCFModificado>");
+      expect(xml).toContain("<CodigoModificacion>3</CodigoModificacion>");
+      expect(xml).not.toContain("TablaFormasPago");
+    });
+
+    it("una venta de la caja sin conexión se firma al subirla y devuelve su código", async () => {
+      const b = await billing("sig8", { seqs: [["E32", 1, 100]] });
+      const t = (await json(await post("/v1/terminals", { branchId: b.branch.id, name: "Caja 1", code: "C1" }, b.cookie))).data;
+      const blk = await json(await post("/v1/sync/sequence-blocks", { terminalId: t.id, ecfType: "E32", size: 10 }, b.cookie));
+      const first = BigInt(blk.data.fromNumber);
+      const sale = (n: bigint) => ({
+        clientId: randomUUID(),
+        terminalId: t.id,
+        type: "E32",
+        encf: `E32${String(n).padStart(10, "0")}`,
+        issuedAt: "2026-10-20T15:30:00.000Z",
+        lines: [{ productId: b.product.id, name: "Producto 118", quantity: "2", unitPrice: "118.00", tax: "ITBIS18", priceIncludesTax: true }],
+        payments: [{ method: "CASH", amount: "236.00" }],
+        total: "236.00",
+      });
+
+      // Antes de tener certificado la venta entra sin firma; el comprobante ya está impreso.
+      const early = await post("/v1/sync/sales", sale(first), b.cookie);
+      expect(early.status, JSON.stringify(await early.clone().json())).toBe(201);
+      expect((await json(early)).data.ecf).toBeNull();
+
+      await putCert(b, certBody());
+      const body = sale(first + 1n);
+      const late = await post("/v1/sync/sales", body, b.cookie);
+      expect(late.status).toBe(201);
+      const data = (await json(late)).data;
+      expect(data.ecf.securityCode).toHaveLength(6);
+      expect(data.ecf.qrUrl).toContain(`encf=E32${String(first + 1n).padStart(10, "0")}`);
+      // La firma lleva la hora del momento en que se subió, no la de la venta.
+      expect(new Date(data.ecf.signedAt).getTime()).toBeGreaterThan(new Date("2026-10-21T00:00:00Z").getTime());
+      // Reintentar la subida no firma otra vez ni cambia el código.
+      const dup = await post("/v1/sync/sales", body, b.cookie);
+      expect(dup.status).toBe(200);
+      expect((await json(dup)).data.ecf).toEqual(data.ecf);
+    });
+  });
+
 
   describe("bitácora", () => {
     it("registra cada cambio, de forma atómica con el cambio", async () => {

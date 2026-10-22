@@ -107,6 +107,7 @@ model Organization {
   modifiers        Modifier[]
   cashShifts       CashShift[]
   cashierPins      CashierPin[]
+  certificate      CompanyCertificate?
 
   @@map("organization")
 }
@@ -430,6 +431,12 @@ model Document {
   clientId             String?          @db.Uuid
   /// Nota de crédito que devuelve mercancía: al emitirla, las líneas con inventario vuelven a las existencias.
   returnsStock         Boolean          @default(false)
+  /// e-CF firmado (XML completo con la firma). Se llena al emitir si la empresa tiene certificado, o después.
+  ecfXml               String?
+  /// Primeros 6 caracteres del SignatureValue: va en el QR de la representación impresa.
+  securityCode         String?
+  /// Instante de la firma (FechaHoraFirma del e-CF).
+  signedAt             DateTime?
   referencedDocument   Document?        @relation("Modifies", fields: [referencedDocumentId], references: [id], onDelete: NoAction)
   modifiedBy           Document[]       @relation("Modifies")
   lines                DocumentLine[]
@@ -914,4 +921,22 @@ model CashierPin {
 
   @@unique([organizationId, userId])
   @@map("cashier_pin")
+}
+
+/// Certificado digital (.p12) con el que la empresa firma sus e-CF. El archivo y su contraseña se guardan
+/// CIFRADOS (AES-256-GCM, llave del servidor): nunca salen por la API, solo sus datos públicos.
+model CompanyCertificate {
+  id             String       @id @default(uuid(7)) @db.Uuid
+  organizationId String       @unique
+  /// `v1` + iv + etiqueta + texto cifrado del JSON {p12, password}.
+  secret         Bytes
+  subject        String
+  notBefore      DateTime
+  notAfter       DateTime
+  uploadedById   String
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("company_certificate")
 }

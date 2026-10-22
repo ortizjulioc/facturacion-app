@@ -12,6 +12,8 @@ import {
   FULL,
 } from "../lib/documents";
 import { issueDocument } from "../lib/issue";
+import { signIssued } from "../lib/signing";
+import { requireRole } from "../middleware/tenant";
 import { listQuery, pageOf, uuidParam } from "../lib/schemas";
 import { zv } from "../lib/validator";
 import type { AppEnv } from "../types";
@@ -94,7 +96,8 @@ export const documents = new Hono<AppEnv>()
       include: FULL,
     });
     if (!doc) throw notFound();
-    return c.json({ data: documentDto(doc) });
+    const profile = await c.get("db").companyProfile.findFirst({ select: { rnc: true, environment: true } });
+    return c.json({ data: documentDto(doc, profile) });
   })
   // Crea un borrador. Los totales siempre los calcula el servidor.
   .post("/", zv("json", documentInput), async (c) => {
@@ -176,8 +179,46 @@ export const documents = new Hono<AppEnv>()
   // Valida las reglas fiscales, asigna el e-NCF y congela el comprobante (ver lib/issue.ts).
   .post("/:id/issue", zv("param", uuidParam), async (c) => {
     const { id } = c.req.valid("param");
-    const doc = await c.get("run")((tx) =>
-      issueDocument(tx, { id, organizationId: c.get("organizationId"), userId: c.get("user").id }),
-    );
-    return c.json({ data: documentDto(doc) });
+    const { doc, profile } = await c.get("run")(async (tx) => ({
+      doc: await issueDocument(tx, { id, organizationId: c.get("organizationId"), userId: c.get("user").id, env: c.get("deps").env }),
+      profile: await tx.companyProfile.findFirst({ select: { rnc: true, environment: true } }),
+    }));
+    return c.json({ data: documentDto(doc, profile) });
+  })
+  // Firma de una vez los comprobantes emitidos sin firma (por ejemplo, tras subir el certificado digital).
+  // Cada uno va en su propia transacción: uno que no se pueda firmar no frena a los demás.
+  .post("/sign-pending", requireRole("owner", "admin"), async (c) => {
+    const organizationId = c.get("organizationId");
+    const env = c.get("deps").env;
+    const pending = await c.get("db").document.findMany({
+      where: { status: { not: "DRAFT" }, signedAt: null, currency: "DOP" },
+      select: { id: true, encf: true },
+      orderBy: { issuedAt: "asc" },
+      take: 200,
+    });
+    let signed = 0;
+    const failed: { encf: string | null; error: string }[] = [];
+    for (const doc of pending) {
+      try {
+        await c.get("run")((tx) => signIssued(tx, env, organizationId, doc.id));
+        signed++;
+      } catch (e) {
+        failed.push({ encf: doc.encf, error: e instanceof HTTPException ? e.message : "Error interno" });
+        // Sin certificado no tiene sentido seguir intentando con el resto.
+        if (e instanceof HTTPException && e.status === 422 && /certificado/.test(e.message)) break;
+      }
+    }
+    return c.json({ data: { signed, failed, remaining: Math.max(pending.length - signed - failed.length, 0) } });
+  })
+  // Firma un comprobante ya emitido que quedó sin firma (p. ej. una venta de la caja sin conexión, o emitido
+  // antes de subir el certificado digital).
+  .post("/:id/sign", requireRole("owner", "admin"), zv("param", uuidParam), async (c) => {
+    const { id } = c.req.valid("param");
+    const organizationId = c.get("organizationId");
+    const { doc, profile } = await c.get("run")(async (tx) => {
+      const signed = await signIssued(tx, c.get("deps").env, organizationId, id);
+      await tx.auditLog.create({ data: auditEntry(c, "document.sign", "document", id, { encf: signed.encf, securityCode: signed.securityCode }) });
+      return { doc: signed, profile: await tx.companyProfile.findFirst({ select: { rnc: true, environment: true } }) };
+    });
+    return c.json({ data: documentDto(doc, profile) });
   });

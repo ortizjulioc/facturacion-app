@@ -17,6 +17,7 @@ import {
 } from "@facturacion/core";
 import { Prisma } from "@facturacion/db";
 import { money, optionalText, quantity } from "./schemas";
+import { stampOf, type StampProfile } from "./stamp";
 import type { TenantTx } from "../types";
 
 // ───────────── Entrada ─────────────
@@ -379,8 +380,16 @@ export const documentSummaryDto = (d: Prisma.DocumentGetPayload<object>) => ({
   createdAt: d.createdAt,
 });
 
-export const documentDto = (d: DocumentFull) => ({
+/** `profile` (RNC y ambiente de la empresa) solo hace falta para armar la dirección del QR de un comprobante firmado. */
+export const documentDto = (d: DocumentFull, profile: StampProfile | null = null) => ({
   ...documentSummaryDto(d),
+  /** Firma del e-CF y datos del timbre (QR) de la representación impresa; null si aún no está firmado. */
+  ecf: (() => {
+    const stamp = profile ? stampOf(d, profile) : null;
+    return d.securityCode && d.signedAt
+      ? { securityCode: d.securityCode, signedAt: d.signedAt, qrUrl: stamp?.qrUrl ?? null }
+      : null;
+  })(),
   branchId: d.branchId,
   terminalId: d.terminalId,
   shiftId: d.shiftId,

@@ -12,6 +12,18 @@ const schema = z.object({
   /** Dominio padre para compartir cookie entre app.* y api.* (ej: ".tudominio.com"). Vacío en local. */
   COOKIE_DOMAIN: z.string().optional(),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error"]).default("info"),
+  /**
+   * Llave con la que se cifran los certificados digitales (.p12): 32 bytes en base64 o 64 caracteres hex.
+   * En desarrollo y pruebas, si falta, se deriva de BETTER_AUTH_SECRET; en producción es obligatoria.
+   */
+  CERT_ENCRYPTION_KEY: z.string().optional(),
+}).superRefine((v, ctx) => {
+  if (v.NODE_ENV === "production" && !v.CERT_ENCRYPTION_KEY) {
+    ctx.addIssue({ code: "custom", path: ["CERT_ENCRYPTION_KEY"], message: "Es obligatoria en producción" });
+  }
+  if (v.CERT_ENCRYPTION_KEY && !/^([0-9a-fA-F]{64}|[A-Za-z0-9+/]{43}=)$/.test(v.CERT_ENCRYPTION_KEY)) {
+    ctx.addIssue({ code: "custom", path: ["CERT_ENCRYPTION_KEY"], message: "Debe ser de 32 bytes, en base64 o hex" });
+  }
 });
 
 export type Env = z.infer<typeof schema>;
