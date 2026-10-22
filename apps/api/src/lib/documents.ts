@@ -356,13 +356,14 @@ async function resolveBuyer(
 // ───────────── Salida ─────────────
 
 export type DocumentFull = Prisma.DocumentGetPayload<{
-  include: { lines: true; payments: true; fiscalSubmission: true };
+  include: { lines: true; payments: true; fiscalSubmission: true; issuedApproval: true };
 }>;
 
 export const FULL = {
   lines: { orderBy: { lineNumber: "asc" } },
   payments: { orderBy: { createdAt: "asc" } },
   fiscalSubmission: true,
+  issuedApproval: true,
 } satisfies Prisma.DocumentInclude;
 
 const m = (v: bigint) => fromCents(v);
@@ -402,6 +403,10 @@ export const documentDto = (d: DocumentFull, profile: StampProfile | null = null
         sentAt: d.fiscalSubmission.sentAt,
         finishedAt: d.fiscalSubmission.finishedAt,
       }
+    : null,
+  /** Respuesta comercial del cliente (aprobó o rechazó este comprobante), si la mandó. */
+  approval: d.issuedApproval
+    ? { approved: d.issuedApproval.approved, reason: d.issuedApproval.reason, at: d.issuedApproval.approvedAtText, receivedAt: d.issuedApproval.receivedAt }
     : null,
   /** Por qué no se puede enviar a la DGII (null = se puede, o ya se envió). */
   fiscalBlock: d.fiscalSubmission ? null : fiscalBlock(d),

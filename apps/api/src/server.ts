@@ -5,6 +5,7 @@ import { createAuth } from "./auth";
 import { loadEnv } from "./env";
 import { createLogger } from "./logger";
 import { processDue } from "./lib/fiscal";
+import { processApprovals } from "./lib/receiver";
 
 const env = loadEnv();
 const logger = createLogger(env);
@@ -24,6 +25,7 @@ if (env.FISCAL_WORKER === "true") {
     if (running) return;
     running = true;
     processDue({ env, prisma, logger })
+      .then(() => processApprovals({ env, prisma, logger }))
       .catch((err) => logger.error({ err }, "trabajador fiscal"))
       .finally(() => (running = false));
   }, 5_000);

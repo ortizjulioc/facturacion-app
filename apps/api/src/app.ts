@@ -9,7 +9,9 @@ import { categories } from "./routes/categories";
 import { company } from "./routes/company";
 import { customers } from "./routes/customers";
 import { documents } from "./routes/documents";
+import { fe } from "./routes/fe";
 import { fiscal } from "./routes/fiscal";
+import { received } from "./routes/received";
 import { inventory } from "./routes/inventory";
 import { products } from "./routes/products";
 import { purchases } from "./routes/purchases";
@@ -30,7 +32,13 @@ import type { AppEnv, Deps } from "./types";
 export function createApp(deps: Deps) {
   const { env, auth, prisma, logger } = deps;
 
-  const app = new Hono<AppEnv>()
+  // Los servicios del receptor (/fe/...) no distinguen mayúsculas de minúsculas, como pide el estándar de la DGII.
+  const app = new Hono<AppEnv>({
+    getPath: (req) => {
+      const path = new URL(req.url).pathname;
+      return /^\/fe\//i.test(path) ? path.toLowerCase() : path;
+    },
+  })
     .use("*", async (c, next) => {
       c.set("deps", deps);
       const started = performance.now();
@@ -62,6 +70,7 @@ export function createApp(deps: Deps) {
       await prisma.$queryRaw`SELECT 1`;
       return c.json({ status: "ready" });
     })
+    .route("/fe", fe)
     .on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw))
     .get("/v1/me", async (c) => {
       const session = await auth.api.getSession({ headers: c.req.raw.headers });
@@ -85,6 +94,7 @@ export function createApp(deps: Deps) {
     .route("/v1/sequences", sequences)
     .route("/v1/documents", documents)
     .route("/v1/fiscal", fiscal)
+    .route("/v1/received", received)
     .route("/v1/reports", reports)
     .route("/v1/reports", purchaseReports)
     .route("/v1/inventory", inventory)

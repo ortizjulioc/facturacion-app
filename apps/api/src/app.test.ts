@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createPrisma, withTenant } from "@facturacion/db";
 import { toCents, verifyPin } from "@facturacion/core";
-import { buildEcf, loadCertificate, securityCodeOf, signEcf, verifyEcfSignature, type EcfCertificate } from "@facturacion/ecf";
+import { buildAcecf, buildEcf, loadCertificate, securityCodeOf, signEcf, signReply, verifyEcfSignature, type EcfCertificate } from "@facturacion/ecf";
 import { testP12 } from "@facturacion/ecf/testing";
 import { PosEngine, type FetchLike } from "@facturacion/pos-engine";
 import { createApp } from "./app";
@@ -13,6 +13,7 @@ import { createAuth } from "./auth";
 import { loadEnv } from "./env";
 import { createLogger } from "./logger";
 import { MAX_SEND_ATTEMPTS, processDue } from "./lib/fiscal";
+import { processApprovals } from "./lib/receiver";
 import { open } from "./lib/secrets";
 
 const hasDb = Boolean(process.env.DATABASE_URL && process.env.BETTER_AUTH_SECRET);
@@ -31,6 +32,12 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     summaries: [] as { name: string; xml: string }[],
     summaryQueries: [] as { rnc: string | null; encf: string | null; code: string | null }[],
     summaryFails: [] as (() => Response)[],
+    /** Directorio de la DGII (RNC → servicios) y las aprobaciones comerciales entregadas al emisor y a la DGII. */
+    directory: new Map<string, Json>(),
+    peerApprovals: [] as { url: string; name: string; xml: string }[],
+    dgiiApprovals: [] as { name: string; xml: string }[],
+    peerFails: [] as (() => Response)[],
+    dgiiApprovalFails: [] as (() => Response)[],
     summaryHandlers: new Map<string, Json | (() => Json)>(),
     /** Respuestas que se dan, una por envío, en vez de aceptar el e-CF. */
     receptionFails: [] as (() => Response)[],
@@ -43,6 +50,11 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       this.summaries = [];
       this.summaryQueries = [];
       this.summaryFails = [];
+      this.directory = new Map();
+      this.peerApprovals = [];
+      this.dgiiApprovals = [];
+      this.peerFails = [];
+      this.dgiiApprovalFails = [];
       this.summaryHandlers = new Map();
       this.receptionFails = [];
       this.handlers = new Map();
@@ -60,6 +72,25 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       const url = new URL(input);
       const method = init?.method ?? "GET";
       const auth = new Headers(init?.headers).get("authorization");
+      // El servicio de aprobación comercial de otro contribuyente (el emisor de un e-CF que recibimos).
+      if (url.host === "prov.example") {
+        const fail = dgii.peerFails.shift();
+        if (fail) return fail();
+        const file = (init!.body as FormData).get("xml") as File;
+        dgii.peerApprovals.push({ url: url.host + url.pathname, name: file.name, xml: await file.text() });
+        return new Response("", { status: 200 });
+      }
+      if (url.pathname.endsWith("/consultadirectorio/api/consultas/obtenerdirectorioporrnc")) {
+        const row = dgii.directory.get(url.searchParams.get("RNC")!);
+        return Response.json(row ? [row] : []);
+      }
+      if (method === "POST" && url.pathname.endsWith("/aprobacioncomercial/api/aprobacioncomercial")) {
+        const fail = dgii.dgiiApprovalFails.shift();
+        if (fail) return fail();
+        const file = (init!.body as FormData).get("xml") as File;
+        dgii.dgiiApprovals.push({ name: file.name, xml: await file.text() });
+        return Response.json({ mensaje: ["Aprobación comercial recibida"], estado: "Aprobación comercial aprobada", codigo: "1" });
+      }
       if (url.pathname.endsWith("/autenticacion/api/autenticacion/semilla")) {
         return new Response('<?xml version="1.0"?><SemillaModel><valor>semilla-de-prueba</valor><fecha>2026-10-22T08:00:00-04:00</fecha></SemillaModel>');
       }
@@ -5633,6 +5664,328 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       const res = await post(`${Y}/sales`, saleBody(t, t.first), t.cookie);
       expect(res.status).toBe(201);
       expect((await json(res)).data.ecf.securityCode).toHaveLength(6);
+    });
+  });
+
+  describe("receptor de e-CF", () => {
+    const rdeps = () => ({ env, prisma, logger: createLogger(env), fetch: dgii.fetch });
+    let rncCounter = 0;
+    /** Cada empresa de esta prueba lleva su propio RNC: el servicio público busca a la destinataria por RNC. */
+    const newRnc = () => String(500_000_000 + ++rncCounter * 7 + Number(tag.replace(/\D/g, "").slice(0, 4) || 0));
+    const proveedor = { rnc: "101672919", legalName: "Proveedor SRL", address: "Av. 27 de Febrero 1" };
+
+    /** Empresa compradora con su certificado (para firmar los acuses) y su propio RNC. */
+    async function comprador(label: string, opts: { cert?: boolean } = {}) {
+      const rnc = newRnc();
+      const b = await billing(label, { seqs: [["E31", 1, 50], ["E32", 1, 50]], profile: false });
+      expect((await send("PUT", "/v1/company", { ...profileBody, rnc }, b.cookie)).status).toBe(200);
+      if (opts.cert !== false) {
+        const { p12, password } = testP12();
+        expect((await send("PUT", "/v1/company/certificate", { p12: Buffer.from(p12).toString("base64"), password }, b.cookie)).status).toBe(200);
+      }
+      return { ...b, rnc };
+    }
+    type Comprador = Awaited<ReturnType<typeof comprador>>;
+    const supplierCert = loadCertificate(...(Object.values(testP12({ cn: "PROVEEDOR SRL" })) as [Uint8Array, string]));
+    let encfN = 0;
+    /** El e-CF que el proveedor le manda a esa empresa, firmado con el certificado del proveedor. */
+    function invoice(buyer: Comprador, over: { type?: "E31" | "E32"; encf?: string; total?: string; buyerRnc?: string } = {}) {
+      const type = over.type ?? "E31";
+      const encf = over.encf ?? `E${type.slice(1)}${String(++encfN).padStart(10, "0")}`;
+      const built = buildEcf({
+        type,
+        encf,
+        sequenceExpiry: type === "E31" ? "2027-12-31" : null,
+        issuedAt: new Date("2026-10-20T15:00:00Z"),
+        seller: proveedor,
+        buyer: { docType: "RNC", docNumber: over.buyerRnc ?? buyer.rnc, name: "Empresa compradora SRL" },
+        lines: [{ name: "Servicio", quantity: 1000n, unitPrice: toCents(over.total ?? "100.00"), tax: "ITBIS18" }],
+        payments: [{ method: "TRANSFER", amount: toCents(String(Number(over.total ?? "100") * 1.18)) }],
+      });
+      return { encf, xml: signEcf(built.xml, supplierCert, new Date("2026-10-20T15:00:05Z")).xml };
+    }
+    const feSend = (path: string, xml: string) => {
+      const form = new FormData();
+      form.append("xml", new Blob([xml], { type: "text/xml" }), "documento.xml");
+      return app.request(path, { method: "POST", body: form });
+    };
+    const receive = (xml: string) => feSend("/fe/recepcion/api/ecf", xml);
+    const estado = (ack: string) => /<Estado>(\d)<\/Estado>/.exec(ack)?.[1];
+    const motivo = (ack: string) => /<CodigoMotivoNoRecibido>(\d)<\/CodigoMotivoNoRecibido>/.exec(ack)?.[1];
+    const list = async (b: Comprador, q = "") => (await json(await get(`/v1/received${q}`, b.cookie))).data as Json[];
+    const detail = async (b: Comprador, id: string) => (await json(await get(`/v1/received/${id}`, b.cookie))).data as Json;
+    const decision = (b: Comprador, id: string, body: Json) => post(`/v1/received/${id}/decision`, body, b.cookie);
+
+    beforeEach(() => dgii.reset());
+
+    it("recibe un e-CF, guarda el comprobante y contesta el acuse de recibo firmado", async () => {
+      const b = await comprador("rxrc1");
+      const { xml, encf } = invoice(b);
+      const res = await receive(xml);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("application/xml");
+      const ack = await res.text();
+      expect(ack).toContain("<ARECF>");
+      expect(estado(ack)).toBe("0");
+      expect(ack).toContain(`<RNCEmisor>101672919</RNCEmisor><RNCComprador>${b.rnc}</RNCComprador><eNCF>${encf}</eNCF>`);
+      expect(verifyEcfSignature(ack)).toBe(true); // firmado por la empresa receptora
+
+      const rows = await list(b);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        emitterRnc: "101672919",
+        emitterName: "Proveedor SRL",
+        ecfType: "31",
+        encf,
+        issuedOn: "2026-10-20",
+        total: "118.00",
+        totalItbis: "18.00",
+        signatureValid: true,
+        approved: null,
+        approvalState: "NONE",
+        needsApproval: true,
+      });
+      // El XML se conserva tal como llegó.
+      const stored = await call(`/v1/received/${rows[0]!.id}/xml`, { cookie: b.cookie });
+      expect(await stored.text()).toBe(xml);
+      const logs = await withTenant(prisma, b.orgId).auditLog.findMany({ where: { action: "receiver.receive" } });
+      expect(logs).toHaveLength(1);
+    });
+
+    it("las rutas no distinguen mayúsculas de minúsculas y aceptan el XML como cuerpo", async () => {
+      const b = await comprador("rxrc2");
+      const res = await feSend("/FE/Recepcion/API/ECF", invoice(b).xml);
+      expect(res.status).toBe(200);
+      const raw = await app.request("/fe/recepcion/api/ecf", { method: "POST", headers: { "content-type": "application/xml" }, body: invoice(b).xml });
+      expect(estado(await raw.text())).toBe("0");
+      expect(await list(b)).toHaveLength(2);
+    });
+
+    it("un envío repetido, alterado o mal armado se contesta con su motivo y no se guarda", async () => {
+      const b = await comprador("rxrc3");
+      const first = invoice(b);
+      expect(estado(await (await receive(first.xml)).text())).toBe("0");
+
+      const dup = await (await receive(first.xml)).text();
+      expect([estado(dup), motivo(dup)]).toEqual(["1", "3"]);
+      expect(verifyEcfSignature(dup)).toBe(true);
+
+      const altered = invoice(b).xml.replace("<MontoTotal>118.00", "<MontoTotal>1.00");
+      const bad = await (await receive(altered)).text();
+      expect([estado(bad), motivo(bad)]).toEqual(["1", "2"]);
+
+      const noDate = invoice(b).xml.replace(/<FechaEmision>[^<]*<\/FechaEmision>/, "");
+      const broken = await (await receive(noDate)).text();
+      expect([estado(broken), motivo(broken)]).toEqual(["1", "1"]);
+
+      expect(await list(b)).toHaveLength(1);
+    });
+
+    it("rechaza con error HTTP lo que no se puede ni identificar o a una empresa que no puede firmar el acuse", async () => {
+      const b = await comprador("rxrc4");
+      const stranger = await receive(invoice(b, { buyerRnc: "999999999" }).xml);
+      expect(stranger.status).toBe(400);
+      expect((await json(stranger)).error).toMatch(/no corresponde a ninguna empresa/);
+      expect((await app.request("/fe/recepcion/api/ecf", { method: "POST", headers: { "content-type": "application/xml" }, body: "esto no es un xml" })).status).toBe(400);
+      expect((await app.request("/fe/recepcion/api/ecf", { method: "POST", headers: { "content-type": "application/xml" }, body: "   " })).status).toBe(400);
+
+      const sinCert = await comprador("rxrc4b", { cert: false });
+      const res = await receive(invoice(sinCert).xml);
+      expect(res.status).toBe(503);
+      expect((await json(res)).error).toMatch(/certificado/);
+      expect(await list(sinCert)).toHaveLength(0);
+    });
+
+    it("cada empresa ve solo lo que le enviaron a ella", async () => {
+      const a = await comprador("rxrc5a");
+      const other = await comprador("rxrc5b");
+      await receive(invoice(a).xml);
+      expect(await list(a)).toHaveLength(1);
+      expect(await list(other)).toHaveLength(0);
+      const id = (await list(a))[0]!.id;
+      expect((await get(`/v1/received/${id}`, other.cookie)).status).toBe(404);
+      expect((await get("/v1/received")).status).toBe(401);
+    });
+
+    // ───────────── Aprobación comercial ─────────────
+
+    const peerHost = "prov.example";
+    const entry = { nombre: "Proveedor SRL", rnc: "101672919", urlRecepcion: `https://${peerHost}`, urlAceptacion: `https://${peerHost}`, urlOpcional: "" };
+    async function received(b: Comprador, over: Parameters<typeof invoice>[1] = {}) {
+      const { xml } = invoice(b, over);
+      expect(estado(await (await receive(xml)).text())).toBe("0");
+      return (await list(b))[0]!;
+    }
+
+    it("aprobar firma la respuesta y la entrega al emisor y a la DGII", async () => {
+      const b = await comprador("rxap1");
+      dgii.directory.set("101672919", entry);
+      const row = await received(b);
+      const res = await decision(b, row.id, { approved: true });
+      expect(res.status, JSON.stringify(await res.clone().json())).toBe(200);
+      const d = (await json(res)).data;
+      expect(d).toMatchObject({ approved: true, approvalState: "SENT", peerError: null, dgiiError: null });
+      expect(d.peerSentAt).toBeTruthy();
+      expect(d.dgiiSentAt).toBeTruthy();
+
+      expect(dgii.peerApprovals).toHaveLength(1);
+      expect(dgii.dgiiApprovals).toHaveLength(1);
+      const sent = dgii.peerApprovals[0]!;
+      expect(sent.url).toBe(`${peerHost}/fe/aprobacioncomercial/api/ecf`);
+      expect(sent.name).toBe(`${b.rnc}${row.encf}.xml`);
+      expect(sent.xml).toBe(dgii.dgiiApprovals[0]!.xml); // la misma respuesta firmada a los dos
+      expect(verifyEcfSignature(sent.xml)).toBe(true);
+      expect(sent.xml).toContain(`<DetalleAprobacionComercial><Version>1.0</Version><RNCEmisor>101672919</RNCEmisor><eNCF>${row.encf}</eNCF><FechaEmision>20-10-2026</FechaEmision><MontoTotal>118.00</MontoTotal><RNCComprador>${b.rnc}</RNCComprador><Estado>1</Estado>`);
+
+      // Una sola decisión por comprobante.
+      expect((await decision(b, row.id, { approved: false, reason: "me arrepentí" })).status).toBe(409);
+      expect((await detail(b, row.id)).approved).toBe(true);
+    });
+
+    it("rechazar exige el motivo y lo manda en el ACECF", async () => {
+      const b = await comprador("rxap2");
+      dgii.directory.set("101672919", entry);
+      const row = await received(b);
+      expect((await decision(b, row.id, { approved: false })).status).toBe(422);
+      expect((await decision(b, row.id, { approved: false, reason: "   " })).status).toBe(422);
+      const res = await decision(b, row.id, { approved: false, reason: "Mercancía incompleta" });
+      expect((await json(res)).data).toMatchObject({ approved: false, approvalReason: "Mercancía incompleta", approvalState: "SENT" });
+      expect(dgii.peerApprovals[0]!.xml).toContain("<Estado>2</Estado><DetalleMotivoRechazo>Mercancía incompleta</DetalleMotivoRechazo>");
+    });
+
+    it("si el emisor no responde, la entrega se reintenta sola y solo repite lo que faltó", async () => {
+      const b = await comprador("rxap3");
+      dgii.directory.set("101672919", entry);
+      dgii.peerFails = [() => new Response("mantenimiento", { status: 503 })];
+      const row = await received(b);
+      const d = (await json(await decision(b, row.id, { approved: true }))).data;
+      expect(d).toMatchObject({ approvalState: "PENDING", approvalAttempts: 1 });
+      expect(d.peerError).toMatch(/mantenimiento/);
+      expect(d.peerSentAt).toBeNull();
+      expect(d.dgiiSentAt).toBeTruthy(); // la DGII ya la tiene
+
+      // Antes de la hora no se intenta; después sí, y la DGII no recibe otra copia.
+      expect(await processApprovals(rdeps(), new Date(Date.now() + 5_000))).toBe(0);
+      expect(await processApprovals(rdeps(), new Date(Date.now() + 60_000))).toBeGreaterThanOrEqual(1);
+      const done = await detail(b, row.id);
+      expect(done).toMatchObject({ approvalState: "SENT", peerError: null });
+      expect(dgii.peerApprovals).toHaveLength(1);
+      expect(dgii.dgiiApprovals).toHaveLength(1);
+    });
+
+    it("un emisor que no está en el directorio deja la entrega para revisión, y se reintenta cuando ya está", async () => {
+      const b = await comprador("rxap4");
+      const row = await received(b);
+      const d = (await json(await decision(b, row.id, { approved: true }))).data;
+      expect(d).toMatchObject({ approvalState: "FAILED" });
+      expect(d.peerError).toMatch(/directorio/);
+      expect(d.dgiiSentAt).toBeTruthy();
+      expect(dgii.peerApprovals).toHaveLength(0);
+
+      expect((await post(`/v1/received/${row.id}/resend`, {}, b.cookie)).status).toBe(200); // sigue sin estar: vuelve a fallar
+      expect((await detail(b, row.id)).approvalState).toBe("FAILED");
+      dgii.directory.set("101672919", entry);
+      const ok = await json(await post(`/v1/received/${row.id}/resend`, {}, b.cookie));
+      expect(ok.data).toMatchObject({ approvalState: "SENT", peerError: null });
+      expect(dgii.dgiiApprovals).toHaveLength(1); // la DGII no la recibió dos veces
+      expect((await post(`/v1/received/${row.id}/resend`, {}, b.cookie)).status).toBe(409); // ya está entregada
+    });
+
+    it("si la DGII no acepta la aprobación se informa su motivo, pero el emisor igual la recibe", async () => {
+      const b = await comprador("rxap5");
+      dgii.directory.set("101672919", entry);
+      dgii.dgiiApprovalFails = [() => Response.json({ mensaje: ["Factura no encontrada para esta Aprobación comercial."], estado: "Aprobación comercial rechazada", codigo: "2" }, { status: 400 })];
+      const row = await received(b);
+      const d = (await json(await decision(b, row.id, { approved: true }))).data;
+      expect(d).toMatchObject({ approvalState: "FAILED", dgiiError: "Factura no encontrada para esta Aprobación comercial." });
+      expect(d.peerSentAt).toBeTruthy();
+    });
+
+    it("la factura de consumo no lleva aprobación comercial", async () => {
+      const b = await comprador("rxap6");
+      const row = await received(b, { type: "E32" });
+      expect(row).toMatchObject({ ecfType: "32", needsApproval: false });
+      const res = await decision(b, row.id, { approved: true });
+      expect(res.status).toBe(422);
+      expect(await error(res)).toMatch(/no es requerida/);
+      expect(await list(b, "?decision=pending")).toHaveLength(0);
+    });
+
+    it("filtra por decisión y busca por e-NCF o emisor", async () => {
+      const b = await comprador("rxap7");
+      dgii.directory.set("101672919", entry);
+      const first = await received(b);
+      await receive(invoice(b).xml);
+      expect(await list(b, "?decision=pending")).toHaveLength(2);
+      await decision(b, first.id, { approved: true });
+      expect((await list(b, "?decision=approved")).map((r) => r.id)).toEqual([first.id]);
+      expect(await list(b, "?decision=pending")).toHaveLength(1);
+      expect(await list(b, "?decision=rejected")).toHaveLength(0);
+      expect(await list(b, `?q=${first.encf}`)).toHaveLength(1);
+      expect(await list(b, "?q=proveedor")).toHaveLength(2);
+    });
+
+    // ───────────── Aprobaciones que nos mandan nuestros clientes ─────────────
+
+    describe("aprobación de un cliente sobre lo que emitimos", () => {
+      const clientCert = loadCertificate(...(Object.values(testP12({ cn: "CLIENTE SRL" })) as [Uint8Array, string]));
+      async function emitida(label: string) {
+        const rnc = newRnc();
+        const b = await billing(label, { seqs: [["E31", 1, 50], ["E32", 1, 50]], profile: false });
+        await send("PUT", "/v1/company", { ...profileBody, rnc }, b.cookie);
+        const cust = (await json(await post("/v1/customers", { name: "Cliente Fiscal", documentType: "RNC", documentNumber: "131246796" }, b.cookie))).data;
+        const doc = (await json(await issue(b, (await createDraft(b, { type: "E31", customerId: cust.id })).id))).data;
+        return { ...b, rnc, doc };
+      }
+      const acecf = (rnc: string, encf: string, over: { total?: string; approved?: boolean; buyer?: string } = {}) =>
+        signReply(
+          buildAcecf({
+            sellerRnc: rnc,
+            buyerRnc: over.buyer ?? "131246796",
+            encf,
+            issuedOn: "22-10-2026",
+            total: toCents(over.total ?? "236.00"),
+            approved: over.approved ?? true,
+            rejectReason: over.approved === false ? "No lo pedí" : null,
+            at: new Date("2026-10-22T16:00:00Z"),
+          }),
+          clientCert,
+          "ACECF",
+        );
+      const sendApproval = (xml: string) => feSend("/fe/aprobacioncomercial/api/ecf", xml);
+
+      it("la guarda junto al comprobante y la muestra", async () => {
+        const e = await emitida("rxai1");
+        const res = await sendApproval(acecf(e.rnc, e.doc.encf));
+        expect(res.status).toBe(200);
+        expect(await json(res)).toMatchObject({ codigo: "1", mensaje: ["Aprobación comercial recibida"] });
+        const doc = (await json(await get(`/v1/documents/${e.doc.id}`, e.cookie))).data;
+        expect(doc.approval).toMatchObject({ approved: true, reason: null, at: "22-10-2026 12:00:00" });
+
+        // Una segunda respuesta reemplaza a la primera.
+        await sendApproval(acecf(e.rnc, e.doc.encf, { approved: false }));
+        expect((await json(await get(`/v1/documents/${e.doc.id}`, e.cookie))).data.approval).toMatchObject({ approved: false, reason: "No lo pedí" });
+      });
+
+      it("rechaza lo que no cuadra con el comprobante, con los mensajes de la DGII", async () => {
+        const e = await emitida("rxai2");
+        const refuse = async (xml: string, message: RegExp) => {
+          const res = await sendApproval(xml);
+          expect(res.status).toBe(400);
+          const body = await json(res);
+          expect(body).toMatchObject({ codigo: "2", estado: "Aprobación comercial rechazada" });
+          expect(body.mensaje[0]).toMatch(message);
+        };
+        await refuse(acecf(e.rnc, "E310000009999"), /Factura no encontrada/);
+        await refuse(acecf(e.rnc, e.doc.encf, { total: "10.00" }), /No se encuentra un e-CF válido/);
+        await refuse(acecf(e.rnc, e.doc.encf, { buyer: "999999999" }), /No se encuentra un e-CF válido/);
+        await refuse(acecf(e.rnc, e.doc.encf).replace("<Estado>1</Estado>", "<Estado>2</Estado>"), /firma/);
+        await refuse(acecf("888888888", e.doc.encf), /No se encuentra un e-CF válido/);
+        await refuse("<ACECF/>", /estructura/);
+        const consumo = (await json(await issue(e, (await createDraft(e)).id))).data;
+        await refuse(acecf(e.rnc, consumo.encf), /no es requerida/);
+        expect((await json(await get(`/v1/documents/${e.doc.id}`, e.cookie))).data.approval).toBeNull();
+      });
     });
   });
 

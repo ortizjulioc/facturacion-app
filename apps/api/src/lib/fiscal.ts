@@ -39,7 +39,7 @@ const wait = (table: number[], attempts: number) => table[Math.min(Math.max(atte
 /** Un cliente por certificado y ambiente: así se conserva el token (dura una hora) entre envíos. */
 const clients = new WeakMap<EcfCertificate, Map<EcfEnvironment, DgiiClient>>();
 
-function clientFor(cert: EcfCertificate, env: EcfEnvironment, fetch?: FetchLike): FiscalProvider {
+export function clientFor(cert: EcfCertificate, env: EcfEnvironment, fetch?: FetchLike): FiscalProvider {
   let byEnv = clients.get(cert);
   if (!byEnv) clients.set(cert, (byEnv = new Map()));
   let client = byEnv.get(env);
