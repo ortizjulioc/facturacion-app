@@ -141,6 +141,43 @@ describe("recepción y consulta", () => {
     expect(d.calls.some((x) => x.path.includes("trackid=acc"))).toBe(true);
   });
 
+  it("envía el resumen RFCE al dominio de consumo y lee la respuesta inmediata", async () => {
+    const seen: { name: string; auth: string | null; host: string }[] = [];
+    const d = fakeDgii({
+      "POST /testecf/recepcionfc/api/recepcion/ecf": async ({ form, headers, url }) => {
+        seen.push({ name: (form!.get("xml") as File).name, auth: headers.get("authorization"), host: url.host });
+        return Response.json({ codigo: 1, estado: "Aceptado", mensajes: [], encf: "E320000000064", secuenciaUtilizada: true });
+      },
+    });
+    const res = await client(d).submitSummary({ xml: "<RFCE/>", rnc: "131880738", encf: "E320000000064" });
+    expect(res).toMatchObject({ status: "ACCEPTED", code: 1, encf: "E320000000064", sequenceUsed: true, messages: [] });
+    expect(seen).toEqual([{ name: "131880738E320000000064.xml", auth: "bearer tok-1", host: "fc.dgii.gov.do" }]);
+  });
+
+  it("un resumen rechazado o condicional trae sus mensajes y si el número se gastó", async () => {
+    const answers = [
+      { codigo: 2, estado: "Rechazado", mensajes: [{ codigo: "109", valor: "El e-NCF no está autorizado" }], encf: "E320000000065", secuenciaUtilizada: false },
+      { codigo: 4, estado: "Aceptado Condicional", mensajes: [{ codigo: "7", valor: "Fecha fuera de rango" }], encf: "E320000000066", secuenciaUtilizada: true },
+    ];
+    const d = fakeDgii({ "POST /testecf/recepcionfc/api/recepcion/ecf": () => Response.json(answers.shift()) });
+    const rej = await client(d).submitSummary({ xml: "x", rnc: "1", encf: "E320000000065" });
+    const cond = await client(d).submitSummary({ xml: "x", rnc: "1", encf: "E320000000066" });
+    expect(rej).toMatchObject({ status: "REJECTED", sequenceUsed: false, messages: [{ code: "109", text: "El e-NCF no está autorizado" }] });
+    expect(cond).toMatchObject({ status: "ACCEPTED_CONDITIONAL", messages: [{ code: "7", text: "Fecha fuera de rango" }] });
+    const bad = fakeDgii({ "POST /testecf/recepcionfc/api/recepcion/ecf": () => Response.json({ mensaje: "Sin estado" }) });
+    await expect(client(bad).submitSummary({ xml: "x", rnc: "1", encf: "E320000000065" })).rejects.toMatchObject({ kind: "server", message: "Sin estado" });
+  });
+
+  it("consulta el estado de un resumen por RNC, e-NCF y código de seguridad", async () => {
+    const d = fakeDgii({
+      "GET /testecf/consultarfce/api/Consultas/Consulta": ({ url }) => {
+        expect(Object.fromEntries(url.searchParams)).toEqual({ RNC_Emisor: "131880738", ENCF: "E320000000064", Cod_Seguridad_eCF: "uabnyh" });
+        return Response.json({ rnc: "131880738", encf: "E320000000064", secuenciaUtilizada: true, codigo: "1", estado: "Aceptado", mensajes: [] });
+      },
+    });
+    expect(await client(d).summaryResult("131880738", "E320000000064", "uabnyh")).toMatchObject({ status: "ACCEPTED", rnc: "131880738", encf: "E320000000064" });
+  });
+
   it("lista los TrackIds de un e-NCF (uno o varios) y no existe en certificación", async () => {
     const d = fakeDgii({
       "GET /testecf/consultatrackids/api/trackids/consulta": ({ url }) => {

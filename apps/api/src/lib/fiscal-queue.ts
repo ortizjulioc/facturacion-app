@@ -1,17 +1,15 @@
 import { CONSUMER_ID_THRESHOLD } from "@facturacion/core";
 import type { TenantTx } from "../types";
 
-/**
- * ¿Por qué este comprobante no se puede enviar (todavía)? null = se puede.
- * Las facturas de consumo menores a RD$250,000 no van por la recepción de e-CF sino por un resumen (RFCE) que aún no
- * está implementado.
- */
+/** Qué se envía: las facturas de consumo menores a RD$250,000 van como resumen (RFCE); todo lo demás, completo. */
+export const fiscalKind = (doc: { type: string; total: bigint }): "ECF" | "RFCE" =>
+  doc.type === "E32" && doc.total < CONSUMER_ID_THRESHOLD ? "RFCE" : "ECF";
+
+/** ¿Por qué este comprobante no se puede enviar (todavía)? null = se puede. */
 export function fiscalBlock(doc: { type: string; total: bigint; currency: string; ecfXml: string | null; status: string }): string | null {
   if (doc.status === "DRAFT") return "El comprobante aún no está emitido";
   if (!doc.ecfXml) return "El comprobante no está firmado: sube el certificado digital y fírmalo primero";
-  if (doc.type === "E32" && doc.total < CONSUMER_ID_THRESHOLD) {
-    return "Las facturas de consumo menores a RD$250,000 se reportan con un resumen (RFCE), que aún no está disponible";
-  }
+  if (doc.currency !== "DOP") return "Los comprobantes en dólares aún no se envían a la DGII";
   return null;
 }
 
@@ -19,7 +17,8 @@ export function fiscalBlock(doc: { type: string; total: bigint; currency: string
 export async function enqueueSubmission(tx: TenantTx, organizationId: string, documentId: string): Promise<boolean> {
   const existing = await tx.fiscalSubmission.findFirst({ where: { documentId }, select: { id: true } });
   if (existing) return false;
-  await tx.fiscalSubmission.create({ data: { organizationId, documentId } });
+  const doc = await tx.document.findFirstOrThrow({ where: { id: documentId }, select: { type: true, total: true } });
+  await tx.fiscalSubmission.create({ data: { organizationId, documentId, kind: fiscalKind(doc) } });
   return true;
 }
 

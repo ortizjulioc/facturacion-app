@@ -1,5 +1,6 @@
 import {
   buyerErrors,
+  CONSUMER_ID_THRESHOLD,
   calculateDocument,
   isModifier,
   normalizeDocument,
@@ -147,11 +148,10 @@ function encabezado(input: EcfInput, a: EcfAmounts, totals: DocumentTotals): Xml
   };
 }
 
-function idDoc(input: EcfInput, a: EcfAmounts): XmlNode | null {
+/** TipoPago y tabla de formas de pago, comunes al e-CF y a su resumen (RFCE). */
+function paymentInfo(input: EcfInput, a: EcfAmounts) {
   const isCredit = input.payments?.length ? input.payments.every((p) => p.method === "CREDIT") : false;
   const paymentType = a.total === 0n ? "3" : isCredit ? "2" : "1";
-  const grossPrices = input.lines.some((l) => l.priceIncludesTax);
-
   // El número de forma de pago se agrupa: la DGII admite hasta 7 filas, una por forma.
   const byMethod = new Map<string, Cents>();
   const payments = input.payments?.length ? input.payments : [{ method: "CASH" as const, amount: a.total }];
@@ -168,7 +168,12 @@ function idDoc(input: EcfInput, a: EcfAmounts): XmlNode | null {
             node("FormaDePago", leaf("FormaPago", code), leaf("MontoPago", formatAmount(amount))),
           ),
         );
+  return { paymentType, paymentTable };
+}
 
+function idDoc(input: EcfInput, a: EcfAmounts): XmlNode | null {
+  const { paymentType, paymentTable } = paymentInfo(input, a);
+  const grossPrices = input.lines.some((l) => l.priceIncludesTax);
   const daysSince = input.reference ? (input.issuedAt.getTime() - input.reference.issuedAt.getTime()) / DAY_MS : 0;
 
   return node(
@@ -301,4 +306,64 @@ function referencia(input: EcfInput): XmlNode | null {
     leaf("CodigoModificacion", r.code),
     leaf("RazonModificacion", r.reason ? clean(r.reason, 90) : null),
   );
+}
+
+// ───────────── Resumen de factura de consumo (RFCE) ─────────────
+
+/** Una factura de consumo menor a RD$250,000 no se envía completa: la DGII recibe este resumen (formato RFCE v1.0). */
+export type BuiltRfce = { xml: string; amounts: EcfAmounts };
+
+/**
+ * Resumen de una factura de consumo (E32) menor a RD$250,000: encabezado con lo esencial y el código de seguridad
+ * de la firma del e-CF COMPLETO (el que sale en el QR de la representación impresa). Sin firmar: la firma se agrega con
+ * `signRfce`. El e-CF extendido debe conservarse aunque la DGII solo reciba el resumen.
+ */
+export function buildRfce(input: EcfInput, securityCode: string): BuiltRfce {
+  if (input.type !== "E32") throw new EcfError("Solo las facturas de consumo (E32) se reportan con un resumen");
+  const built = buildEcf(input);
+  if (built.amounts.total >= CONSUMER_ID_THRESHOLD) {
+    throw new EcfError("Las facturas de consumo desde RD$250,000 se envían completas, no con un resumen");
+  }
+  if (!/^\S{6}$/.test(securityCode)) throw new EcfError("Falta el código de seguridad de la firma del e-CF");
+  const { paymentType, paymentTable } = paymentInfo(input, built.amounts);
+  const rnc = normalizeDocument(input.seller.rnc.length === 11 ? "CEDULA" : "RNC", input.seller.rnc);
+  if (!rnc.ok) throw new EcfError(`RNC del emisor: ${rnc.error}`);
+
+  let buyer: XmlNode | null = null;
+  if (input.buyer) {
+    const doc = normalizeDocument(input.buyer.docType, input.buyer.docNumber);
+    if (!doc.ok) throw new EcfError(doc.error);
+    const foreign = input.buyer.docType === "PASAPORTE";
+    buyer = node(
+      "Comprador",
+      foreign ? null : leaf("RNCComprador", doc.value),
+      foreign ? leaf("IdentificadorExtranjero", doc.value) : null,
+      leaf("RazonSocialComprador", input.buyer.name ? clean(input.buyer.name, 150) : null),
+    );
+  }
+
+  const root: XmlNode = {
+    name: "RFCE",
+    children: [
+      {
+        name: "Encabezado",
+        children: [
+          leaf("Version", "1.0"),
+          node(
+            "IdDoc",
+            leaf("TipoeCF", "32"),
+            leaf("eNCF", input.encf),
+            leaf("TipoIngresos", input.incomeType ?? "01"),
+            leaf("TipoPago", paymentType),
+            paymentTable,
+          ),
+          node("Emisor", leaf("RNCEmisor", rnc.value), leaf("RazonSocialEmisor", clean(input.seller.legalName, 150)), leaf("FechaEmision", formatDate(input.issuedAt))),
+          buyer,
+          totales(built.amounts, built.totals),
+          leaf("CodigoSeguridadeCF", securityCode),
+        ],
+      },
+    ],
+  };
+  return { xml: serialize(root), amounts: built.amounts };
 }

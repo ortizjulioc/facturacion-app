@@ -957,11 +957,18 @@ enum FiscalState {
   FAILED
 }
 
+/// Qué se le manda a la DGII: el e-CF completo (recepción de e-CF) o, en facturas de consumo menores a RD$250,000, su resumen.
+enum FiscalKind {
+  ECF
+  RFCE
+}
+
 /// Cola de envío a la DGII: una fila por comprobante. Es el único dato mutable del envío (el comprobante emitido está congelado).
 model FiscalSubmission {
   id             String       @id @default(uuid(7)) @db.Uuid
   organizationId String
   documentId     String       @unique @db.Uuid
+  kind           FiscalKind   @default(ECF)
   state          FiscalState  @default(PENDING)
   trackId        String?
   attempts       Int          @default(0)

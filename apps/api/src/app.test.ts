@@ -27,6 +27,11 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
   /** Una DGII de mentira: autentica, recibe e-CF (guarda lo recibido) y responde consultas según lo que cada prueba prepare. */
   const dgii = {
     received: [] as { name: string; xml: string; auth: string | null }[],
+    /** Resúmenes de factura de consumo (RFCE) recibidos, y las consultas que se hicieron por ellos. */
+    summaries: [] as { name: string; xml: string }[],
+    summaryQueries: [] as { rnc: string | null; encf: string | null; code: string | null }[],
+    summaryFails: [] as (() => Response)[],
+    summaryHandlers: new Map<string, Json | (() => Json)>(),
     /** Respuestas que se dan, una por envío, en vez de aceptar el e-CF. */
     receptionFails: [] as (() => Response)[],
     handlers: new Map<string, Json | (() => Json)>(),
@@ -35,6 +40,10 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     tokens: 0,
     reset() {
       this.received = [];
+      this.summaries = [];
+      this.summaryQueries = [];
+      this.summaryFails = [];
+      this.summaryHandlers = new Map();
       this.receptionFails = [];
       this.handlers = new Map();
       this.encfOf = new Map();
@@ -42,6 +51,10 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     /** Lo que responde la consulta de resultado de ese e-NCF (por omisión: aceptado). */
     resultOf(encf: string, answer: Json | (() => Json)) {
       this.handlers.set(encf, answer);
+    },
+    /** Lo que responde el resumen de ese e-NCF (por omisión: aceptado). */
+    summaryOf(encf: string, answer: Json | (() => Json)) {
+      this.summaryHandlers.set(encf, answer);
     },
     fetch: async (input: string, init?: RequestInit): Promise<Response> => {
       const url = new URL(input);
@@ -64,6 +77,24 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
         const trackId = `trk-${++dgii.n}`;
         dgii.encfOf.set(trackId, /<eNCF>([^<]+)<\/eNCF>/.exec(xml)?.[1] ?? "");
         return Response.json({ trackId, error: null, mensaje: null });
+      }
+      if (method === "POST" && url.pathname.endsWith("/recepcionfc/api/recepcion/ecf")) {
+        const fail = dgii.summaryFails.shift();
+        if (fail) return fail();
+        const file = (init!.body as FormData).get("xml") as File;
+        const xml = await file.text();
+        dgii.summaries.push({ name: file.name, xml });
+        const encf = /<eNCF>([^<]+)<\/eNCF>/.exec(xml)?.[1] ?? "";
+        const custom = dgii.summaryHandlers.get(encf);
+        const answer = typeof custom === "function" ? custom() : custom;
+        return Response.json({ codigo: 1, estado: "Aceptado", mensajes: [], encf, secuenciaUtilizada: true, ...answer });
+      }
+      if (url.pathname.endsWith("/consultarfce/api/Consultas/Consulta")) {
+        const q = url.searchParams;
+        dgii.summaryQueries.push({ rnc: q.get("RNC_Emisor"), encf: q.get("ENCF"), code: q.get("Cod_Seguridad_eCF") });
+        const custom = dgii.summaryHandlers.get(q.get("ENCF")!);
+        const answer = typeof custom === "function" ? custom() : custom;
+        return Response.json({ rnc: q.get("RNC_Emisor"), encf: q.get("ENCF"), codigo: "1", estado: "Aceptado", secuenciaUtilizada: true, mensajes: [], ...answer });
       }
       if (url.pathname.endsWith("/consultaresultado/api/consultas/estado")) {
         const trackId = url.searchParams.get("trackid")!;
@@ -5234,6 +5265,7 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     }
     const e31 = async (b: Billing) => (await json(await issue(b, (await createDraft(b, { type: "E31", customerId: customers.get(b)!.id })).id))).data as Json;
     const detail = async (b: Billing, id: string) => (await json(await get(`/v1/documents/${id}`, b.cookie))).data as Json;
+    const rawStored = (b: Billing, id: string) => withTenant(prisma, b.orgId).document.findFirstOrThrow({ where: { id } });
     const run = (b: Billing, now: Date) => processDue(deps(), { now, organizationId: b.orgId });
     let clock = Date.now() + 5_000;
     /** Cada paso del trabajador ocurre unos segundos después del anterior. */
@@ -5355,15 +5387,8 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       expect(done.data.fiscal.state).toBe("DONE");
     });
 
-    it("no se puede enviar lo que no está firmado, es un borrador o es un consumo menor a RD$250,000", async () => {
+    it("no se puede enviar lo que no está firmado o es un borrador", async () => {
       const b = await emisor("dg7");
-      const consumo = (await json(await issue(b, (await createDraft(b)).id))).data;
-      expect(consumo.fiscal).toBeNull(); // el envío automático lo deja fuera
-      expect(consumo.fiscalBlock).toMatch(/RFCE/);
-      const res = await post(`/v1/documents/${consumo.id}/send`, {}, b.cookie);
-      expect(res.status).toBe(422);
-      expect(await error(res)).toMatch(/RD\$250,000/);
-
       const draft = await createDraft(b, { type: "E31", customerId: customers.get(b)!.id });
       expect(await error(await post(`/v1/documents/${draft.id}/send`, {}, b.cookie))).toMatch(/aún no está emitido/);
 
@@ -5372,6 +5397,77 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       const unsigned = (await json(await issue(sinCert, (await createDraft(sinCert, { type: "E31", customerId: c.id })).id))).data;
       expect(unsigned.fiscalBlock).toMatch(/no está firmado/);
       expect((await post(`/v1/documents/${unsigned.id}/send`, {}, sinCert.cookie)).status).toBe(422);
+    });
+
+    const consumo = async (b: Billing) => (await json(await issue(b, (await createDraft(b)).id))).data as Json;
+
+    it("una factura de consumo menor a RD$250,000 se envía como resumen (RFCE) con el código de seguridad del e-CF", async () => {
+      const b = await emisor("dg12");
+      const doc = await consumo(b);
+      expect(doc.fiscal).toMatchObject({ kind: "RFCE", state: "PENDING" });
+      expect(doc.ecf.securityCode).toHaveLength(6);
+
+      expect(await run(b, step())).toMatchObject({ claimed: 1, accepted: 1 });
+      // La DGII respondió en el acto: no hay TrackId ni espera.
+      const done = await detail(b, doc.id);
+      expect(done.status).toBe("ACCEPTED");
+      expect(done.fiscal).toMatchObject({ kind: "RFCE", state: "DONE", trackId: null, dgiiStatus: "Aceptado" });
+
+      expect(dgii.received).toHaveLength(0); // no pasó por la recepción de e-CF
+      expect(dgii.summaries).toHaveLength(1);
+      const sent = dgii.summaries[0]!;
+      expect(sent.name).toBe(`101001577${doc.encf}.xml`);
+      expect(sent.xml.startsWith('<?xml version="1.0" encoding="UTF-8"?><RFCE>')).toBe(true);
+      expect(sent.xml).toContain(`<CodigoSeguridadeCF>${doc.ecf.securityCode}</CodigoSeguridadeCF>`);
+      expect(sent.xml).toContain("<MontoTotal>236.00</MontoTotal>");
+      expect(sent.xml).not.toContain("DetallesItems");
+      expect(verifyEcfSignature(sent.xml)).toBe(true);
+      // El e-CF extendido se conserva aparte.
+      expect((await rawStored(b, doc.id)).ecfXml).toContain("<ECF>");
+    });
+
+    it("un resumen rechazado deja el comprobante rechazado; uno que sigue en proceso se consulta después", async () => {
+      const b = await emisor("dg13");
+      const rejected = await consumo(b);
+      dgii.summaryOf(rejected.encf, { codigo: 2, estado: "Rechazado", secuenciaUtilizada: false, mensajes: [{ codigo: "109", valor: "El e-NCF no está autorizado" }] });
+      expect(await run(b, step())).toMatchObject({ rejected: 1 });
+      const r = await detail(b, rejected.id);
+      expect(r.status).toBe("REJECTED");
+      expect(r.fiscal).toMatchObject({ state: "DONE", sequenceUsed: false, messages: [{ code: "109", text: "El e-NCF no está autorizado" }] });
+
+      const slow = await consumo(b);
+      const answers = [{ codigo: 3, estado: "En Proceso" }, { codigo: 1, estado: "Aceptado" }];
+      dgii.summaryOf(slow.encf, () => answers.shift()!);
+      expect(await run(b, step())).toMatchObject({ sent: 1 });
+      expect((await detail(b, slow.id)).fiscal).toMatchObject({ kind: "RFCE", state: "SENT" });
+      expect(await run(b, step(10))).toMatchObject({ accepted: 1 });
+      expect((await detail(b, slow.id)).status).toBe("ACCEPTED");
+      expect(dgii.summaries).toHaveLength(2); // el segundo no se reenvió: se consultó
+      expect(dgii.summaryQueries).toEqual([{ rnc: "101001577", encf: slow.encf, code: slow.ecf.securityCode }]);
+    });
+
+    it("el resumen reintenta ante fallos temporales con los mismos bytes", async () => {
+      const b = await emisor("dg14");
+      const doc = await consumo(b);
+      dgii.summaryFails = [() => new Response("", { status: 502 })];
+      expect(await run(b, step())).toMatchObject({ retried: 1 });
+      expect((await detail(b, doc.id)).fiscal).toMatchObject({ state: "PENDING", attempts: 1 });
+      expect(await run(b, step(31))).toMatchObject({ accepted: 1 });
+      expect(dgii.summaries).toHaveLength(1);
+    });
+
+    it("una factura de consumo desde RD$250,000 se envía completa, no como resumen", async () => {
+      const b = await emisor("dg15");
+      const draft = await createDraft(b, {
+        customerId: customers.get(b)!.id,
+        lines: [{ name: "Equipo", quantity: "1", unitPrice: "300000.00", tax: "EXENTO" }],
+        payments: [{ method: "TRANSFER", amount: "300000.00" }],
+      });
+      const doc = (await json(await issue(b, draft.id))).data;
+      expect(doc.fiscal).toMatchObject({ kind: "ECF", state: "PENDING" });
+      expect(await run(b, step())).toMatchObject({ sent: 1 });
+      expect(dgii.received).toHaveLength(1);
+      expect(dgii.summaries).toHaveLength(0);
     });
 
     it("al firmar después, el comprobante entra solo a la cola si el envío es automático", async () => {

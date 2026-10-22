@@ -111,6 +111,18 @@ export function signEcf(xml: string, cert: EcfCertificate, signedAt: Date = new 
 }
 
 /**
+ * Firma el resumen de una factura de consumo (`<RFCE>…</RFCE>` de `buildRfce`). A diferencia del e-CF no lleva
+ * FechaHoraFirma, y la firma es determinista: reenviar el mismo resumen produce exactamente los mismos bytes.
+ */
+export function signRfce(xml: string, cert: EcfCertificate, at: Date = new Date()): string {
+  if (!xml.startsWith("<RFCE>") || !xml.endsWith("</RFCE>")) throw new EcfError("El XML no es un resumen RFCE sin firmar");
+  if (xml.includes("<Signature")) throw new EcfError("El resumen ya está firmado");
+  const problem = certificateProblem(cert, at);
+  if (problem) throw new EcfError(problem);
+  return `${XML_DECLARATION}${signXml(xml, cert)}`;
+}
+
+/**
  * Firma XMLDSig envuelta (enveloped) de cualquier documento XML: se agrega al final del elemento raíz. Es la misma
  * firma del e-CF y la que la DGII pide para la semilla de autenticación.
  */

@@ -3,6 +3,8 @@ import { DOMParser } from "@xmldom/xmldom";
 import { toCents, toMilli } from "@facturacion/core";
 import {
   buildEcf,
+  buildRfce,
+  signRfce,
   certificateProblem,
   EcfError,
   formatDate,
@@ -208,6 +210,55 @@ describe("firma y código de seguridad", () => {
     expect(cert.notAfter.getUTCFullYear()).toBe(2036);
     expect(() => loadCertificate(p12, "otra")).toThrow(/contraseña/);
     expect(() => loadCertificate(new Uint8Array([1, 2, 3]), password)).toThrow(/no es un certificado/);
+  });
+});
+
+describe("resumen de factura de consumo (RFCE)", () => {
+  const cert = loadCertificate(...(Object.values(testP12()) as [Uint8Array, string]));
+
+  it("arma el resumen con encabezado, totales y el código de seguridad del e-CF, sin detalle de líneas", () => {
+    const { xml, amounts } = buildRfce(
+      sample("E32", { buyer: { docType: "RNC", docNumber: "130000002", name: "Cliente" }, propinaLegal: true, payments: [{ method: "CARD", amount: toCents("444.50") }] }),
+      "dcp79q",
+    );
+    expect(xml.startsWith("<RFCE><Encabezado><Version>1.0</Version><IdDoc><TipoeCF>32</TipoeCF><eNCF>E320000000001</eNCF>")).toBe(true);
+    expect(xml).toContain("<TipoIngresos>01</TipoIngresos><TipoPago>1</TipoPago><TablaFormasPago><FormaDePago><FormaPago>3</FormaPago><MontoPago>444.50</MontoPago></FormaDePago></TablaFormasPago></IdDoc>");
+    expect(xml).toContain("<Emisor><RNCEmisor>101672919</RNCEmisor><RazonSocialEmisor>Comercial Prueba &amp; Hijos SRL</RazonSocialEmisor><FechaEmision>10-03-2026</FechaEmision></Emisor>");
+    expect(xml).toContain("<Comprador><RNCComprador>130000002</RNCComprador><RazonSocialComprador>Cliente</RazonSocialComprador></Comprador>");
+    // Los totales son los del e-CF completo (incluida la propina como impuesto adicional).
+    expect(xml).toContain("<MontoGravadoTotal>300.00</MontoGravadoTotal>");
+    expect(xml).toContain("<MontoExento>55.00</MontoExento>");
+    expect(xml).toContain("<TotalITBIS>54.00</TotalITBIS>");
+    expect(xml).toContain("<MontoImpuestoAdicional>35.50</MontoImpuestoAdicional>");
+    expect(xml).toContain("<MontoTotal>444.50</MontoTotal></Totales><CodigoSeguridadeCF>dcp79q</CodigoSeguridadeCF></Encabezado></RFCE>");
+    expect(amounts.total).toBe(toCents("444.50"));
+    // Ni las líneas, ni los datos del emisor del e-CF completo, ni la fecha de firma van en el resumen.
+    for (const absent of ["DetallesItems", "DireccionEmisor", "FechaHoraFirma", "IndicadorMontoGravado", "NombreComercial"]) expect(xml).not.toContain(absent);
+    expect(xml).not.toMatch(/<([A-Za-z0-9]+)><\/\1>/);
+  });
+
+  it("solo sirve para facturas de consumo menores a RD$250,000 y exige el código de seguridad", () => {
+    expect(() => buildRfce(sample("E31", { buyer: { docType: "RNC", docNumber: "130000002", name: "C" } }), "dcp79q")).toThrow(/consumo/);
+    const big = sample("E32", {
+      buyer: { docType: "RNC", docNumber: "130000002", name: "C" },
+      lines: [{ name: "Equipo", quantity: toMilli("1"), unitPrice: toCents("300000"), tax: "EXENTO" }],
+      payments: [{ method: "TRANSFER", amount: toCents("300000") }],
+    });
+    expect(() => buildRfce(big, "dcp79q")).toThrow(/desde RD\$250,000/);
+    expect(() => buildRfce(sample("E32"), "")).toThrow(/código de seguridad/);
+    expect(() => buildRfce(sample("E32"), "abc")).toThrow(/código de seguridad/);
+  });
+
+  it("se firma como el e-CF (la firma verifica) y es determinista", () => {
+    const { xml } = buildRfce(sample("E32"), "dcp79q");
+    const signed = signRfce(xml, cert, new Date("2026-03-10T15:30:05Z"));
+    expect(signed.startsWith('<?xml version="1.0" encoding="UTF-8"?><RFCE>')).toBe(true);
+    expect(signed.endsWith("</Signature></RFCE>")).toBe(true);
+    expect(verifyEcfSignature(signed)).toBe(true);
+    expect(verifyEcfSignature(signed.replace("<MontoTotal>409.00", "<MontoTotal>1.00"))).toBe(false);
+    expect(signRfce(xml, cert, new Date("2026-03-10T15:30:05Z"))).toBe(signed); // reenviar da los mismos bytes
+    expect(() => signRfce(signed.replace(/^<\?xml[^>]*\?>/, ""), cert)).toThrow(/ya está firmado/);
+    expect(() => signRfce(buildEcf(sample("E32")).xml, cert)).toThrow(/no es un resumen/);
   });
 });
 

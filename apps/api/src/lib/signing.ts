@@ -2,10 +2,12 @@ import { HTTPException } from "hono/http-exception";
 import { parseEncf, type EcfType, type ModificationCode } from "@facturacion/core";
 import {
   buildEcf,
+  buildRfce,
   certificateProblem,
   EcfError,
   loadCertificate,
   signEcf,
+  signRfce,
   type EcfCertificate,
   type EcfInput,
 } from "@facturacion/ecf";
@@ -187,6 +189,22 @@ export async function signDocumentData(
     return { ecfXml: signed.xml, securityCode: signed.securityCode, signedAt: signed.signedAt };
   } catch (e) {
     if (e instanceof EcfError) throw unprocessable(`No se pudo firmar el e-CF: ${e.message}`);
+    throw e;
+  }
+}
+
+/**
+ * XML firmado del resumen (RFCE) de una factura de consumo menor a RD$250,000. Lleva el código de seguridad de la firma
+ * del e-CF completo, así que el comprobante tiene que estar firmado. Es determinista: reenviarlo da los mismos bytes.
+ */
+export async function buildSummaryXml(tx: TenantTx, doc: DocumentFull, profile: Profile, cert: EcfCertificate): Promise<string> {
+  try {
+    if (!doc.securityCode) throw new EcfError("El comprobante no está firmado");
+    const built = buildRfce(await ecfInputFor(tx, doc, profile), doc.securityCode);
+    if (built.amounts.total !== doc.total) throw new EcfError("Los montos del resumen no coinciden con los del comprobante");
+    return signRfce(built.xml, cert);
+  } catch (e) {
+    if (e instanceof EcfError) throw unprocessable(`No se pudo armar el resumen: ${e.message}`);
     throw e;
   }
 }

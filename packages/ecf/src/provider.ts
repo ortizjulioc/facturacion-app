@@ -64,6 +64,17 @@ export type TrackResult = {
   messages: FiscalMessage[];
 };
 
+/** Respuesta de la DGII a un resumen de factura de consumo (RFCE): llega en el mismo envío, sin TrackId. */
+export type SummaryResult = {
+  status: FiscalStatus;
+  code: number;
+  statusText: string;
+  rnc: string | null;
+  encf: string | null;
+  sequenceUsed: boolean | null;
+  messages: FiscalMessage[];
+};
+
 export type TrackSummary = { trackId: string; status: FiscalStatus; statusText: string; receivedAt: string | null };
 
 export interface FiscalProvider {
@@ -71,6 +82,13 @@ export interface FiscalProvider {
   submit(input: SubmitInput): Promise<SubmitResult>;
   /** Estado de validación de un envío. */
   result(trackId: string): Promise<TrackResult>;
+  /**
+   * Envía el resumen (RFCE) de una factura de consumo menor a RD$250,000. La DGII responde en el acto
+   * (aceptado, aceptado condicional o rechazado).
+   */
+  submitSummary(input: SubmitInput): Promise<SummaryResult>;
+  /** Estado de un resumen ya enviado, por RNC, e-NCF y código de seguridad. */
+  summaryResult(rnc: string, encf: string, securityCode: string): Promise<SummaryResult>;
   /** Todos los envíos que la DGII tiene de un e-NCF (puede haber varios si se reenvió). */
   trackIdsOf(rnc: string, encf: string): Promise<TrackSummary[]>;
 }

@@ -389,6 +389,7 @@ export const documentDto = (d: DocumentFull, profile: StampProfile | null = null
   /** Envío a la DGII: estado de la cola y respuesta de la DGII. */
   fiscal: d.fiscalSubmission
     ? {
+        kind: d.fiscalSubmission.kind,
         state: d.fiscalSubmission.state,
         trackId: d.fiscalSubmission.trackId,
         attempts: d.fiscalSubmission.attempts,

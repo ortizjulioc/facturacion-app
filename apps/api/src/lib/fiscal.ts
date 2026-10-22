@@ -11,8 +11,9 @@ import {
 } from "@facturacion/ecf";
 import type { Env } from "../env";
 import type { Logger } from "../logger";
+import { FULL } from "./documents";
 import { fiscalBlock } from "./fiscal-queue";
-import { loadSigner } from "./signing";
+import { buildSummaryXml, loadSigner } from "./signing";
 
 export { enqueueIfAuto, enqueueSubmission, fiscalBlock, retrySubmission } from "./fiscal-queue";
 
@@ -119,11 +120,21 @@ type Outcome = "sent" | "accepted" | "rejected" | "retried" | "failed";
 async function processOne(deps: FiscalDeps, organizationId: string, id: string, now: Date): Promise<Outcome> {
   const loaded = await tenantTransaction(deps.prisma, organizationId, async (tx) => {
     const sub = await tx.fiscalSubmission.findFirst({ where: { id }, include: { document: true } });
-    const profile = await tx.companyProfile.findFirst({ select: { rnc: true, environment: true } });
+    const profile = await tx.companyProfile.findFirst();
     const cert = sub ? await loadSigner(tx, deps.env, organizationId) : null;
-    return { sub, profile, cert };
+    // El resumen (RFCE) se arma y firma al enviarlo, a partir del comprobante ya firmado.
+    let summary: { xml?: string; error?: string } = {};
+    if (sub?.kind === "RFCE" && sub.state === "PENDING" && profile && cert) {
+      try {
+        const doc = await tx.document.findFirstOrThrow({ where: { id: sub.documentId }, include: FULL });
+        summary = { xml: await buildSummaryXml(tx, doc, profile, cert) };
+      } catch (e) {
+        summary = { error: e instanceof Error ? e.message : "No se pudo armar el resumen" };
+      }
+    }
+    return { sub, profile, cert, summary };
   });
-  const { sub, profile, cert } = loaded;
+  const { sub, profile, cert, summary } = loaded;
   if (!sub || (sub.state !== "PENDING" && sub.state !== "SENT")) return "retried";
 
   const fail = (message: string, outcome: Outcome = "failed") =>
@@ -133,10 +144,26 @@ async function processOne(deps: FiscalDeps, organizationId: string, id: string, 
   if (!cert) return fail("La empresa no tiene un certificado digital cargado");
   const block = fiscalBlock({ ...sub.document });
   if (block) return fail(block);
+  if (summary.error) return fail(summary.error);
   const provider = clientFor(cert, profile.environment, deps.fetch);
   const attempts = sub.attempts + 1;
 
   try {
+    if (sub.kind === "RFCE") {
+      // El resumen se responde en el mismo envío (sin TrackId); si la DGII no da un estado final, se consulta después.
+      const result =
+        sub.state === "PENDING"
+          ? await provider.submitSummary({ xml: summary.xml!, rnc: profile.rnc, encf: sub.document.encf! })
+          : await provider.summaryResult(profile.rnc, sub.document.encf!, sub.document.securityCode!);
+      if (sub.state === "PENDING" && (result.status === "IN_PROCESS" || result.status === "NOT_FOUND")) {
+        await save(deps, organizationId, sub.id, sub.documentId, {
+          state: "SENT", attempts: 0, sentAt: now, lastError: null, lockedUntil: null, dgiiCode: result.code, dgiiStatus: result.statusText || result.status,
+          nextAttemptAt: later(now, POLL_BACKOFF_SECONDS[0]!),
+        }, "SENT");
+        return "sent";
+      }
+      return await recordResult(deps, organizationId, sub, result, sub.state === "PENDING" ? 1 : attempts, now);
+    }
     if (sub.state === "PENDING") {
       const { trackId } = await provider.submit({ xml: sub.document.ecfXml!, rnc: profile.rnc, encf: sub.document.encf! });
       await save(deps, organizationId, sub.id, sub.documentId, {
@@ -165,11 +192,11 @@ async function recordResult(
   deps: FiscalDeps,
   organizationId: string,
   sub: { id: string; documentId: string },
-  r: TrackResult,
+  r: Pick<TrackResult, "status" | "code" | "statusText" | "messages" | "sequenceUsed"> & { receivedAt?: string | null },
   attempts: number,
   now: Date,
 ): Promise<Outcome> {
-  const info = { dgiiCode: r.code, dgiiStatus: r.statusText || r.status, messages: r.messages, sequenceUsed: r.sequenceUsed, receivedAt: r.receivedAt };
+  const info = { dgiiCode: r.code, dgiiStatus: r.statusText || r.status, messages: r.messages, sequenceUsed: r.sequenceUsed, receivedAt: r.receivedAt ?? null };
   if (r.status === "IN_PROCESS" || r.status === "NOT_FOUND") {
     // Un TrackId que la DGII no encuentra tras varias consultas es un problema, no una espera.
     if (r.status === "NOT_FOUND" && attempts >= 10) {

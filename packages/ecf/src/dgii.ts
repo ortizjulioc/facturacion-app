@@ -7,6 +7,7 @@ import {
   type FiscalStatus,
   type SubmitInput,
   type SubmitResult,
+  type SummaryResult,
   type TrackResult,
   type TrackSummary,
 } from "./provider";
@@ -147,6 +148,19 @@ export class DgiiClient implements FiscalProvider {
     };
   }
 
+  async submitSummary(input: SubmitInput): Promise<SummaryResult> {
+    const form = new FormData();
+    form.append("xml", new Blob([input.xml], { type: "text/xml" }), `${input.rnc}${input.encf}.xml`);
+    const b = await this.authorized("POST", `${this.urls.summaryReception}/api/recepcion/ecf`, { form });
+    return summaryOf(b, "La DGII no devolvió el resultado del resumen");
+  }
+
+  async summaryResult(rnc: string, encf: string, securityCode: string): Promise<SummaryResult> {
+    const q = `RNC_Emisor=${encodeURIComponent(rnc)}&ENCF=${encodeURIComponent(encf)}&Cod_Seguridad_eCF=${encodeURIComponent(securityCode)}`;
+    const b = await this.authorized("GET", `${this.urls.summaryQuery}/api/Consultas/Consulta?${q}`);
+    return summaryOf(b, "La DGII no devolvió el estado del resumen");
+  }
+
   async trackIdsOf(rnc: string, encf: string): Promise<TrackSummary[]> {
     // El servicio de TrackIds no se publica en certificación.
     if (this.opts.env === "CERT") throw new FiscalError("La consulta de TrackIds no está disponible en certificación", "config");
@@ -206,6 +220,25 @@ export class DgiiClient implements FiscalProvider {
     if (res.status === 429 || res.status >= 500) throw new FiscalError(reason, "server", res.status);
     throw new FiscalError(reason, "rejected", res.status);
   }
+}
+
+/** Respuesta de la recepción o la consulta de un resumen: estado por texto («Aceptado»…) o por código (0, 1, 2, 4). */
+function summaryOf(body: unknown, fallback: string): SummaryResult {
+  if (!body || typeof body !== "object") throw new FiscalError(fallback, "server");
+  const b = body as Record<string, unknown>;
+  const text = asString(b.estado) ?? "";
+  const code = Number(b.codigo);
+  const status = text ? statusOfText(text) : (FISCAL_STATUS_BY_CODE[code] ?? null);
+  if (!status) throw new FiscalError(messageOf(body, fallback), "server");
+  return {
+    status,
+    code: Number.isFinite(code) ? code : -1,
+    statusText: text,
+    rnc: asString(b.rnc),
+    encf: asString(b.encf) ?? asString(b.eNCF),
+    sequenceUsed: typeof b.secuenciaUtilizada === "boolean" ? b.secuenciaUtilizada : null,
+    messages: messagesOf(b.mensajes),
+  };
 }
 
 /** Mensaje de un error que la DGII devolvió en XML (`<mensaje>`/`<error>`), si lo trae. */

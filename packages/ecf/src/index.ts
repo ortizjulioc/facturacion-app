@@ -1,10 +1,11 @@
 export * from "./types";
-export { buildEcf, unitCode, type BuiltEcf } from "./xml";
+export { buildEcf, buildRfce, unitCode, type BuiltEcf, type BuiltRfce } from "./xml";
 export {
   certificateProblem,
   loadCertificate,
   securityCodeOf,
   signEcf,
+  signRfce,
   signXml,
   verifyEcfSignature,
   type EcfCertificate,
@@ -22,6 +23,7 @@ export {
   type FiscalProvider,
   type FiscalStatus,
   type SubmitInput,
+  type SummaryResult,
   type SubmitResult,
   type TrackResult,
   type TrackSummary,
