@@ -325,7 +325,9 @@ export function InvoiceDetail({ id }: { id: string }) {
         </div>
         {(doc.fiscal || doc.fiscalBlock) && !draft && (
           <section className="no-print space-y-1 rounded-md border border-zinc-200 p-3 text-sm dark:border-zinc-800">
-            <p className="text-xs uppercase tracking-wide text-zinc-500">Envío a la DGII</p>
+            <p className="text-xs uppercase tracking-wide text-zinc-500">
+              Envío a la DGII{doc.fiscal?.kind === "RFCE" ? " · resumen de factura de consumo (RFCE)" : ""}
+            </p>
             {doc.fiscal ? (
               <>
                 <p>
