@@ -1,5 +1,7 @@
 import { normalizePrinterConfig, type PrinterConfig } from "@facturacion/printing";
 import { ApiClient, ApiError, type FetchLike } from "./api";
+import { certificateInfo, installCertificate, localCertificate, removeCertificate, type LocalCertificateInfo, type SecretBox } from "./certificate";
+import { makeSigner } from "./localsign";
 import { categories, getCompany, productByBarcode, productCount, searchCustomers, searchProducts, type Company } from "./catalog";
 import { cashierCount, cashiers, PinGate, type Cashier } from "./cashiers";
 import { createRefund, returnableLines, type RefundInput } from "./refunds";
@@ -10,7 +12,6 @@ import { getMeta, one, openDb, run, setMeta, transaction, type Db } from "./stor
 
 export { SaleError };
 
-export type SecretBox = { encrypt(plain: string): string; decrypt(cipher: string): string };
 
 export type EngineOptions = {
   /** Ruta del archivo SQLite (o ":memory:" en pruebas). */
@@ -39,6 +40,8 @@ export type PosState = {
   /** Números de e-NCF que quedan por tipo (E34 = notas de crédito). */
   numbers: { E31: number; E32: number; E34: number };
   company: Company | null;
+  /** Firma local (sin internet): estado del certificado instalado en esta caja. */
+  signing: { available: boolean; certificate: LocalCertificateInfo | null };
   /** Hay cajeros con PIN: para vender hay que identificarse. Sin cajeros con PIN, la caja no pide nada. */
   pinRequired: boolean;
   /** Quién está identificado ahora (null = bloqueada, o sin PIN configurado). */
@@ -139,6 +142,7 @@ export class PosEngine {
       products: productCount(this.db),
       numbers: { E31: left("E31"), E32: left("E32"), E34: left("E34") },
       company,
+      signing: { available: this.box.available?.() ?? false, certificate: certificateInfo(this.db, this.now()) },
     };
   }
 
@@ -232,11 +236,20 @@ export class PosEngine {
         catalog: null,
         shiftErrors: [],
         blocks: { requested: 0, error: null },
+        certificateWarning: null,
         sales: { uploaded: 0, duplicates: 0, rejected: 0, pending: this.state().pendingSales },
         error: "Inicia sesión para sincronizar",
       };
     }
-    return runSync(this.db, this.api, terminal.id, { policy: this.opts.policy ?? DEFAULT_POLICY, now: this.now() });
+    return runSync(this.db, this.api, terminal.id, { policy: this.opts.policy ?? DEFAULT_POLICY, now: this.now(), box: this.box });
+  }
+
+  /** Instala (o reemplaza) el certificado de la empresa en esta caja, cifrado con el almacén seguro del sistema. */
+  installCertificate(input: { p12: string; password: string; version: string }) {
+    return installCertificate(this.db, this.box, input);
+  }
+  removeCertificate() {
+    removeCertificate(this.db);
   }
 
   /** Sube una venta ya, para que salga firmada (con QR) en el ticket. false si no se pudo: se sincroniza luego. */
@@ -306,7 +319,15 @@ export class PosEngine {
       cashierId: this.active?.userId ?? user?.id ?? null,
       cashierName: this.active?.name ?? user?.name ?? null,
       shiftId: currentShift(this.db)?.id ?? null,
+      ...this.signer(),
     };
+  }
+
+  /** Firmador de ventas con el certificado de esta caja, si hay uno vigente y la empresa tiene sus datos. */
+  private signer(): Pick<SaleCtx, "sign"> {
+    const company = getCompany(this.db);
+    const cert = company ? localCertificate(this.db, this.box, this.now()) : null;
+    return company && cert ? { sign: makeSigner(this.db, cert, company) } : {};
   }
 
   /** Una caja con turno obligatorio no vende (ni devuelve) sin un turno abierto. */

@@ -5,6 +5,7 @@ import {
   receiptOfSale,
   salePayload,
   SaleError,
+  signLocally,
   takeEncf,
   totalsOfPayload,
   type PaymentMethod,
@@ -152,6 +153,7 @@ export function createRefund(db: Db, ctx: SaleCtx, input: RefundInput): Receipt 
       total: fromCents(totals.total),
     };
     insertSale(db, ctx, payload, now);
-    return receiptOfSale(db, id)!;
+    const warning = signLocally(db, ctx, id, payload);
+    return { ...receiptOfSale(db, id)!, signWarning: warning };
   });
 }

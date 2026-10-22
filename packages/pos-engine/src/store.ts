@@ -113,6 +113,10 @@ const MIGRATIONS: string[] = [
   ALTER TABLE sale ADD COLUMN signed_at TEXT;
   ALTER TABLE sale ADD COLUMN qr_url TEXT;
   `,
+  /* 5 */ `
+  -- e-CF firmado en la caja (sin conexión): se sube con la venta para que la nube guarde ESE XML, el del código del QR.
+  ALTER TABLE sale ADD COLUMN ecf_xml TEXT;
+  `,
 ];
 
 export function openDb(path: string): Db {

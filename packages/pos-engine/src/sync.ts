@@ -2,6 +2,7 @@ import { fromCents } from "@facturacion/core";
 import { ApiClient, ApiError, NetworkError, type CloudBlock } from "./api";
 import { applyCatalog } from "./catalog";
 import { applyCashiers } from "./cashiers";
+import { pullCertificate, type SecretBox } from "./certificate";
 import { salePayload } from "./sales";
 import { all, getMeta, one, run, setMeta, transaction, type Db } from "./store";
 
@@ -24,6 +25,8 @@ export type SyncReport = {
   /** Turnos con problemas para subir (p. ej. la nube ya tiene uno abierto en esa caja). Sus ventas esperan. */
   shiftErrors: string[];
   blocks: { requested: number; error: string | null };
+  /** Aviso sobre el certificado para firmar sin conexión (no se pudo instalar), o null. */
+  certificateWarning: string | null;
   sales: { uploaded: number; duplicates: number; rejected: number; pending: number };
   error: string | null;
 };
@@ -138,7 +141,17 @@ async function pushOne(db: Db, api: ApiClient, id: string, now: Date): Promise<"
   const payload = salePayload(db, id);
   if (!payload) return "skipped";
   try {
-    const res = await api.uploadSale(payload);
+    // Si la caja firmó la venta, la nube recibe ESE e-CF (el del código de seguridad que ya está impreso).
+    const signed = one<{ ecf_xml: string | null; security_code: string | null; signed_at: string | null }>(
+      db,
+      "SELECT ecf_xml, security_code, signed_at FROM sale WHERE id = ?",
+      id,
+    );
+    const local =
+      signed?.ecf_xml && signed.security_code && signed.signed_at
+        ? { xml: signed.ecf_xml, securityCode: signed.security_code, signedAt: signed.signed_at }
+        : null;
+    const res = await api.uploadSale(local ? { ...payload, ecf: local } : payload);
     const ecf = res.data.ecf;
     transaction(db, () =>
       run(
@@ -196,7 +209,7 @@ export async function runSync(
   db: Db,
   api: ApiClient,
   terminalId: string,
-  opts: { policy?: BlockPolicy; now?: Date } = {},
+  opts: { policy?: BlockPolicy; now?: Date; box?: SecretBox } = {},
 ): Promise<SyncReport> {
   const report: SyncReport = {
     online: true,
@@ -204,6 +217,7 @@ export async function runSync(
     catalog: null,
     shiftErrors: [],
     blocks: { requested: 0, error: null },
+    certificateWarning: null,
     sales: { uploaded: 0, duplicates: 0, rejected: 0, pending: 0 },
     error: null,
   };
@@ -240,6 +254,8 @@ export async function runSync(
     }
     sum(await pushSales(db, api, opts.now, { shiftId: null }));
     applyCashiers(db, (await api.cashiers()).data);
+    // El certificado de la empresa baja a la caja (cifrado) para firmar las ventas sin internet.
+    if (opts.box) report.certificateWarning = await pullCertificate(db, api, opts.box);
     report.catalog = await pullCatalog(db, api);
     report.blocks = await topUpBlocks(db, api, terminalId, opts.policy, opts.now);
   } catch (e) {

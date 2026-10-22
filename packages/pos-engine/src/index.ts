@@ -1,6 +1,7 @@
 export * from "./api";
 export * from "./cashiers";
 export * from "./catalog";
+export * from "./certificate";
 export * from "./engine";
 export * from "./refunds";
 export * from "./sales";

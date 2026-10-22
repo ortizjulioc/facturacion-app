@@ -131,6 +131,15 @@ export class ApiClient {
   cashiers() {
     return this.request<{ data: CashierInfo[] }>("GET", "/v1/sync/cashiers");
   }
+  /** Certificado de la empresa para firmar sin conexión. Solo lo entrega a una sesión de administrador (403 si no). */
+  certificate(version?: string) {
+    return this.request<{
+      data:
+        | { status: "none" }
+        | { status: "unchanged"; version: string }
+        | { status: "updated"; version: string; p12: string; password: string; subject: string; notAfter: string };
+    }>("GET", `/v1/sync/certificate${version ? `?version=${encodeURIComponent(version)}` : ""}`);
+  }
   putShift(clientId: string, body: unknown) {
     return this.request<{ data: { id: string; clientId: string; status: string; expectedCash: string | null; difference: string | null } }>(
       "PUT",
@@ -179,6 +188,11 @@ export type CatalogResponse = {
       rnc: string;
       address: string;
       phone: string | null;
+      /** Datos que entran al e-CF que la caja firma sola (opcionales: una caja con datos viejos los trae vacíos). */
+      email?: string | null;
+      economicActivity?: string | null;
+      province?: string | null;
+      municipality?: string | null;
       environment: string;
       requireShift?: boolean;
     } | null;

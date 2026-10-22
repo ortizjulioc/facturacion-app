@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@facturacion/core": "workspace:*",
+    "@facturacion/ecf": "workspace:*",
     "@facturacion/printing": "workspace:*"
   },
   "devDependencies": {

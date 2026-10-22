@@ -4,9 +4,12 @@ export {
   certificateProblem,
   loadCertificate,
   securityCodeOf,
+  certificateBase64,
+  readSignedEcf,
   signEcf,
   signRfce,
   signXml,
+  signerCertificateOf,
   verifyEcfSignature,
   type EcfCertificate,
   type SignedEcf,
@@ -29,3 +32,4 @@ export {
   type TrackSummary,
 } from "./provider";
 export { formatDate, formatDateTime } from "./format";
+export { phoneOf, sellerOf, type CompanyData } from "./profile";

@@ -13,6 +13,7 @@ import {
   type TaxCode,
 } from "@facturacion/core";
 import { getCompany, getCustomer, getProduct, type Company } from "./catalog";
+import type { SaleSigner } from "./localsign";
 import { all, one, run, transaction, type Db } from "./store";
 
 /** Errores que la pantalla muestra tal cual al cajero. */
@@ -88,6 +89,8 @@ export type Receipt = {
   totals: { subtotal: string; tax: string; propina: string; total: string };
   payments: { method: PaymentMethod; amount: string }[];
   cashierName: string | null;
+  /** Por qué esta venta salió sin firmar aunque la caja tiene certificado (la nube la firmará al sincronizar). */
+  signWarning: string | null;
   /**
    * Firma del e-CF. Solo existe cuando la nube ya firmó la venta (necesita conexión y el certificado de la empresa):
    * una venta hecha sin conexión se imprime sin QR, y al reimprimirla después de sincronizar ya lo trae.
@@ -104,6 +107,8 @@ export type SaleCtx = {
   cashierId?: string | null;
   cashierName?: string | null;
   shiftId?: string | null;
+  /** Firma la venta con el certificado de la empresa guardado en la caja (si lo hay). Nunca lanza. */
+  sign?: SaleSigner;
 };
 
 export const todayDr = (now: Date) => new Intl.DateTimeFormat("sv-SE", { timeZone: "America/Santo_Domingo" }).format(now);
@@ -232,8 +237,19 @@ export function createSale(db: Db, ctx: SaleCtx, input: SaleInput): Receipt {
       total: fromCents(totals.total),
     };
     insertSale(db, ctx, payload, now);
-    return receiptOf(db, id, buyer, ctx.cashierName ?? null);
+    const warning = signLocally(db, ctx, id, payload);
+    return receiptOf(db, id, buyer, ctx.cashierName ?? null, warning);
   });
+}
+
+/** Firma la venta ya registrada. Devuelve el motivo si no se pudo (la venta queda igual, sin firma). */
+export function signLocally(db: Db, ctx: SaleCtx, id: string, payload: SalePayload): string | null {
+  const outcome = ctx.sign?.(payload);
+  if (!outcome) return null;
+  if ("error" in outcome) return outcome.error;
+  const s = outcome.signature;
+  run(db, "UPDATE sale SET ecf_xml = ?, security_code = ?, signed_at = ?, qr_url = ? WHERE id = ?", s.xml, s.securityCode, s.signedAt, s.qrUrl, id);
+  return null;
 }
 
 /** Valida los montos de pago (positivos y que sumen el total) y los normaliza a "123.45". */
@@ -320,7 +336,13 @@ export function receiptOfSale(db: Db, id: string): Receipt | null {
   );
 }
 
-function receiptOf(db: Db, id: string, buyer: { name: string | null; docNumber: string | null }, cashierName: string | null): Receipt {
+function receiptOf(
+  db: Db,
+  id: string,
+  buyer: { name: string | null; docNumber: string | null },
+  cashierName: string | null,
+  signWarning: string | null = null,
+): Receipt {
   const payload = salePayload(db, id)!;
   const totals = totalsOfPayload(payload);
   const row = one<SaleRow>(db, "SELECT * FROM sale WHERE id = ?", id)!;
@@ -343,6 +365,7 @@ function receiptOf(db: Db, id: string, buyer: { name: string | null; docNumber: 
     },
     payments: payload.payments,
     cashierName,
+    signWarning,
     securityCode: row.security_code,
     signedAt: row.signed_at,
     qr: row.qr_url,

@@ -163,3 +163,25 @@ export function verifyEcfSignature(signedXml: string): boolean {
     return false;
   }
 }
+
+/** Certificado (Base64 del X509, sin saltos) que lleva un XML firmado en KeyInfo, o null si no lo trae. */
+export function signerCertificateOf(signedXml: string): string | null {
+  const m = /<X509Certificate>([^<]+)<\/X509Certificate>/.exec(signedXml);
+  return m ? m[1]!.replace(/\s+/g, "") : null;
+}
+
+/** Certificado de un `EcfCertificate` en el mismo formato que `signerCertificateOf`, para compararlos. */
+export const certificateBase64 = (cert: EcfCertificate): string => cert.certificatePem.replace(/-----[A-Z ]+-----|\s+/g, "");
+
+/** Datos de un e-CF firmado que se comprueban al recibirlo de otra parte (una caja que firmó sin conexión). */
+export function readSignedEcf(xml: string) {
+  const tag = (name: string) => new RegExp(`<${name}>([^<]*)</${name}>`).exec(xml)?.[1] ?? null;
+  return {
+    root: /^(?:<\?xml[^>]*\?>)?<ECF>/.test(xml) ? "ECF" : null,
+    type: tag("TipoeCF"),
+    encf: tag("eNCF"),
+    rnc: tag("RNCEmisor"),
+    total: tag("MontoTotal"),
+    signedAt: tag("FechaHoraFirma"),
+  };
+}

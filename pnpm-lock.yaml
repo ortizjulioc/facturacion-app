@@ -93,6 +93,9 @@ importers:
       '@facturacion/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@facturacion/ecf':
+        specifier: workspace:*
+        version: link:../../packages/ecf
       '@facturacion/pos-engine':
         specifier: workspace:*
         version: link:../../packages/pos-engine
@@ -268,6 +271,9 @@ importers:
       '@facturacion/core':
         specifier: workspace:*
         version: link:../core
+      '@facturacion/ecf':
+        specifier: workspace:*
+        version: link:../ecf
       '@facturacion/printing':
         specifier: workspace:*
         version: link:../printing
