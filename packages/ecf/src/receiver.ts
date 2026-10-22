@@ -1,5 +1,5 @@
 import { DOMParser } from "@xmldom/xmldom";
-import { fromCents, normalizeDocument, toCents, type Cents } from "@facturacion/core";
+import { divRound, fromCents, normalizeDocument, toCents, toMilli, type Cents } from "@facturacion/core";
 import { clean, formatDateTime, leaf, node, serialize, type XmlNode } from "./format";
 import { certificateProblem, signXml, verifyEcfSignature, type EcfCertificate } from "./sign";
 import { EcfError } from "./types";
@@ -222,5 +222,96 @@ export function inspectIncomingApproval(xml: string): { ok: true; facts: Incomin
     ok: true,
     facts: { sellerRnc, buyerRnc, encf, issuedOn, total, approved: state === "1", rejectReason: t("DetalleMotivoRechazo"), approvedAt: t("FechaHoraAprobacionComercial") },
     signatureValid: verifyEcfSignature(xml),
+  };
+}
+
+// ───────────── Líneas y pago de un e-CF recibido ─────────────
+
+export type IncomingLine = {
+  lineNumber: number;
+  name: string;
+  /** Códigos del artículo que puso el emisor (interno, EAN…), para reconocerlo en el catálogo. */
+  codes: { type: string; code: string }[];
+  /** ITBIS18 / ITBIS16 / ITBIS0 / EXENTO, según IndicadorFacturacion; null = no facturable. */
+  tax: "ITBIS18" | "ITBIS16" | "ITBIS0" | "EXENTO" | null;
+  isService: boolean;
+  /** Cantidad con hasta 2 decimales, tal como viene. */
+  quantity: string;
+  unitPrice: Cents;
+  discount: Cents;
+  /** MontoItem: precio × cantidad − descuento. */
+  amount: Cents;
+};
+
+export type IncomingBody = {
+  /** true = los precios del e-CF ya incluyen ITBIS (IndicadorMontoGravado 1). */
+  pricesIncludeTax: boolean;
+  lines: IncomingLine[];
+  /** Forma de pago principal: «CASH», «TRANSFER», «CARD», «CREDIT» u «OTHER»; null si no la indica. */
+  paymentMethod: "CASH" | "TRANSFER" | "CARD" | "CREDIT" | "OTHER" | null;
+  seller: { address: string | null; email: string | null; phone: string | null };
+  itbisWithheld: Cents;
+  isrWithheld: Cents;
+};
+
+/**
+ * Precio unitario en centavos. El e-CF admite hasta 4 decimales; si trae más de 2 se deduce del monto de la línea
+ * (precio × cantidad = MontoItem + descuento) para no perder ni inventar centavos.
+ */
+function unitPriceOf(price: string | null, gross: Cents, quantity: string): Cents {
+  const direct = centsOf(price);
+  if (direct !== null) return direct;
+  let milli: bigint;
+  try {
+    milli = toMilli(quantity);
+  } catch {
+    return 0n;
+  }
+  return milli > 0n ? divRound(gross * 1000n, milli) : 0n;
+}
+
+const TAX_OF_INDICATOR: Record<string, IncomingLine["tax"]> = { "1": "ITBIS18", "2": "ITBIS16", "3": "ITBIS0", "4": "EXENTO" };
+const METHOD_OF_FORM: Record<string, NonNullable<IncomingBody["paymentMethod"]>> = { "1": "CASH", "2": "TRANSFER", "3": "CARD", "4": "CREDIT" };
+
+/** Las líneas y datos de pago de un e-CF ya aceptado por `inspectIncomingEcf` (para registrarlo como compra). */
+export function readIncomingBody(xml: string): IncomingBody | null {
+  const errors: string[] = [];
+  const doc = parse(xml, errors);
+  if (!doc || errors.length > 0 || doc.documentElement?.nodeName !== "ECF") return null;
+  const one = (parent: string, tag: string) => text(doc, parent, tag);
+
+  const items = Array.from(doc.getElementsByTagName("Item"));
+  const lines = items.map((item, i): IncomingLine => {
+    const t = (tag: string) => item.getElementsByTagName(tag)[0]?.textContent?.trim() ?? null;
+    const amount = centsOf(t("MontoItem")) ?? 0n;
+    const discount = centsOf(t("DescuentoMonto")) ?? 0n;
+    const quantity = t("CantidadItem") ?? "0";
+    return {
+      lineNumber: Number(t("NumeroLinea")) || i + 1,
+      name: t("NombreItem") ?? `Línea ${i + 1}`,
+      codes: Array.from(item.getElementsByTagName("CodigosItem")).flatMap((c) => {
+        const type = c.getElementsByTagName("TipoCodigo")[0]?.textContent?.trim();
+        const code = c.getElementsByTagName("CodigoItem")[0]?.textContent?.trim();
+        return type && code ? [{ type, code }] : [];
+      }),
+      tax: TAX_OF_INDICATOR[t("IndicadorFacturacion") ?? ""] ?? null,
+      isService: t("IndicadorBienoServicio") === "2",
+      quantity,
+      unitPrice: unitPriceOf(t("PrecioUnitarioItem"), amount + discount, quantity),
+      discount,
+      amount,
+    };
+  });
+  if (lines.length === 0) return null;
+
+  const form = doc.getElementsByTagName("FormaDePago")[0]?.getElementsByTagName("FormaPago")[0]?.textContent?.trim();
+  const credit = one("IdDoc", "TipoPago") === "2";
+  return {
+    pricesIncludeTax: one("IdDoc", "IndicadorMontoGravado") === "1",
+    lines,
+    paymentMethod: credit ? "CREDIT" : form ? (METHOD_OF_FORM[form] ?? "OTHER") : null,
+    seller: { address: one("Emisor", "DireccionEmisor"), email: one("Emisor", "CorreoEmisor"), phone: doc.getElementsByTagName("TelefonoEmisor")[0]?.textContent?.trim() ?? null },
+    itbisWithheld: centsOf(one("Totales", "TotalITBISRetenido")) ?? 0n,
+    isrWithheld: centsOf(one("Totales", "TotalISRRetencion")) ?? 0n,
   };
 }

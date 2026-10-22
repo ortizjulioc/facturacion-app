@@ -221,3 +221,42 @@ describe("aprobación al emisor (otro contribuyente)", () => {
     expect(await down.sendApproval({ ...entry, approvalUrl: null }, "<ACECF/>", "1", "E310000000001").catch((e) => e)).toBeInstanceOf(FiscalError);
   });
 });
+
+describe("líneas de un e-CF recibido", () => {
+  it("lee las líneas con su impuesto, códigos, descuento y la forma de pago", async () => {
+    const { readIncomingBody } = await import("./index");
+    const { xml } = supplierInvoice();
+    const body = readIncomingBody(xml)!;
+    expect(body.pricesIncludeTax).toBe(false);
+    expect(body.paymentMethod).toBe("CASH");
+    expect(body.seller.address).toBe("Av. Winston Churchill 100, Santo Domingo");
+    expect(body.seller.email).toBe("ventas@example.com");
+    expect(body.seller.phone).toBe("809-555-0100");
+    expect(body.lines).toEqual([
+      { lineNumber: 1, name: 'Café "molido" <1 lb>', codes: [{ type: "Interna", code: "CAF-01" }], tax: "ITBIS18", isService: false, quantity: "2.00", unitPrice: toCents("150.00"), discount: 0n, amount: toCents("300.00") },
+      { lineNumber: 2, name: "Arroz", codes: [], tax: "EXENTO", isService: false, quantity: "1.50", unitPrice: toCents("40.00"), discount: toCents("5.00"), amount: toCents("55.00") },
+    ]);
+    expect(body.itbisWithheld).toBe(0n);
+  });
+
+  it("distingue precios con ITBIS incluido y pago a crédito; devuelve null si no es un e-CF", async () => {
+    const { readIncomingBody } = await import("./index");
+    const gross = buildEcf(sample("E31", { buyer: { docType: "RNC", docNumber: "130000002", name: "X" }, lines: [{ name: "Combo", quantity: 1000n, unitPrice: toCents("118.00"), tax: "ITBIS18", priceIncludesTax: true }], payments: [{ method: "CREDIT", amount: toCents("118.00") }], paymentDueDate: "2026-12-01" }));
+    const body = readIncomingBody(gross.xml)!;
+    expect(body.pricesIncludeTax).toBe(true);
+    expect(body.paymentMethod).toBe("CREDIT");
+    expect(readIncomingBody("<ECF><Encabezado/></ECF>")).toBeNull();
+    expect(readIncomingBody("nada")).toBeNull();
+  });
+});
+
+describe("precio unitario con más de 2 decimales", () => {
+  it("se deduce del monto de la línea", async () => {
+    const { readIncomingBody } = await import("./index");
+    const { xml } = supplierInvoice();
+    const odd = xml.replace("<PrecioUnitarioItem>150.00</PrecioUnitarioItem>", "<PrecioUnitarioItem>150.0000</PrecioUnitarioItem>").replace("<PrecioUnitarioItem>40.00</PrecioUnitarioItem>", "<PrecioUnitarioItem>39.9999</PrecioUnitarioItem>");
+    const lines = readIncomingBody(odd)!.lines;
+    expect(lines[0]!.unitPrice).toBe(toCents("150.00")); // 300.00 / 2
+    expect(lines[1]!.unitPrice).toBe(toCents("40.00")); // (55.00 + 5.00) / 1.5
+  });
+});

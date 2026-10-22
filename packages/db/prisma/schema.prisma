@@ -586,6 +586,8 @@ model Purchase {
   supplier          Supplier?       @relation(fields: [supplierId], references: [id], onDelete: NoAction)
   lines             PurchaseLine[]
   stockMovements    StockMovement[]
+  /// El e-CF recibido de un proveedor del que nació esta compra, si fue así.
+  receivedDocument  ReceivedDocument?
 
   @@unique([organizationId, supplierId, ncf])
   @@index([organizationId, status])
@@ -1050,9 +1052,12 @@ model ReceivedDocument {
   approvalAttempts    Int           @default(0)
   approvalNextAt      DateTime?
   approvalLockedUntil DateTime?
+  /// Compra en la que se registró este e-CF (null = aún no).
+  purchaseId          String?       @unique @db.Uuid
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
   organization        Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  purchase            Purchase?     @relation(fields: [purchaseId], references: [id], onDelete: SetNull)
 
   @@unique([organizationId, emitterRnc, encf])
   @@index([organizationId, receivedAt])
