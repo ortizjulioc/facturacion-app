@@ -101,6 +101,20 @@ export function signEcf(xml: string, cert: EcfCertificate, signedAt: Date = new 
 
   const withDate = `${xml.slice(0, -"</ECF>".length)}<FechaHoraFirma>${formatDateTime(signedAt)}</FechaHoraFirma></ECF>`;
 
+  const signed = signXml(withDate, cert);
+  return {
+    xml: `${XML_DECLARATION}${signed}`,
+    securityCode: securityCodeOf(signed),
+    signatureValue: /<SignatureValue[^>]*>([^<]+)<\/SignatureValue>/.exec(signed)![1]!.replace(/\s+/g, ""),
+    signedAt,
+  };
+}
+
+/**
+ * Firma XMLDSig envuelta (enveloped) de cualquier documento XML: se agrega al final del elemento raíz. Es la misma
+ * firma del e-CF y la que la DGII pide para la semilla de autenticación.
+ */
+export function signXml(xml: string, cert: EcfCertificate): string {
   const base64Cert = cert.certificatePem.replace(/-----[A-Z ]+-----|\s+/g, "");
   const sig = new SignedXml({
     privateKey: cert.privateKeyPem,
@@ -115,15 +129,8 @@ export function signEcf(xml: string, cert: EcfCertificate, signedAt: Date = new 
     digestAlgorithm: SHA256,
     isEmptyUri: true,
   });
-  sig.computeSignature(withDate, { prefix: "", location: { reference: "/*", action: "append" } });
-
-  const signed = sig.getSignedXml();
-  return {
-    xml: `${XML_DECLARATION}${signed}`,
-    securityCode: securityCodeOf(signed),
-    signatureValue: /<SignatureValue[^>]*>([^<]+)<\/SignatureValue>/.exec(signed)![1]!.replace(/\s+/g, ""),
-    signedAt,
-  };
+  sig.computeSignature(xml, { prefix: "", location: { reference: "/*", action: "append" } });
+  return sig.getSignedXml();
 }
 
 /**
