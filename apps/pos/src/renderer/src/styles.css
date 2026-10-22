@@ -123,6 +123,7 @@ button.icon { border: 0; background: none; padding: 4px 8px; }
 .receipt { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; width: 302px; max-width: 100%; margin: 0 auto; color: #111; background: #fff; padding: 14px; border-radius: 6px; display: grid; gap: 6px; }
 .receipt header { text-align: center; display: grid; padding: 0; border: 0; }
 .receipt .center-text { text-align: center; }
+.receipt .stamp { display: grid; justify-items: center; gap: 2px; }
 .receipt .rule { border-top: 1px dashed #777; }
 .receipt table { width: 100%; border-collapse: collapse; }
 .receipt td { vertical-align: top; padding: 2px 0; }

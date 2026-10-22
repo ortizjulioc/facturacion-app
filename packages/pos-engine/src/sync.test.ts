@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { ApiClient, POS_ORIGIN } from "./api";
-import { createSale, getSale } from "./sales";
-import { pullCatalog, pushSales, remainingNumbers, runSync, topUpBlocks } from "./sync";
+import { createSale, getSale, receiptOfSale } from "./sales";
+import { pullCatalog, pushSaleNow, pushSales, remainingNumbers, runSync, topUpBlocks } from "./sync";
+import { openShift } from "./shifts";
 import { getMeta, one, run } from "./store";
 import { fakeCloud, makeDb, product, TERMINAL } from "./helpers.test-util";
 
@@ -190,5 +191,71 @@ describe("ronda de sincronización", () => {
     const { fetch } = fakeCloud({ "POST /v1/sync/sales": () => Response.json({ error: "No autenticado" }, { status: 401 }) });
     const report = await runSync(db, new ApiClient("https://api.test", { fetch }), TERMINAL, { now: NOW });
     expect(report).toMatchObject({ authRequired: true, online: true, sales: { pending: 3 } });
+  });
+});
+
+describe("firma del e-CF", () => {
+  const stamp = { securityCode: "dcp79q", signedAt: "2026-10-21T15:00:03.000Z", qrUrl: "https://fc.dgii.gov.do/testecf/consultatimbrefc?rncemisor=101001577&encf=E320000000001&montototal=118.00&codigoseguridad=dcp79q" };
+  const signedOk = (id: string, encf: string, ecf: unknown = stamp) => Response.json({ data: { id, encf, duplicate: false, ecf } }, { status: 201 });
+
+  it("guarda el código de seguridad y el QR que devuelve la nube, y el ticket los trae", async () => {
+    const { db, ids } = threeSales();
+    expect(receiptOfSale(db, ids[0]!)).toMatchObject({ qr: null, securityCode: null, signedAt: null });
+    const { fetch } = fakeCloud({
+      "POST /v1/sync/sales": ({ body }) => {
+        const b = body as { clientId: string; encf: string };
+        // Solo la primera sale firmada: la empresa subió su certificado a mitad de camino.
+        return b.clientId === ids[0] ? signedOk("r1", b.encf) : signedOk("r", b.encf, null);
+      },
+    });
+    await pushSales(db, new ApiClient("https://api.test", { fetch }), NOW);
+    expect(receiptOfSale(db, ids[0]!)).toMatchObject({ qr: stamp.qrUrl, securityCode: "dcp79q", signedAt: stamp.signedAt });
+    expect(receiptOfSale(db, ids[1]!)).toMatchObject({ qr: null, securityCode: null });
+  });
+
+  it("sube una venta de inmediato para imprimirla firmada", async () => {
+    const { db, ids } = threeSales();
+    const { fetch, calls } = fakeCloud({ "POST /v1/sync/sales": ({ body }) => signedOk("r", (body as { encf: string }).encf) });
+    const api = new ApiClient("https://api.test", { fetch });
+    // Hay ventas anteriores sin subir: adelantar la tercera rompería el orden (una nota de crédito iría antes de su factura).
+    expect(await pushSaleNow(db, api, TERMINAL, ids[2]!, NOW)).toBe(false);
+    expect(calls).toHaveLength(0);
+    expect(await pushSaleNow(db, api, TERMINAL, ids[0]!, NOW)).toBe(true);
+    expect(getSale(db, ids[0]!)!.status).toBe("SYNCED");
+    expect(receiptOfSale(db, ids[0]!)!.qr).toBe(stamp.qrUrl);
+    // Ya subida: no vuelve a enviarla.
+    expect(await pushSaleNow(db, api, TERMINAL, ids[0]!, NOW)).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("sube primero el turno de la venta si aún no está en la nube", async () => {
+    const p = product();
+    const db = makeDb({ products: [p] });
+    const shift = openShift(db, { now: NOW, newId: () => "00000000-0000-4000-8000-0000000000aa", cashierId: "u-ana" }, "500");
+    const sale = createSale(db, { terminalId: TERMINAL, now: NOW, newId: () => "00000000-0000-4000-8000-0000000000bb", shiftId: shift.id }, {
+      type: "E32",
+      lines: [{ productId: p.id, quantity: "1" }],
+      payments: [{ method: "CASH", amount: "118.00" }],
+    });
+    const order: string[] = [];
+    const { fetch } = fakeCloud({
+      [`PUT /v1/sync/shifts/${shift.id}`]: () => (order.push("turno"), Response.json({ data: { id: "s1", clientId: shift.id, status: "OPEN", expectedCash: null, difference: null } })),
+      "POST /v1/sync/sales": ({ body }) => (order.push("venta"), signedOk("r", (body as { encf: string }).encf)),
+    });
+    expect(await pushSaleNow(db, new ApiClient("https://api.test", { fetch }), TERMINAL, sale.sale.id, NOW)).toBe(true);
+    expect(order).toEqual(["turno", "venta"]);
+    expect(one<{ open_synced: number }>(db, "SELECT open_synced FROM shift WHERE id = ?", shift.id)!.open_synced).toBe(1);
+    expect(receiptOfSale(db, sale.sale.id)!.qr).toBe(stamp.qrUrl);
+  });
+
+  it("sin red o con la sesión vencida la venta sigue pendiente, sin error", async () => {
+    const { db, ids } = threeSales();
+    const down = new ApiClient("https://api.test", { fetch: async () => { throw new TypeError("fetch failed"); } });
+    expect(await pushSaleNow(db, down, TERMINAL, ids[0]!, NOW)).toBe(false);
+    expect(getSale(db, ids[0]!)).toMatchObject({ status: "PENDING", attempts: 1 });
+    const { fetch } = fakeCloud({ "POST /v1/sync/sales": () => Response.json({ error: "Falta algo" }, { status: 422 }) });
+    // Un rechazo definitivo se anota como siempre, pero no cuenta como «firmada».
+    expect(await pushSaleNow(db, new ApiClient("https://api.test", { fetch }), TERMINAL, ids[0]!, NOW)).toBe(false);
+    expect(getSale(db, ids[0]!)!.status).toBe("REJECTED");
   });
 });

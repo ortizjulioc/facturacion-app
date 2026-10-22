@@ -17,6 +17,9 @@ export type ReceiptData = {
    * de la firma): sin él no se imprime QR, para no entregar un código que la DGII no reconocería.
    */
   qr?: string | null;
+  /** Código de seguridad de la firma (6 caracteres) y su fecha, para la representación impresa. */
+  securityCode?: string | null;
+  signedAt?: string | null;
 };
 
 /** Datos de un informe de turno (X o Z). */
@@ -118,7 +121,10 @@ export function receiptTicket(r: ReceiptData, opts: TicketOptions): Uint8Array {
   if (r.cashierName) p.feed(1).line(`Atendió: ${r.cashierName}`);
 
   if (r.qr) {
-    p.feed(1).center().qr(r.qr, opts.cols >= 40 ? 6 : 4).line("Escanee para verificar en la DGII").left();
+    p.feed(1).center().qr(r.qr, opts.cols >= 40 ? 6 : 4).line("Escanee para verificar en la DGII");
+    if (r.securityCode) p.line(`Código de seguridad: ${r.securityCode}`);
+    if (r.signedAt) p.line(`Fecha de firma: ${formatDateTime(r.signedAt)}`);
+    p.left();
   }
   if (!credit) p.feed(1).center().line("¡Gracias por su compra!").left();
   return end(p, opts);

@@ -1,5 +1,6 @@
 import { ECF_LABELS, formatDop, toCents, type EcfType } from "@facturacion/core";
 import type { Receipt } from "../../shared/api";
+import { QrCode } from "./QrCode";
 
 const m = (v: string) => formatDop(toCents(v));
 const METHOD: Record<string, string> = { CASH: "Efectivo", CARD: "Tarjeta", TRANSFER: "Transferencia", CHECK: "Cheque", OTHER: "Otro" };
@@ -58,6 +59,14 @@ export function Receipt({ receipt }: { receipt: Receipt }) {
         <div key={i} className="pay"><span>{METHOD[p.method] ?? p.method}</span><span>{m(p.amount)}</span></div>
       ))}
       {receipt.cashierName && <div className="small">Atendió: {receipt.cashierName}</div>}
+      {receipt.qr && (
+        <div className="center-text stamp">
+          <QrCode text={receipt.qr} label="Código QR para verificar el comprobante en la DGII" />
+          <div className="small">Escanee para verificar en la DGII</div>
+          {receipt.securityCode && <div className="small">Código de seguridad: {receipt.securityCode}</div>}
+          {receipt.signedAt && <div className="small">Fecha de firma: {new Date(receipt.signedAt).toLocaleString("es-DO", { timeZone: "America/Santo_Domingo" })}</div>}
+        </div>
+      )}
       {pending && <p className="small center-text no-print">Pendiente de subir a la nube (se envía sola al haber conexión).</p>}
       {!credit && <p className="small center-text">¡Gracias por su compra!</p>}
     </article>

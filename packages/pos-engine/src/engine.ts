@@ -5,7 +5,7 @@ import { cashierCount, cashiers, PinGate, type Cashier } from "./cashiers";
 import { createRefund, returnableLines, type RefundInput } from "./refunds";
 import { createSale, getSale, listSales, receiptOfSale, SaleError, type LocalSale, type Receipt, type SaleCtx, type SaleInput } from "./sales";
 import { closeShift, currentShift, listShifts, openShift, reportOfShift, type LocalShift, type ShiftReport } from "./shifts";
-import { blocksOverview, DEFAULT_POLICY, runSync, type BlockPolicy, type SyncReport } from "./sync";
+import { blocksOverview, DEFAULT_POLICY, pushSaleNow, runSync, type BlockPolicy, type SyncReport } from "./sync";
 import { getMeta, one, openDb, run, setMeta, transaction, type Db } from "./store";
 
 export { SaleError };
@@ -237,6 +237,13 @@ export class PosEngine {
       };
     }
     return runSync(this.db, this.api, terminal.id, { policy: this.opts.policy ?? DEFAULT_POLICY, now: this.now() });
+  }
+
+  /** Sube una venta ya, para que salga firmada (con QR) en el ticket. false si no se pudo: se sincroniza luego. */
+  async syncSale(id: string): Promise<boolean> {
+    const terminal = json<{ id: string }>(getMeta(this.db, "terminal"));
+    if (!terminal || !this.api?.hasSession) return false;
+    return pushSaleNow(this.db, this.api, terminal.id, id, this.now());
   }
 
   /** Vuelve a poner en cola una venta rechazada (después de corregir la causa en la nube). */

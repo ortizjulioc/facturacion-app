@@ -88,6 +88,13 @@ export type Receipt = {
   totals: { subtotal: string; tax: string; propina: string; total: string };
   payments: { method: PaymentMethod; amount: string }[];
   cashierName: string | null;
+  /**
+   * Firma del e-CF. Solo existe cuando la nube ya firmó la venta (necesita conexión y el certificado de la empresa):
+   * una venta hecha sin conexión se imprime sin QR, y al reimprimirla después de sincronizar ya lo trae.
+   */
+  securityCode: string | null;
+  signedAt: string | null;
+  qr: string | null;
 };
 
 export type SaleCtx = {
@@ -260,6 +267,9 @@ type SaleRow = {
   last_error: string | null;
   synced_at: string | null;
   refund_of: string | null;
+  security_code: string | null;
+  signed_at: string | null;
+  qr_url: string | null;
 };
 const saleOf = (r: SaleRow): LocalSale => ({
   id: r.id,
@@ -313,8 +323,9 @@ export function receiptOfSale(db: Db, id: string): Receipt | null {
 function receiptOf(db: Db, id: string, buyer: { name: string | null; docNumber: string | null }, cashierName: string | null): Receipt {
   const payload = salePayload(db, id)!;
   const totals = totalsOfPayload(payload);
+  const row = one<SaleRow>(db, "SELECT * FROM sale WHERE id = ?", id)!;
   return {
-    sale: getSale(db, id)!,
+    sale: saleOf(row),
     company: getCompany(db),
     buyerName: buyer.name,
     buyerDoc: buyer.docNumber,
@@ -332,5 +343,8 @@ function receiptOf(db: Db, id: string, buyer: { name: string | null; docNumber: 
     },
     payments: payload.payments,
     cashierName,
+    securityCode: row.security_code,
+    signedAt: row.signed_at,
+    qr: row.qr_url,
   };
 }

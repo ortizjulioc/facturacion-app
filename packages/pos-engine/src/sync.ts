@@ -125,26 +125,70 @@ export async function pushSales(db: Db, api: ApiClient, now = new Date(), only?:
       )
     : all<{ id: string }>(db, "SELECT id FROM sale WHERE status = 'PENDING' ORDER BY created_at, encf");
   for (const { id } of pending) {
-    const payload = salePayload(db, id);
-    if (!payload) continue;
-    try {
-      const res = await api.uploadSale(payload);
-      transaction(db, () =>
-        run(db, "UPDATE sale SET status = 'SYNCED', remote_id = ?, synced_at = ?, last_error = NULL, attempts = attempts + 1 WHERE id = ?", res.data.id, now.toISOString(), id),
-      );
-      if (res.data.duplicate) result.duplicates++;
-      else result.uploaded++;
-    } catch (e) {
-      if (e instanceof ApiError && (e.status === 422 || e.status === 409 || e.status === 400)) {
-        run(db, "UPDATE sale SET status = 'REJECTED', last_error = ?, attempts = attempts + 1 WHERE id = ?", e.message, id);
-        result.rejected++;
-        continue;
-      }
-      run(db, "UPDATE sale SET attempts = attempts + 1, last_error = ? WHERE id = ?", e instanceof Error ? e.message : String(e), id);
-      throw e; // red caída, sesión vencida o error del servidor: se reintenta en la próxima sincronización
-    }
+    const outcome = await pushOne(db, api, id, now);
+    if (outcome === "uploaded") result.uploaded++;
+    else if (outcome === "duplicate") result.duplicates++;
+    else if (outcome === "rejected") result.rejected++;
   }
   return result;
+}
+
+/** Sube una venta. Un rechazo definitivo se anota y devuelve "rejected"; un fallo de red u otro error se relanza. */
+async function pushOne(db: Db, api: ApiClient, id: string, now: Date): Promise<"uploaded" | "duplicate" | "rejected" | "skipped"> {
+  const payload = salePayload(db, id);
+  if (!payload) return "skipped";
+  try {
+    const res = await api.uploadSale(payload);
+    const ecf = res.data.ecf;
+    transaction(db, () =>
+      run(
+        db,
+        "UPDATE sale SET status = 'SYNCED', remote_id = ?, synced_at = ?, last_error = NULL, attempts = attempts + 1, security_code = ?, signed_at = ?, qr_url = ? WHERE id = ?",
+        res.data.id,
+        now.toISOString(),
+        ecf?.securityCode ?? null,
+        ecf?.signedAt ?? null,
+        ecf?.qrUrl ?? null,
+        id,
+      ),
+    );
+    return res.data.duplicate ? "duplicate" : "uploaded";
+  } catch (e) {
+    if (e instanceof ApiError && (e.status === 422 || e.status === 409 || e.status === 400)) {
+      run(db, "UPDATE sale SET status = 'REJECTED', last_error = ?, attempts = attempts + 1 WHERE id = ?", e.message, id);
+      return "rejected";
+    }
+    run(db, "UPDATE sale SET attempts = attempts + 1, last_error = ? WHERE id = ?", e instanceof Error ? e.message : String(e), id);
+    throw e; // red caída, sesión vencida o error del servidor: se reintenta en la próxima sincronización
+  }
+}
+
+/**
+ * Intenta subir YA una venta recién hecha para que la nube la firme y el ticket salga con QR. Es un adelanto de la
+ * sincronización normal, así que solo actúa si no rompe su orden (ninguna venta anterior pendiente); si su turno aún
+ * no está en la nube, lo sube primero (como haría la sincronización). En cualquier otro caso, o si falla la red,
+ * devuelve false y la venta sigue pendiente como siempre.
+ */
+export async function pushSaleNow(db: Db, api: ApiClient, terminalId: string, id: string, now = new Date()): Promise<boolean> {
+  const sale = one<{ status: string; created_at: string; shift_id: string | null }>(db, "SELECT status, created_at, shift_id FROM sale WHERE id = ?", id);
+  if (!sale) return false;
+  if (sale.status === "SYNCED") return true;
+  if (sale.status !== "PENDING") return false;
+  const earlier = one<{ n: number }>(db, "SELECT COUNT(*) AS n FROM sale WHERE status = 'PENDING' AND id <> ? AND created_at <= ?", id, sale.created_at);
+  if (earlier && earlier.n > 0) return false;
+  try {
+    if (sale.shift_id) {
+      const shift = one<ShiftSyncRow>(db, "SELECT * FROM shift WHERE id = ?", sale.shift_id);
+      if (!shift) return false;
+      if (shift.open_synced !== 1) {
+        await api.putShift(shift.id, shiftBody(shift, terminalId, false));
+        run(db, "UPDATE shift SET open_synced = 1, last_error = NULL WHERE id = ?", shift.id);
+      }
+    }
+    return (await pushOne(db, api, id, now)) !== "rejected";
+  } catch {
+    return false;
+  }
 }
 
 /** Una ronda completa: ventas hacia arriba, luego catálogos hacia abajo y bloques de e-NCF. Nunca lanza por falta de red. */

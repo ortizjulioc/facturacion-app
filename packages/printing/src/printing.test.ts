@@ -108,6 +108,18 @@ describe("comandos ESC/POS", () => {
     expect(long[store - 2]! + (long[store - 1]! << 8)).toBe(303);
   });
 
+  it("imprime el QR de la DGII con el código de seguridad y la fecha de firma cuando el comprobante está firmado", () => {
+    const qr = "https://fc.dgii.gov.do/testecf/consultatimbrefc?rncemisor=101001577&encf=E320000000801&montototal=326.00&codigoseguridad=dcp79q";
+    const { lines, commands } = paper(receiptTicket(receipt({ qr, securityCode: "dcp79q", signedAt: "2026-10-21T19:52:03Z" }), { cols: 48 }));
+    expect(commands).toContain(`qr:${qr}`);
+    expect(commands).toContain("qr-print");
+    const text = lines.join("\n");
+    expect(text).toContain("Escanee para verificar en la DGII");
+    expect(text).toContain("Código de seguridad: dcp79q");
+    expect(text).toContain("Fecha de firma: 21/10/2026 15:52");
+    expect(text.indexOf("Código de seguridad")).toBeLessThan(text.indexOf("¡Gracias por su compra!"));
+  });
+
   it("alinea columnas y parte el texto sin pasar del ancho del papel", () => {
     const p = new EscPos({ cols: 32 });
     p.columns("Refresco gigante de dos litros sabor naranja", "RD$ 1,250.00").columns("Pan", "RD$ 10.00").rule("=");

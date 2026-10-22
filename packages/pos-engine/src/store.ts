@@ -107,6 +107,12 @@ const MIGRATIONS: string[] = [
   CREATE INDEX sale_shift ON sale (shift_id);
   CREATE INDEX sale_refund ON sale (refund_of);
   `,
+  /* 4 */ `
+  -- Firma del e-CF: la nube la devuelve al subir la venta (si la empresa tiene certificado digital).
+  ALTER TABLE sale ADD COLUMN security_code TEXT;
+  ALTER TABLE sale ADD COLUMN signed_at TEXT;
+  ALTER TABLE sale ADD COLUMN qr_url TEXT;
+  `,
 ];
 
 export function openDb(path: string): Db {

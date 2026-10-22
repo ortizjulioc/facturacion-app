@@ -139,7 +139,11 @@ export class ApiClient {
     );
   }
   uploadSale(payload: unknown) {
-    return this.request<{ data: { id: string; encf: string; duplicate: boolean } }>("POST", "/v1/sync/sales", payload);
+    return this.request<{ data: { id: string; encf: string; duplicate: boolean; ecf?: { securityCode: string; signedAt: string; qrUrl: string | null } | null } }>(
+      "POST",
+      "/v1/sync/sales",
+      payload,
+    );
   }
 }
 

@@ -43,6 +43,8 @@ let syncing: Promise<SyncReport> | null = null;
 const syncOnce = () => (syncing ??= engine.sync().finally(() => (syncing = null)));
 
 // ───────────── Impresión ─────────────
+/** Cuánto se espera a que la nube firme la venta antes de imprimir sin QR. */
+const SIGN_WAIT_MS = 4000;
 // Una impresión a la vez (los tickets no se mezclan), y la venta nunca espera a la impresora.
 let printing: Promise<unknown> = Promise.resolve();
 const enqueue = <T>(job: () => Promise<T>): Promise<T> => {
@@ -69,7 +71,12 @@ function receiptBytes(saleId: string, config: PrinterConfig, reprint: boolean) {
 function autoPrint(saleId: string) {
   const config = engine.printerConfig();
   if (config.mode === "none" || !config.autoPrint) return;
-  void enqueue(async () => printBytes(config, receiptBytes(saleId, config, false))).catch((e: unknown) => {
+  void enqueue(async () => {
+    // Con conexión, la nube firma la venta antes de imprimir y el ticket sale con su QR; sin ella (o si tarda) sale sin QR
+    // y al reimprimir después de sincronizar ya lo trae.
+    await Promise.race([engine.syncSale(saleId), new Promise((resolve) => setTimeout(resolve, SIGN_WAIT_MS))]).catch(() => false);
+    return printBytes(config, receiptBytes(saleId, config, false));
+  }).catch((e: unknown) => {
     win?.webContents.send("pos:print-failed", { saleId, message: e instanceof Error ? e.message : String(e) });
   });
 }

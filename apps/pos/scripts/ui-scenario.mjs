@@ -4,6 +4,8 @@
 //   3) POS_SCRIPT=scripts/ui-scenario.mjs POS_SHOTS=<carpeta> pnpm smoke
 // Crea una empresa nueva en la nube, configura la caja desde la pantalla, vende, sube y deja capturas en POS_SHOTS.
 import { createServer } from "node:net";
+import { createRequire } from "node:module";
+import { generateKeyPairSync } from "node:crypto";
 
 const API = process.env.POS_API ?? "http://localhost:3001";
 const ORIGIN = "app://facturacion-pos";
@@ -31,6 +33,24 @@ class Cloud {
   }
 }
 
+/** Certificado .p12 autofirmado de prueba (RSA 2048), generado con node-forge del paquete ecf. */
+function makeP12(password) {
+  const forge = createRequire(new URL("../../../packages/ecf/package.json", import.meta.url))("node-forge");
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const key = forge.pki.privateKeyFromPem(privateKey.export({ type: "pkcs8", format: "pem" }));
+  const cert = forge.pki.createCertificate();
+  cert.publicKey = forge.pki.setRsaPublicKey(key.n, key.e);
+  cert.serialNumber = "01";
+  cert.validity.notBefore = new Date(Date.now() - 86_400_000);
+  cert.validity.notAfter = new Date(Date.now() + 365 * 86_400_000);
+  const attrs = [{ name: "commonName", value: "COLMADO DEMO SRL" }];
+  cert.setSubject(attrs);
+  cert.setIssuer(attrs);
+  cert.sign(key, forge.md.sha256.create());
+  const der = forge.asn1.toDer(forge.pkcs12.toPkcs12Asn1(key, [cert], password, { algorithm: "3des" })).getBytes();
+  return Buffer.from(der, "binary").toString("base64");
+}
+
 async function seed() {
   const c = new Cloud();
   const stamp = Date.now();
@@ -40,6 +60,7 @@ async function seed() {
   const org = await c.call("POST", "/api/auth/organization/create", { name: "Colmado Demo", slug: `colmado-${stamp}` });
   await c.call("POST", "/api/auth/organization/set-active", { organizationId: org.id });
   await c.call("PUT", "/v1/company", { rnc: "1-01-00157-7", legalName: "Colmado Demo SRL", tradeName: "Colmado Demo", address: "Av. Principal 12, Santo Domingo", phone: "809-555-0100", environment: "TEST", requireShift: true });
+  await c.call("PUT", "/v1/company/certificate", { p12: makeP12("clave-demo"), password: "clave-demo" });
   await c.call("PUT", "/v1/pins/me", { pin: "2580" });
   const branch = (await c.call("POST", "/v1/branches", { name: "Principal", code: "P1" })).data;
   await c.call("POST", "/v1/terminals", { branchId: branch.id, name: "Caja 1", code: "C1" });
@@ -303,6 +324,11 @@ export default async function scenario({ run, sleep, shot }) {
   await sleep(500);
   await snap("12-bloqueada");
   await sleep(500);
+  out.receiptSigned = await run(`window.pos.sales({ limit: 50 }).then(async (rows) => {
+    const done = rows.filter((r) => r.status === 'SYNCED' && r.type !== 'E34');
+    const r = await window.pos.receipt(done[0].id);
+    return { synced: done.length, securityCode: r.securityCode, qr: r.qr, signedAt: r.signedAt };
+  })`);
   out.printJobs = printer.jobs.map(summarize);
   await printer.stop();
   return out;
