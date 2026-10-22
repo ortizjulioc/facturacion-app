@@ -356,6 +356,16 @@ export function InvoiceDetail({ id }: { id: string }) {
             )}
           </section>
         )}
+        {doc.approval && (
+          <section className="no-print rounded-md border border-zinc-200 p-3 text-sm dark:border-zinc-800">
+            <p className="text-xs uppercase tracking-wide text-zinc-500">Respuesta comercial del cliente</p>
+            <p>
+              <Badge tone={doc.approval.approved ? "success" : "warning"}>{doc.approval.approved ? "Aprobó el comprobante" : "Rechazó el comprobante"}</Badge>
+              {doc.approval.at && <span className="ml-2 text-zinc-500">{doc.approval.at}</span>}
+            </p>
+            {doc.approval.reason && <p className="text-zinc-600 dark:text-zinc-400">Motivo: {doc.approval.reason}</p>}
+          </section>
+        )}
         {doc.ecf && (
           <footer className="flex items-center gap-4 border-t border-zinc-200 pt-4 text-sm dark:border-zinc-800">
             {doc.ecf.qrUrl && <QrCode text={doc.ecf.qrUrl} label="Código QR para verificar el comprobante en la DGII" />}

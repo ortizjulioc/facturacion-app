@@ -16,6 +16,7 @@ const NAV: { href: string; label: string; adminOnly?: boolean }[] = [
   { href: "/panel/productos", label: "Productos" },
   { href: "/panel/inventario", label: "Inventario" },
   { href: "/panel/compras", label: "Compras", adminOnly: true },
+  { href: "/panel/recibidos", label: "e-CF recibidos", adminOnly: true },
   { href: "/panel/proveedores", label: "Proveedores", adminOnly: true },
   { href: "/panel/clientes", label: "Clientes" },
   { href: "/panel/sucursales", label: "Sucursales y cajas" },
