@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createPrisma, withTenant } from "@facturacion/db";
 import { verifyPin } from "@facturacion/core";
 import { securityCodeOf, verifyEcfSignature } from "@facturacion/ecf";
@@ -12,6 +12,7 @@ import { createApp } from "./app";
 import { createAuth } from "./auth";
 import { loadEnv } from "./env";
 import { createLogger } from "./logger";
+import { MAX_SEND_ATTEMPTS, processDue } from "./lib/fiscal";
 import { open } from "./lib/secrets";
 
 const hasDb = Boolean(process.env.DATABASE_URL && process.env.BETTER_AUTH_SECRET);
@@ -22,11 +23,66 @@ type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-ex
 describe.skipIf(!hasDb)("API de punta a punta", () => {
   const env = loadEnv({ ...process.env, NODE_ENV: "test", LOG_LEVEL: "error" });
   const prisma = createPrisma({ connectionString: env.DATABASE_URL, max: 3 });
+
+  /** Una DGII de mentira: autentica, recibe e-CF (guarda lo recibido) y responde consultas según lo que cada prueba prepare. */
+  const dgii = {
+    received: [] as { name: string; xml: string; auth: string | null }[],
+    /** Respuestas que se dan, una por envío, en vez de aceptar el e-CF. */
+    receptionFails: [] as (() => Response)[],
+    handlers: new Map<string, Json | (() => Json)>(),
+    encfOf: new Map<string, string>(),
+    n: 0,
+    tokens: 0,
+    reset() {
+      this.received = [];
+      this.receptionFails = [];
+      this.handlers = new Map();
+      this.encfOf = new Map();
+    },
+    /** Lo que responde la consulta de resultado de ese e-NCF (por omisión: aceptado). */
+    resultOf(encf: string, answer: Json | (() => Json)) {
+      this.handlers.set(encf, answer);
+    },
+    fetch: async (input: string, init?: RequestInit): Promise<Response> => {
+      const url = new URL(input);
+      const method = init?.method ?? "GET";
+      const auth = new Headers(init?.headers).get("authorization");
+      if (url.pathname.endsWith("/autenticacion/api/autenticacion/semilla")) {
+        return new Response('<?xml version="1.0"?><SemillaModel><valor>semilla-de-prueba</valor><fecha>2026-10-22T08:00:00-04:00</fecha></SemillaModel>');
+      }
+      if (url.pathname.endsWith("/autenticacion/api/autenticacion/validarsemilla")) {
+        const xml = await ((init!.body as FormData).get("xml") as File).text();
+        if (!verifyEcfSignature(xml)) return Response.json({ mensaje: "Firma de la semilla inválida" }, { status: 400 });
+        return Response.json({ token: `tok-${++dgii.tokens}`, expira: new Date(Date.now() + 3_600_000).toISOString() });
+      }
+      if (method === "POST" && url.pathname.endsWith("/recepcion/api/facturaselectronicas")) {
+        const fail = dgii.receptionFails.shift();
+        if (fail) return fail();
+        const file = (init!.body as FormData).get("xml") as File;
+        const xml = await file.text();
+        dgii.received.push({ name: file.name, xml, auth });
+        const trackId = `trk-${++dgii.n}`;
+        dgii.encfOf.set(trackId, /<eNCF>([^<]+)<\/eNCF>/.exec(xml)?.[1] ?? "");
+        return Response.json({ trackId, error: null, mensaje: null });
+      }
+      if (url.pathname.endsWith("/consultaresultado/api/consultas/estado")) {
+        const trackId = url.searchParams.get("trackid")!;
+        const encf = dgii.encfOf.get(trackId);
+        if (!encf) return Response.json({ trackId, codigo: 0, estado: "No encontrado", mensajes: [] });
+        const custom = dgii.handlers.get(encf);
+        const answer = typeof custom === "function" ? custom() : custom;
+        return Response.json({ trackId, codigo: 1, estado: "Aceptado", rnc: "101001577", eNCF: encf, secuenciaUtilizada: true, fechaRecepcion: "22/10/2026 08:00:00", mensajes: [], ...answer });
+      }
+      return Response.json({ error: "ruta desconocida" }, { status: 404 });
+    },
+  };
+
   const app = createApp({
     env,
     prisma,
     auth: createAuth(prisma, env),
     logger: createLogger(env),
+    fiscalFetch: dgii.fetch,
   });
   const origin = env.WEB_ORIGIN.split(",")[0]!;
   const tag = randomUUID().slice(0, 8);
@@ -5159,6 +5215,218 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     });
   });
 
+
+  describe("envío a la DGII", () => {
+    const deps = (over: { fetch?: typeof dgii.fetch } = {}) => ({ env, prisma, logger: createLogger(env), fetch: over.fetch ?? dgii.fetch });
+    const certBody = () => {
+      const { p12, password } = testP12();
+      return { p12: Buffer.from(p12).toString("base64"), password };
+    };
+    const customers = new WeakMap<object, Json>();
+    /** Empresa con certificado, secuencias y (opcional) envío automático. */
+    async function emisor(label: string, auto = true) {
+      const b = await billing(label, { seqs: [["E31", 1, 50], ["E32", 1, 50]] });
+      expect((await send("PUT", "/v1/company/certificate", certBody(), b.cookie)).status).toBe(200);
+      if (auto) expect((await send("PUT", "/v1/company", { ...profileBody, sendToDgii: true }, b.cookie)).status).toBe(200);
+      const cust = (await json(await post("/v1/customers", { name: "Cliente Fiscal", documentType: "RNC", documentNumber: "131246796" }, b.cookie))).data;
+      customers.set(b, cust);
+      return b;
+    }
+    const e31 = async (b: Billing) => (await json(await issue(b, (await createDraft(b, { type: "E31", customerId: customers.get(b)!.id })).id))).data as Json;
+    const detail = async (b: Billing, id: string) => (await json(await get(`/v1/documents/${id}`, b.cookie))).data as Json;
+    const run = (b: Billing, now: Date) => processDue(deps(), { now, organizationId: b.orgId });
+    let clock = Date.now() + 5_000;
+    /** Cada paso del trabajador ocurre unos segundos después del anterior. */
+    const step = (seconds = 5) => new Date((clock += seconds * 1000));
+
+    beforeEach(() => {
+      dgii.reset();
+      clock = Date.now() + 5_000; // la hora del trabajador arranca justo después de «ahora» en cada prueba
+    });
+
+    it("envía el comprobante firmado, consulta el resultado y lo deja aceptado", async () => {
+      const b = await emisor("dg1");
+      const doc = await e31(b);
+      expect(doc.status).toBe("ISSUED");
+      expect(doc.fiscal).toMatchObject({ state: "PENDING", trackId: null });
+
+      expect(await run(b, step())).toMatchObject({ claimed: 1, sent: 1 });
+      const sent = await detail(b, doc.id);
+      expect(sent.status).toBe("SENT");
+      expect(sent.fiscal).toMatchObject({ state: "SENT", trackId: "trk-1" });
+      // La DGII recibió el XML firmado, con el nombre RNC + e-NCF.
+      expect(dgii.received).toHaveLength(1);
+      expect(dgii.received[0]!.name).toBe(`101001577${doc.encf}.xml`);
+      expect(verifyEcfSignature(dgii.received[0]!.xml)).toBe(true);
+      expect(dgii.received[0]!.xml).toBe((await withTenant(prisma, b.orgId).document.findFirstOrThrow({ where: { id: doc.id } })).ecfXml);
+      expect(dgii.received[0]!.auth).toMatch(/^bearer tok-/);
+
+      // Todavía no toca consultar: no hace nada.
+      expect(await run(b, step(1))).toMatchObject({ claimed: 0 });
+      expect(await run(b, step())).toMatchObject({ claimed: 1, accepted: 1 });
+      const done = await detail(b, doc.id);
+      expect(done.status).toBe("ACCEPTED");
+      expect(done.fiscal).toMatchObject({ state: "DONE", dgiiStatus: "Aceptado", sequenceUsed: true, messages: [] });
+      expect(done.fiscal.finishedAt).toBeTruthy();
+      // Terminado: no vuelve a entrar en la cola.
+      expect(await run(b, step(3600))).toMatchObject({ claimed: 0 });
+    });
+
+    it("un rechazo deja el comprobante rechazado con los motivos y si el número se gastó", async () => {
+      const b = await emisor("dg2");
+      const doc = await e31(b);
+      dgii.resultOf(doc.encf, { codigo: 2, estado: "Rechazado", secuenciaUtilizada: false, mensajes: [{ valor: "Firma inválida", codigo: 102 }] });
+      await run(b, step());
+      expect(await run(b, step())).toMatchObject({ rejected: 1 });
+      const d = await detail(b, doc.id);
+      expect(d.status).toBe("REJECTED");
+      expect(d.fiscal).toMatchObject({ state: "DONE", dgiiStatus: "Rechazado", sequenceUsed: false, messages: [{ code: "102", text: "Firma inválida" }] });
+    });
+
+    it("«aceptado condicional» y «en proceso»: espera y vuelve a consultar con pausas crecientes", async () => {
+      const b = await emisor("dg3");
+      const doc = await e31(b);
+      const answers = [{ codigo: 3, estado: "En Proceso" }, { codigo: 3, estado: "En Proceso" }, { codigo: 4, estado: "Aceptado Condicional", mensajes: [{ valor: "Fecha fuera de rango", codigo: 7 }] }];
+      dgii.resultOf(doc.encf, () => answers.shift()!);
+      await run(b, step());
+      expect(await run(b, step())).toMatchObject({ retried: 1 });
+      const waiting = await detail(b, doc.id);
+      expect(waiting.status).toBe("SENT");
+      expect(waiting.fiscal).toMatchObject({ state: "SENT", attempts: 1, dgiiStatus: "En Proceso" });
+      // La segunda consulta espera más que la primera.
+      const gap1 = new Date(waiting.fiscal.nextAttemptAt).getTime() - clock;
+      expect(await run(b, step(60))).toMatchObject({ retried: 1 });
+      const gap2 = new Date((await detail(b, doc.id)).fiscal.nextAttemptAt).getTime() - clock;
+      expect(gap2).toBeGreaterThan(gap1);
+      expect(await run(b, step(600))).toMatchObject({ accepted: 1 });
+      expect((await detail(b, doc.id)).status).toBe("ACCEPTED_CONDITIONAL");
+    });
+
+    it("un fallo temporal se reintenta con espera; uno definitivo pide revisión y se puede reintentar", async () => {
+      const b = await emisor("dg4");
+      const doc = await e31(b);
+      dgii.receptionFails = [() => new Response("", { status: 503 })];
+      expect(await run(b, step())).toMatchObject({ claimed: 1, retried: 1 });
+      const d1 = await detail(b, doc.id);
+      expect(d1.fiscal).toMatchObject({ state: "PENDING", attempts: 1 });
+      expect(d1.fiscal.lastError).toMatch(/503/);
+      expect(new Date(d1.fiscal.nextAttemptAt).getTime() - clock).toBe(30_000);
+      expect(dgii.received).toHaveLength(0);
+
+      // Antes de la hora no se intenta; después sí.
+      expect(await run(b, step(10))).toMatchObject({ claimed: 0 });
+      dgii.receptionFails = [() => Response.json({ error: "XML", mensaje: "El e-NCF no está autorizado para el RNC emisor" })];
+      expect(await run(b, step(30))).toMatchObject({ claimed: 1, failed: 1 });
+      const d2 = await detail(b, doc.id);
+      expect(d2.status).toBe("ISSUED");
+      expect(d2.fiscal).toMatchObject({ state: "FAILED", lastError: "El e-NCF no está autorizado para el RNC emisor" });
+      expect(await run(b, step(3600))).toMatchObject({ claimed: 0 });
+
+      // Se corrige la causa y se reintenta desde el panel.
+      const retry = await post(`/v1/documents/${doc.id}/send`, {}, b.cookie);
+      expect(retry.status, JSON.stringify(await retry.clone().json())).toBe(200);
+      expect((await json(retry)).data.fiscal).toMatchObject({ state: "PENDING", attempts: 0, lastError: null });
+      expect(await run(b, step())).toMatchObject({ sent: 1 });
+      expect((await post(`/v1/documents/${doc.id}/send`, {}, b.cookie)).status).toBe(409); // ya está en la cola
+    });
+
+    it("tras demasiados intentos de envío deja de insistir", async () => {
+      const b = await emisor("dg5");
+      const doc = await e31(b);
+      dgii.receptionFails = Array.from({ length: 30 }, () => () => new Response("", { status: 500 }));
+      for (let i = 0; i < MAX_SEND_ATTEMPTS; i++) await run(b, step(4000));
+      const d = await detail(b, doc.id);
+      expect(d.fiscal).toMatchObject({ state: "FAILED", attempts: MAX_SEND_ATTEMPTS });
+      expect(d.fiscal.lastError).toMatch(/Se agotaron los intentos/);
+    });
+
+    it("sin envío automático el comprobante espera a que se pida; «consultar ahora» lo procesa en el momento", async () => {
+      const b = await emisor("dg6", false);
+      const doc = await e31(b);
+      expect(doc.fiscal).toBeNull();
+      expect(doc.fiscalBlock).toBeNull();
+      expect((await run(b, step())).claimed).toBe(0);
+
+      expect((await post(`/v1/documents/${doc.id}/send`, {}, b.cookie)).status).toBe(200);
+      const sent = await json(await post(`/v1/documents/${doc.id}/fiscal/refresh`, {}, b.cookie));
+      expect(sent.data.status).toBe("SENT");
+      const done = await json(await post(`/v1/documents/${doc.id}/fiscal/refresh`, {}, b.cookie));
+      expect(done.data.status).toBe("ACCEPTED");
+      expect(done.data.fiscal.state).toBe("DONE");
+    });
+
+    it("no se puede enviar lo que no está firmado, es un borrador o es un consumo menor a RD$250,000", async () => {
+      const b = await emisor("dg7");
+      const consumo = (await json(await issue(b, (await createDraft(b)).id))).data;
+      expect(consumo.fiscal).toBeNull(); // el envío automático lo deja fuera
+      expect(consumo.fiscalBlock).toMatch(/RFCE/);
+      const res = await post(`/v1/documents/${consumo.id}/send`, {}, b.cookie);
+      expect(res.status).toBe(422);
+      expect(await error(res)).toMatch(/RD\$250,000/);
+
+      const draft = await createDraft(b, { type: "E31", customerId: customers.get(b)!.id });
+      expect(await error(await post(`/v1/documents/${draft.id}/send`, {}, b.cookie))).toMatch(/aún no está emitido/);
+
+      const sinCert = await billing("dg7b", { seqs: [["E31", 1, 5]] });
+      const c = (await json(await post("/v1/customers", { name: "Cliente", documentType: "RNC", documentNumber: "131246796" }, sinCert.cookie))).data;
+      const unsigned = (await json(await issue(sinCert, (await createDraft(sinCert, { type: "E31", customerId: c.id })).id))).data;
+      expect(unsigned.fiscalBlock).toMatch(/no está firmado/);
+      expect((await post(`/v1/documents/${unsigned.id}/send`, {}, sinCert.cookie)).status).toBe(422);
+    });
+
+    it("al firmar después, el comprobante entra solo a la cola si el envío es automático", async () => {
+      const b = await billing("dg8", { seqs: [["E31", 1, 5]] });
+      await send("PUT", "/v1/company", { ...profileBody, sendToDgii: true }, b.cookie);
+      const c = (await json(await post("/v1/customers", { name: "Cliente", documentType: "RNC", documentNumber: "131246796" }, b.cookie))).data;
+      const doc = (await json(await issue(b, (await createDraft(b, { type: "E31", customerId: c.id })).id))).data;
+      expect(doc.fiscal).toBeNull();
+      await send("PUT", "/v1/company/certificate", certBody(), b.cookie);
+      const signed = await json(await post(`/v1/documents/${doc.id}/sign`, {}, b.cookie));
+      expect(signed.data.fiscal).toMatchObject({ state: "PENDING" });
+    });
+
+    it("sin certificado vigente o con la empresa borrada del trabajo, el envío queda para revisión con el motivo", async () => {
+      const b = await emisor("dg9");
+      const doc = await e31(b);
+      expect((await call("/v1/company/certificate", { method: "DELETE", cookie: b.cookie })).status).toBe(204);
+      expect(await run(b, step())).toMatchObject({ failed: 1 });
+      expect((await detail(b, doc.id)).fiscal).toMatchObject({ state: "FAILED", lastError: "La empresa no tiene un certificado digital cargado" });
+    });
+
+    it("dos trabajadores a la vez no envían dos veces lo mismo, y cada empresa solo ve su cola", async () => {
+      const a = await emisor("dg10a");
+      const other = await emisor("dg10b");
+      const docA = await e31(a);
+      const docB = await e31(other);
+      const now = step();
+      const [r1, r2] = await Promise.all([processDue(deps(), { now }), processDue(deps(), { now })]);
+      // Entre los dos procesaron cada comprobante una sola vez (puede haber filas pendientes de otras pruebas): ningún XML llegó repetido.
+      expect(new Set(dgii.received.map((r) => r.xml)).size).toBe(dgii.received.length);
+      const [trackA, trackB] = [(await detail(a, docA.id)).fiscal.trackId, (await detail(other, docB.id)).fiscal.trackId];
+      expect(trackA).toBeTruthy();
+      expect(trackB).toBeTruthy();
+      expect(trackA).not.toBe(trackB);
+      expect(r1.sent + r2.sent).toBeGreaterThanOrEqual(2);
+      expect((await detail(a, docA.id)).fiscal.state).toBe("SENT");
+      expect((await detail(other, docB.id)).fiscal.state).toBe("SENT");
+
+      const queue = (await json(await get("/v1/fiscal/queue", a.cookie))).data;
+      expect(queue).toMatchObject({ PENDING: 0, SENT: 1, DONE: 0, FAILED: 0, failed: [] });
+      expect((await get("/v1/fiscal/queue")).status).toBe(401);
+      const manual = await json(await post("/v1/fiscal/process", {}, a.cookie));
+      expect(manual.data).toMatchObject({ claimed: 0 });
+    });
+
+    it("la cola de fallos lista lo que necesita revisión", async () => {
+      const b = await emisor("dg11");
+      const doc = await e31(b);
+      dgii.receptionFails = [() => Response.json({ mensaje: "Estructura inválida" }, { status: 400 })];
+      await run(b, step());
+      const q = (await json(await get("/v1/fiscal/queue", b.cookie))).data;
+      expect(q.FAILED).toBe(1);
+      expect(q.failed[0]).toMatchObject({ documentId: doc.id, encf: doc.encf, error: "Estructura inválida" });
+    });
+  });
 
   describe("bitácora", () => {
     it("registra cada cambio, de forma atómica con el cambio", async () => {

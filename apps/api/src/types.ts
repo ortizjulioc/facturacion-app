@@ -1,9 +1,17 @@
 import type { DbClient, Prisma, withTenant } from "@facturacion/db";
 import type { Auth } from "./auth";
 import type { Env } from "./env";
+import type { FetchLike } from "@facturacion/ecf";
 import type { Logger } from "./logger";
 
-export type Deps = { env: Env; prisma: DbClient; auth: Auth; logger: Logger };
+export type Deps = {
+  env: Env;
+  prisma: DbClient;
+  auth: Auth;
+  logger: Logger;
+  /** `fetch` con el que se habla con la DGII (las pruebas inyectan una DGII simulada). */
+  fiscalFetch?: FetchLike;
+};
 
 export type TenantTx = Prisma.TransactionClient;
 

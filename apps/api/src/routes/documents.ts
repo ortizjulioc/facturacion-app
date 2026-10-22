@@ -12,6 +12,7 @@ import {
   FULL,
 } from "../lib/documents";
 import { issueDocument } from "../lib/issue";
+import { enqueueIfAuto, enqueueSubmission, fiscalBlock, processDue, retrySubmission } from "../lib/fiscal";
 import { signIssued } from "../lib/signing";
 import { requireRole } from "../middleware/tenant";
 import { listQuery, pageOf, uuidParam } from "../lib/schemas";
@@ -200,7 +201,11 @@ export const documents = new Hono<AppEnv>()
     const failed: { encf: string | null; error: string }[] = [];
     for (const doc of pending) {
       try {
-        await c.get("run")((tx) => signIssued(tx, env, organizationId, doc.id));
+        await c.get("run")(async (tx) => {
+          const signedDoc = await signIssued(tx, env, organizationId, doc.id);
+          const profile = await tx.companyProfile.findFirstOrThrow({ select: { sendToDgii: true } });
+          await enqueueIfAuto(tx, organizationId, signedDoc, profile);
+        });
         signed++;
       } catch (e) {
         failed.push({ encf: doc.encf, error: e instanceof HTTPException ? e.message : "Error interno" });
@@ -217,8 +222,47 @@ export const documents = new Hono<AppEnv>()
     const organizationId = c.get("organizationId");
     const { doc, profile } = await c.get("run")(async (tx) => {
       const signed = await signIssued(tx, c.get("deps").env, organizationId, id);
+      const queued = await enqueueIfAuto(tx, organizationId, signed, await tx.companyProfile.findFirstOrThrow({ select: { sendToDgii: true } }));
       await tx.auditLog.create({ data: auditEntry(c, "document.sign", "document", id, { encf: signed.encf, securityCode: signed.securityCode }) });
-      return { doc: signed, profile: await tx.companyProfile.findFirst({ select: { rnc: true, environment: true } }) };
+      return {
+        doc: queued ? await tx.document.findFirstOrThrow({ where: { id }, include: FULL }) : signed,
+        profile: await tx.companyProfile.findFirst({ select: { rnc: true, environment: true } }),
+      };
     });
+    return c.json({ data: documentDto(doc, profile) });
+  })
+  // Pone el comprobante firmado en la cola de envío a la DGII (o vuelve a ponerlo si falló).
+  .post("/:id/send", requireRole("owner", "admin"), zv("param", uuidParam), async (c) => {
+    const { id } = c.req.valid("param");
+    const organizationId = c.get("organizationId");
+    const { doc, profile } = await c.get("run")(async (tx) => {
+      const found = await tx.document.findFirst({ where: { id }, include: FULL });
+      if (!found) throw notFound();
+      const block = fiscalBlock(found);
+      if (block) throw new HTTPException(422, { message: block });
+      if (found.fiscalSubmission) {
+        if (!(await retrySubmission(tx, id))) throw new HTTPException(409, { message: "Este comprobante ya está en la cola de la DGII" });
+      } else {
+        await enqueueSubmission(tx, organizationId, id);
+      }
+      await tx.auditLog.create({ data: auditEntry(c, "document.send", "document", id, { encf: found.encf }) });
+      return {
+        doc: await tx.document.findFirstOrThrow({ where: { id }, include: FULL }),
+        profile: await tx.companyProfile.findFirst({ select: { rnc: true, environment: true } }),
+      };
+    });
+    return c.json({ data: documentDto(doc, profile) });
+  })
+  // «Consultar ahora»: procesa este envío sin esperar a su hora (envía, o pregunta a la DGII por el resultado).
+  .post("/:id/fiscal/refresh", requireRole("owner", "admin"), zv("param", uuidParam), async (c) => {
+    const { id } = c.req.valid("param");
+    const deps = c.get("deps");
+    await processDue(
+      { env: deps.env, prisma: deps.prisma, logger: deps.logger, ...(deps.fiscalFetch ? { fetch: deps.fiscalFetch } : {}) },
+      { organizationId: c.get("organizationId"), documentId: id },
+    );
+    const doc = await c.get("db").document.findFirst({ where: { id }, include: FULL });
+    if (!doc) throw notFound();
+    const profile = await c.get("db").companyProfile.findFirst({ select: { rnc: true, environment: true } });
     return c.json({ data: documentDto(doc, profile) });
   });

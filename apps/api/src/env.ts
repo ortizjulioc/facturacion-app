@@ -17,6 +17,8 @@ const schema = z.object({
    * En desarrollo y pruebas, si falta, se deriva de BETTER_AUTH_SECRET; en producción es obligatoria.
    */
   CERT_ENCRYPTION_KEY: z.string().optional(),
+  /** Trabajador que envía los e-CF a la DGII y consulta sus resultados (se apaga con "false", p. ej. en una réplica). */
+  FISCAL_WORKER: z.enum(["true", "false"]).default("true"),
 }).superRefine((v, ctx) => {
   if (v.NODE_ENV === "production" && !v.CERT_ENCRYPTION_KEY) {
     ctx.addIssue({ code: "custom", path: ["CERT_ENCRYPTION_KEY"], message: "Es obligatoria en producción" });

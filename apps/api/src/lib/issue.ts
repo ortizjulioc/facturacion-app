@@ -3,6 +3,7 @@ import { buyerErrors, formatDop, isModifier, remainingCredit } from "@facturacio
 import { auditRow } from "./audit";
 import { asSalesType, FULL, type DocumentFull } from "./documents";
 import { allocateEncf } from "./encf";
+import { enqueueIfAuto } from "./fiscal-queue";
 import { signDocumentData, type Signature } from "./signing";
 import { applyDocumentStock } from "./stock";
 import type { Env } from "../env";
@@ -133,11 +134,15 @@ export async function issueDocument(
     });
   }
 
-  const issued = await tx.document.update({
+  let issued = await tx.document.update({
     where: { id },
     data: { status: "ISSUED", encf, issuedAt, shiftId, ...buyer, ...signature },
     include: FULL,
   });
+  // Con envío automático, el comprobante firmado entra a la cola de la DGII en la misma transacción.
+  if (await enqueueIfAuto(tx, organizationId, issued, profile)) {
+    issued = await tx.document.findFirstOrThrow({ where: { id }, include: FULL });
+  }
   // Descuenta (o reingresa) las existencias en la misma transacción: si no hay stock, no se emite.
   await applyDocumentStock(tx, issued, userId, preset ? true : profile.allowNegativeStock);
   await tx.auditLog.create({

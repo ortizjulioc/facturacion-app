@@ -108,6 +108,7 @@ model Organization {
   cashShifts       CashShift[]
   cashierPins      CashierPin[]
   certificate      CompanyCertificate?
+  fiscalSubmissions FiscalSubmission[]
 
   @@map("organization")
 }
@@ -346,6 +347,8 @@ model CompanyProfile {
   allowNegativeStock Boolean        @default(true)
   /// true: una caja solo puede vender con un turno abierto (la app de caja y la emisión en línea con caja lo exigen).
   requireShift       Boolean        @default(false)
+  /// true: cada e-CF firmado se envía solo a la DGII (cola con reintentos). Requiere certificado y estar habilitado como emisor.
+  sendToDgii         Boolean        @default(false)
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
   organization       Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -437,6 +440,7 @@ model Document {
   securityCode         String?
   /// Instante de la firma (FechaHoraFirma del e-CF).
   signedAt             DateTime?
+  fiscalSubmission     FiscalSubmission?
   referencedDocument   Document?        @relation("Modifies", fields: [referencedDocumentId], references: [id], onDelete: NoAction)
   modifiedBy           Document[]       @relation("Modifies")
   lines                DocumentLine[]
@@ -939,4 +943,49 @@ model CompanyCertificate {
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@map("company_certificate")
+}
+
+/// Estado del envío de un e-CF a la DGII.
+enum FiscalState {
+  /// Por enviar (o por reenviar tras un fallo temporal).
+  PENDING
+  /// Enviado: se espera el resultado de la validación (TrackId).
+  SENT
+  /// La DGII ya dio su resultado final (aceptado, aceptado condicional o rechazado).
+  DONE
+  /// Falló y no se reintenta solo: hay que revisar (certificado no autorizado, XML rechazado en la recepción…).
+  FAILED
+}
+
+/// Cola de envío a la DGII: una fila por comprobante. Es el único dato mutable del envío (el comprobante emitido está congelado).
+model FiscalSubmission {
+  id             String       @id @default(uuid(7)) @db.Uuid
+  organizationId String
+  documentId     String       @unique @db.Uuid
+  state          FiscalState  @default(PENDING)
+  trackId        String?
+  attempts       Int          @default(0)
+  /// Cuándo se vuelve a intentar (envío o consulta del resultado).
+  nextAttemptAt  DateTime     @default(now())
+  /// El trabajador reserva la fila mientras la procesa, para que dos procesos no envíen lo mismo.
+  lockedUntil    DateTime?
+  lastError      String?
+  /// Código numérico y texto de estado que entrega la DGII.
+  dgiiCode       Int?
+  dgiiStatus     String?
+  /// Mensajes de validación de la DGII: [{ code, text }].
+  messages       Json?
+  /// true: el e-NCF quedó gastado aunque se rechazó; false: puede reutilizarse.
+  sequenceUsed   Boolean?
+  receivedAt     String?
+  sentAt         DateTime?
+  finishedAt     DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  document       Document     @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([state, nextAttemptAt])
+  @@index([organizationId, state])
+  @@map("fiscal_submission")
 }

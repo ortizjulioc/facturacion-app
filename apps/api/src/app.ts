@@ -9,6 +9,7 @@ import { categories } from "./routes/categories";
 import { company } from "./routes/company";
 import { customers } from "./routes/customers";
 import { documents } from "./routes/documents";
+import { fiscal } from "./routes/fiscal";
 import { inventory } from "./routes/inventory";
 import { products } from "./routes/products";
 import { purchases } from "./routes/purchases";
@@ -83,6 +84,7 @@ export function createApp(deps: Deps) {
     .route("/v1/company", company)
     .route("/v1/sequences", sequences)
     .route("/v1/documents", documents)
+    .route("/v1/fiscal", fiscal)
     .route("/v1/reports", reports)
     .route("/v1/reports", purchaseReports)
     .route("/v1/inventory", inventory)

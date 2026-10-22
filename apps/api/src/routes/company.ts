@@ -22,6 +22,8 @@ const companyInput = z.object({
   environment: z.enum(["TEST", "CERT", "PROD"]),
   /** Exigir un turno abierto para vender desde una caja. */
   requireShift: z.boolean().optional(),
+  /** Enviar cada e-CF firmado a la DGII de forma automática. */
+  sendToDgii: z.boolean().optional(),
 });
 
 /** El .p12 viaja en base64 dentro del JSON (pesa unos pocos KB). */

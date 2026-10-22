@@ -17,6 +17,7 @@ import {
 } from "@facturacion/core";
 import { Prisma } from "@facturacion/db";
 import { money, optionalText, quantity } from "./schemas";
+import { fiscalBlock } from "./fiscal-queue";
 import { stampOf, type StampProfile } from "./stamp";
 import type { TenantTx } from "../types";
 
@@ -355,12 +356,13 @@ async function resolveBuyer(
 // ───────────── Salida ─────────────
 
 export type DocumentFull = Prisma.DocumentGetPayload<{
-  include: { lines: true; payments: true };
+  include: { lines: true; payments: true; fiscalSubmission: true };
 }>;
 
 export const FULL = {
   lines: { orderBy: { lineNumber: "asc" } },
   payments: { orderBy: { createdAt: "asc" } },
+  fiscalSubmission: true,
 } satisfies Prisma.DocumentInclude;
 
 const m = (v: bigint) => fromCents(v);
@@ -384,6 +386,24 @@ export const documentSummaryDto = (d: Prisma.DocumentGetPayload<object>) => ({
 export const documentDto = (d: DocumentFull, profile: StampProfile | null = null) => ({
   ...documentSummaryDto(d),
   /** Firma del e-CF y datos del timbre (QR) de la representación impresa; null si aún no está firmado. */
+  /** Envío a la DGII: estado de la cola y respuesta de la DGII. */
+  fiscal: d.fiscalSubmission
+    ? {
+        state: d.fiscalSubmission.state,
+        trackId: d.fiscalSubmission.trackId,
+        attempts: d.fiscalSubmission.attempts,
+        nextAttemptAt: d.fiscalSubmission.nextAttemptAt,
+        lastError: d.fiscalSubmission.lastError,
+        dgiiStatus: d.fiscalSubmission.dgiiStatus,
+        dgiiCode: d.fiscalSubmission.dgiiCode,
+        messages: (d.fiscalSubmission.messages ?? []) as { code: string; text: string }[],
+        sequenceUsed: d.fiscalSubmission.sequenceUsed,
+        sentAt: d.fiscalSubmission.sentAt,
+        finishedAt: d.fiscalSubmission.finishedAt,
+      }
+    : null,
+  /** Por qué no se puede enviar a la DGII (null = se puede, o ya se envió). */
+  fiscalBlock: d.fiscalSubmission ? null : fiscalBlock(d),
   ecf: (() => {
     const stamp = profile ? stampOf(d, profile) : null;
     return d.securityCode && d.signedAt
