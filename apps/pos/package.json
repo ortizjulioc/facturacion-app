@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@facturacion/core": "workspace:*",
+    "@facturacion/ecf": "workspace:*",
     "@facturacion/pos-engine": "workspace:*",
     "@facturacion/printing": "workspace:*",
     "qrcode": "^1.5.4",

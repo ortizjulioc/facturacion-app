@@ -72,7 +72,7 @@ async function seed() {
     await c.call("POST", "/v1/products", { name, price, barcode, ...(name.startsWith("Agua") || name.startsWith("Ref") || name.startsWith("Cerv") ? { categoryId: cat.id } : {}) });
   }
   await c.call("POST", "/v1/customers", { name: "Acme SRL", documentType: "RNC", documentNumber: "131246796" });
-  return { email, password };
+  return { email, password, cloud: c };
 }
 
 /** Impresora de red simulada: guarda cada trabajo (conexión) que recibe. */
@@ -110,7 +110,7 @@ const summarize = (buf) => ({
 export default async function scenario({ run, sleep, shot }) {
   const out = { shots: [] };
   const printer = await fakePrinter();
-  const { email, password } = await seed();
+  const { email, password, cloud } = await seed();
 
   // Utilidades que corren dentro de la pantalla (React: se asigna con el setter nativo y se dispara `input`).
   const helpers = `
@@ -203,6 +203,8 @@ export default async function scenario({ run, sleep, shot }) {
   })()`);
   await sleep(300);
   await snap("06-cobro");
+  // 1e) El certificado de la empresa bajó a la caja al configurarla: firma sin internet.
+  out.signing = await run(`window.pos.state().then((s) => s.signing)`);
   out.pay = await run(`(async () => {
     const modal = document.querySelector('.modal');
     __btn('Dividir el pago', modal).click();
@@ -324,6 +326,12 @@ export default async function scenario({ run, sleep, shot }) {
   await sleep(500);
   await snap("12-bloqueada");
   await sleep(500);
+  // La venta se firmó en la caja ANTES de sincronizar; la nube guardó ese mismo e-CF (mismo código de seguridad).
+  const localCode = /Código de seguridad: (\S{6})/.exec(out.pay.receipt)?.[1] ?? null;
+  const localEncf = /E32\d{10}/.exec(out.pay.receipt)?.[0] ?? null;
+  const listed = (await cloud.call("GET", "/v1/documents?pageSize=50")).data.find((d) => d.encf === localEncf);
+  const cloudDoc = listed ? (await cloud.call("GET", `/v1/documents/${listed.id}`)).data : null;
+  out.localSignature = { localCode, cloudCode: cloudDoc?.ecf?.securityCode ?? null, same: !!localCode && localCode === cloudDoc?.ecf?.securityCode };
   out.receiptSigned = await run(`window.pos.sales({ limit: 50 }).then(async (rows) => {
     const done = rows.filter((r) => r.status === 'SYNCED' && r.type !== 'E34');
     const r = await window.pos.receipt(done[0].id);

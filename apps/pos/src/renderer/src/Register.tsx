@@ -153,6 +153,18 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
           ) : (
             <span className={`badge ${state.requireShift ? "bad" : ""}`}>Sin turno</span>
           )}
+          <span
+            className={`badge ${state.signing.certificate && !state.signing.certificate.problem ? "ok" : ""}`}
+            title={
+              state.signing.certificate
+                ? `${state.signing.certificate.problem ?? "Esta caja firma los comprobantes sin internet"} · ${state.signing.certificate.subject} · vence ${new Date(state.signing.certificate.notAfter).toLocaleDateString("es-DO")}`
+                : state.signing.available
+                  ? "Sin certificado: se instala al sincronizar con una sesión de administrador"
+                  : "Este equipo no tiene almacén seguro: la caja no puede guardar el certificado"
+            }
+          >
+            {state.signing.certificate && !state.signing.certificate.problem ? "Firma local" : "Sin firma local"}
+          </span>
           {state.pendingSales > 0 && <span className="badge warn">{state.pendingSales} por subir</span>}
           {state.shiftErrors.length > 0 && <span className="badge bad" title={state.shiftErrors.join(" · ")}>Turno sin subir</span>}
           {state.rejectedSales > 0 && <span className="badge bad">{state.rejectedSales} rechazadas</span>}
@@ -488,6 +500,7 @@ function ReceiptModal({ receipt, printer, onClose }: { receipt: Receipt; printer
   return (
     <Modal title="Venta registrada" onClose={onClose}>
       <ReceiptView receipt={receipt} />
+      {receipt.signWarning && <p className="notice no-print" role="status">Sin firma en esta venta: {receipt.signWarning}. La nube la firmará al sincronizar.</p>}
       <div className="row no-print">
         <PrintButton printer={printer} thermal={() => window.pos.printReceipt(receipt.sale.id, { reprint: true })} />
         <button className="primary" autoFocus onClick={onClose}>Nueva venta</button>

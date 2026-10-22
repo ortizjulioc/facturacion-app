@@ -29,6 +29,8 @@ if (!smoke && !app.requestSingleInstanceLock()) app.quit();
 
 /** La cookie de sesión se guarda cifrada con el almacén seguro del sistema operativo (DPAPI en Windows). */
 const secretBox: SecretBox = {
+  // La llave privada del certificado solo se guarda si el sistema cifra de verdad (la cookie, en cambio, tolera no cifrarse).
+  available: () => safeStorage.isEncryptionAvailable(),
   encrypt: (plain) =>
     safeStorage.isEncryptionAvailable() ? `enc:${safeStorage.encryptString(plain).toString("base64")}` : plain,
   decrypt: (stored) =>
@@ -74,7 +76,10 @@ function autoPrint(saleId: string) {
   void enqueue(async () => {
     // Con conexión, la nube firma la venta antes de imprimir y el ticket sale con su QR; sin ella (o si tarda) sale sin QR
     // y al reimprimir después de sincronizar ya lo trae.
-    await Promise.race([engine.syncSale(saleId), new Promise((resolve) => setTimeout(resolve, SIGN_WAIT_MS))]).catch(() => false);
+    // Una venta que la propia caja ya firmó (certificado instalado) no espera a la nube.
+    if (!engine.receipt(saleId)?.qr) {
+      await Promise.race([engine.syncSale(saleId), new Promise((resolve) => setTimeout(resolve, SIGN_WAIT_MS))]).catch(() => false);
+    }
     return printBytes(config, receiptBytes(saleId, config, false));
   }).catch((e: unknown) => {
     win?.webContents.send("pos:print-failed", { saleId, message: e instanceof Error ? e.message : String(e) });
@@ -270,8 +275,13 @@ async function runSmoke() {
             const dir = process.env.POS_SHOTS ?? app.getPath("temp");
             const file = join(dir, name + ".png");
             await mkdir(dir, { recursive: true });
-            await writeFile(file, (await w.webContents.capturePage()).toPNG());
-            return file;
+            try {
+              await writeFile(file, (await w.webContents.capturePage()).toPNG());
+              return file;
+            } catch (e) {
+              // Sin pantalla disponible (sesión bloqueada, escritorio remoto cerrado): la verificación sigue sin las capturas.
+              return `sin captura: ${e instanceof Error ? e.message : String(e)}`;
+            }
           },
         });
       }
