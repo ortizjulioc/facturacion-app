@@ -238,6 +238,7 @@ function CompanyForm({
             phone: text("phone"),
             environment: text("environment") as "TEST" | "CERT" | "PROD",
             requireShift: f.get("requireShift") === "on",
+            sendToDgii: f.get("sendToDgii") === "on",
           },
         }),
       );
@@ -334,6 +335,14 @@ function CompanyForm({
         />
         <p className="-mt-2 text-xs text-zinc-500">
           La caja registradora y la facturación con caja no emiten comprobantes si no hay un turno abierto (se abre con el fondo y se cierra con el cuadre).
+        </p>
+        <Checkbox
+          name="sendToDgii"
+          label="Enviar cada comprobante firmado a la DGII automáticamente"
+          defaultChecked={company?.sendToDgii ?? false}
+        />
+        <p className="-mt-2 text-xs text-zinc-500">
+          Necesita el certificado digital cargado y que la empresa esté habilitada como emisor electrónico en el ambiente elegido. Los envíos que fallen por la red se reintentan solos; los demás quedan para revisión.
         </p>
       </fieldset>
       <ErrorNote message={error} />

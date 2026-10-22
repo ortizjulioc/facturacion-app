@@ -26,7 +26,7 @@ import { formatDateTime, money, STATUS_LABELS, statusTone } from "@/lib/format";
 import { useDebounced, useQuery } from "@/lib/use-query";
 
 const PAGE_SIZE = 20;
-const STATUSES = ["DRAFT", "ISSUED", "SENT", "ACCEPTED", "REJECTED"] as const;
+const STATUSES = ["DRAFT", "ISSUED", "SENT", "ACCEPTED", "ACCEPTED_CONDITIONAL", "REJECTED"] as const;
 
 export function FacturasView({ initialStatus = "" }: { initialStatus?: string }) {
   const router = useRouter();

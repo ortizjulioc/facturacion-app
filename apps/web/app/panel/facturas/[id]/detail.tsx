@@ -111,6 +111,49 @@ export function InvoiceDetail({ id }: { id: string }) {
                   <Button variant="secondary" onClick={() => window.print()}>
                     Imprimir
                   </Button>
+                  {canManage && doc.ecf && !doc.fiscal && !doc.fiscalBlock && (
+                    <Button
+                      variant="secondary"
+                      disabled={busy}
+                      onClick={() =>
+                        run(async () => {
+                          await unwrap(await api.v1.documents[":id"].send.$post({ param: { id: doc.id } }));
+                          toast("Comprobante en cola para la DGII");
+                          reload();
+                        })
+                      }
+                    >
+                      Enviar a la DGII
+                    </Button>
+                  )}
+                  {canManage && doc.fiscal && doc.fiscal.state === "FAILED" && (
+                    <Button
+                      variant="secondary"
+                      disabled={busy}
+                      onClick={() =>
+                        run(async () => {
+                          await unwrap(await api.v1.documents[":id"].send.$post({ param: { id: doc.id } }));
+                          reload();
+                        })
+                      }
+                    >
+                      Reintentar envío
+                    </Button>
+                  )}
+                  {canManage && doc.fiscal && (doc.fiscal.state === "PENDING" || doc.fiscal.state === "SENT") && (
+                    <Button
+                      variant="secondary"
+                      disabled={busy}
+                      onClick={() =>
+                        run(async () => {
+                          await unwrap(await api.v1.documents[":id"].fiscal.refresh.$post({ param: { id: doc.id } }));
+                          reload();
+                        })
+                      }
+                    >
+                      Consultar ahora
+                    </Button>
+                  )}
                   {!doc.ecf && canManage && doc.currency === "DOP" && (
                     <Button
                       variant="secondary"
@@ -280,6 +323,37 @@ export function InvoiceDetail({ id }: { id: string }) {
             </div>
           </div>
         </div>
+        {(doc.fiscal || doc.fiscalBlock) && !draft && (
+          <section className="no-print space-y-1 rounded-md border border-zinc-200 p-3 text-sm dark:border-zinc-800">
+            <p className="text-xs uppercase tracking-wide text-zinc-500">Envío a la DGII</p>
+            {doc.fiscal ? (
+              <>
+                <p>
+                  <Badge tone={doc.fiscal.state === "FAILED" || doc.status === "REJECTED" ? "warning" : doc.fiscal.state === "DONE" ? "success" : "neutral"}>
+                    {fiscalLabel(doc.fiscal.state, doc.fiscal.dgiiStatus)}
+                  </Badge>
+                  {doc.fiscal.trackId && <span className="ml-2 font-mono text-xs text-zinc-500">TrackId {doc.fiscal.trackId}</span>}
+                </p>
+                {doc.fiscal.messages.map((m, i) => (
+                  <p key={i} className="text-zinc-600 dark:text-zinc-400">
+                    {m.text}
+                  </p>
+                ))}
+                {doc.fiscal.lastError && <p className="text-amber-700 dark:text-amber-300">{doc.fiscal.lastError}</p>}
+                {doc.status === "REJECTED" && doc.fiscal.sequenceUsed !== null && (
+                  <p className="text-zinc-600 dark:text-zinc-400">
+                    {doc.fiscal.sequenceUsed ? "El e-NCF quedó gastado: emite un comprobante nuevo." : "El e-NCF no se gastó: se puede reutilizar."}
+                  </p>
+                )}
+                {(doc.fiscal.state === "PENDING" || doc.fiscal.state === "SENT") && doc.fiscal.attempts > 0 && (
+                  <p className="text-zinc-500">Intentos: {doc.fiscal.attempts} · próximo {formatDateTime(doc.fiscal.nextAttemptAt)}</p>
+                )}
+              </>
+            ) : (
+              <p className="text-zinc-600 dark:text-zinc-400">{doc.fiscalBlock}</p>
+            )}
+          </section>
+        )}
         {doc.ecf && (
           <footer className="flex items-center gap-4 border-t border-zinc-200 pt-4 text-sm dark:border-zinc-800">
             {doc.ecf.qrUrl && <QrCode text={doc.ecf.qrUrl} label="Código QR para verificar el comprobante en la DGII" />}
@@ -325,6 +399,9 @@ export function InvoiceDetail({ id }: { id: string }) {
     </>
   );
 }
+
+const fiscalLabel = (state: string, dgii: string | null) =>
+  state === "PENDING" ? "En cola para enviar" : state === "SENT" ? "Enviado: esperando resultado" : state === "FAILED" ? "Requiere revisión" : (dgii ?? "Resultado recibido");
 
 function Line({ label, value }: { label: string; value: string }) {
   return (
