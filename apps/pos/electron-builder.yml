@@ -21,9 +21,8 @@ win:
     - target: nsis
       arch: x64
   icon: assets/icon.ico
-  # Sin firma de código por ahora (ver la guía): Windows mostrará «editor desconocido» al instalar.
+  # Firma de código: la activan las variables CSC_LINK y CSC_KEY_PASSWORD (ver scripts/dist.mjs y la guía). Sin ellas, sin firma.
   signAndEditExecutable: true
-  signExecutable: false
 
 nsis:
   oneClick: true
