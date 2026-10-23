@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createPrisma, withTenant } from "@facturacion/db";
 import { toCents, verifyPin } from "@facturacion/core";
-import { buildAcecf, buildEcf, loadCertificate, securityCodeOf, signEcf, signReply, verifyEcfSignature, type EcfCertificate } from "@facturacion/ecf";
+import { buildAcecf, buildEcf, loadCertificate, securityCodeOf, signEcf, signReply, signXml, verifyEcfSignature, type EcfCertificate } from "@facturacion/ecf";
 import { testP12 } from "@facturacion/ecf/testing";
 import { PosEngine, type FetchLike } from "@facturacion/pos-engine";
 import { createApp } from "./app";
@@ -14,6 +14,7 @@ import { loadEnv } from "./env";
 import { createLogger } from "./logger";
 import { MAX_SEND_ATTEMPTS, processDue } from "./lib/fiscal";
 import { processApprovals } from "./lib/receiver";
+import { exchangeSeed, issueSeed, SeedStore, verifyToken } from "./lib/receiver-auth";
 import { open } from "./lib/secrets";
 
 const hasDb = Boolean(process.env.DATABASE_URL && process.env.BETTER_AUTH_SECRET);
@@ -22,7 +23,15 @@ type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-ex
 
 /** Flujo completo contra Postgres real: registro → empresa → catálogo → aislamiento → roles. */
 describe.skipIf(!hasDb)("API de punta a punta", () => {
-  const env = loadEnv({ ...process.env, NODE_ENV: "test", LOG_LEVEL: "error" });
+  // Los servicios públicos /fe llevan límite de uso: aquí es holgado para no estorbar a las demás pruebas (el límite se prueba aparte).
+  const env = loadEnv({
+    ...process.env,
+    NODE_ENV: "test",
+    LOG_LEVEL: "error",
+    FE_RATE_LIMIT_PER_MINUTE: "100000",
+    FE_RATE_LIMIT_PER_RNC_PER_MINUTE: "100000",
+    FE_AUTH_RATE_LIMIT_PER_MINUTE: "100000",
+  });
   const prisma = createPrisma({ connectionString: env.DATABASE_URL, max: 3 });
 
   /** Una DGII de mentira: autentica, recibe e-CF (guarda lo recibido) y responde consultas según lo que cada prueba prepare. */
@@ -5923,6 +5932,209 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       expect(await list(b, "?decision=rejected")).toHaveLength(0);
       expect(await list(b, `?q=${first.encf}`)).toHaveLength(1);
       expect(await list(b, "?q=proveedor")).toHaveLength(2);
+    });
+
+    // ───────────── Endurecimiento de los servicios públicos ─────────────
+
+    describe("límites y autenticación de /fe", () => {
+      /** La misma API con otros límites (cada instancia lleva su propio contador). */
+      const appWith = (over: Partial<typeof env>) => createApp({ env: { ...env, ...over }, prisma, auth: createAuth(prisma, env), logger: createLogger(env) });
+      const post1 = (a: ReturnType<typeof appWith>, path: string, body: string, headers: Record<string, string> = {}) =>
+        a.request(path, { method: "POST", headers: { "content-type": "application/xml", ...headers }, body });
+      const multipart = (xml: string) => {
+        const form = new FormData();
+        form.append("xml", new Blob([xml], { type: "text/xml" }), "documento.xml");
+        return form;
+      };
+      const authCert = (serial: string, over: Parameters<typeof testP12>[0] = {}) => loadCertificate(...(Object.values(testP12({ cn: "PROVEEDOR", serialNumber: serial, ...over })) as [Uint8Array, string]));
+      const supplierAuth = authCert("IDCDO-101672919");
+
+      /** Pide una semilla, la firma con `cert` y la cambia por un token. */
+      async function login(a: ReturnType<typeof appWith>, cert: EcfCertificate = supplierAuth) {
+        const seed = await (await a.request("/fe/autenticacion/api/semilla")).text();
+        const res = await a.request("/fe/autenticacion/api/validacioncertificado", { method: "POST", body: multipart(signXml(seed.replace(/^<\?xml[^>]*\?>/, ""), cert)) });
+        return { res, seed };
+      }
+      const j = async (r: Response) => (await r.json()) as Json;
+      const requireAuth = async (b: Comprador) => expect((await send("PUT", "/v1/company", { ...profileBody, rnc: b.rnc, requireReceiverAuth: true }, b.cookie)).status).toBe(200);
+
+      it("limita los pedidos por dirección (429 con Retry-After) e ignora X-Forwarded-For si no hay proxy de confianza", async () => {
+        const a = appWith({ FE_RATE_LIMIT_PER_MINUTE: 3 });
+        for (let i = 0; i < 3; i++) expect((await post1(a, "/fe/recepcion/api/ecf", "x", { "x-forwarded-for": `10.0.0.${i}` })).status).toBe(400);
+        const blocked = await post1(a, "/fe/recepcion/api/ecf", "x", { "x-forwarded-for": "10.9.9.9" });
+        expect(blocked.status).toBe(429);
+        expect(Number(blocked.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+        expect((await j(blocked)).error).toMatch(/Demasiados pedidos/);
+        // También la aprobación comercial y la autenticación comparten el límite de recepción o el suyo.
+        expect((await post1(a, "/fe/aprobacioncomercial/api/ecf", "x")).status).toBe(429);
+      });
+
+      it("con proxy de confianza cuenta cada dirección real por separado", async () => {
+        const a = appWith({ FE_RATE_LIMIT_PER_MINUTE: 2, TRUST_PROXY: "true" });
+        const as = (ip: string) => post1(a, "/fe/recepcion/api/ecf", "x", { "x-forwarded-for": `${ip}, 172.16.0.1` });
+        expect((await as("203.0.113.1")).status).toBe(400);
+        expect((await as("203.0.113.1")).status).toBe(400);
+        expect((await as("203.0.113.1")).status).toBe(429);
+        expect((await as("203.0.113.2")).status).toBe(400); // otra dirección: su propio contador
+      });
+
+      it("limita lo que recibe cada empresa, sin afectar a las demás", async () => {
+        const a = appWith({ FE_RATE_LIMIT_PER_RNC_PER_MINUTE: 2 });
+        const x = await comprador("rxfe1");
+        const y = await comprador("rxfe2");
+        const sendTo = (b: Comprador) => a.request("/fe/recepcion/api/ecf", { method: "POST", body: multipart(invoice(b).xml) });
+        expect((await sendTo(x)).status).toBe(200);
+        expect((await sendTo(x)).status).toBe(200);
+        expect((await sendTo(x)).status).toBe(429);
+        expect((await sendTo(y)).status).toBe(200);
+        expect(await list(x)).toHaveLength(2);
+      });
+
+      it("rechaza lo demasiado grande, de otro tipo de contenido, con DOCTYPE o ENTITY", async () => {
+        const a = appWith({});
+        const big = await post1(a, "/fe/recepcion/api/ecf", "x".repeat(6_200_000));
+        expect(big.status).toBe(413);
+        const json = await a.request("/fe/recepcion/api/ecf", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+        expect(json.status).toBe(415);
+        const plain = await a.request("/fe/aprobacioncomercial/api/ecf", { method: "POST", headers: { "content-type": "text/plain" }, body: "x" });
+        expect(plain.status).toBe(415);
+
+        const lol = '<?xml version="1.0"?><!DOCTYPE ECF [<!ENTITY a "aaaaaaaaaa"><!ENTITY b "&a;&a;&a;&a;&a;">]><ECF>&b;</ECF>';
+        const doctype = await post1(a, "/fe/recepcion/api/ecf", lol);
+        expect(doctype.status).toBe(400);
+        expect((await j(doctype)).error).toMatch(/DOCTYPE/);
+        expect((await post1(a, "/fe/aprobacioncomercial/api/ecf", lol)).status).toBe(400);
+        const seed = await a.request("/fe/autenticacion/api/validacioncertificado", { method: "POST", headers: { "content-type": "application/xml" }, body: lol });
+        expect(seed.status).toBe(400);
+      });
+
+      it("limita las semillas y los tokens por dirección, con un contador aparte", async () => {
+        const a = appWith({ FE_AUTH_RATE_LIMIT_PER_MINUTE: 2 });
+        expect((await a.request("/fe/autenticacion/api/semilla")).status).toBe(200);
+        expect((await a.request("/fe/autenticacion/api/semilla")).status).toBe(200);
+        expect((await a.request("/fe/autenticacion/api/semilla")).status).toBe(429);
+        expect((await post1(a, "/fe/recepcion/api/ecf", "x")).status).toBe(400); // la recepción sigue disponible
+      });
+
+      it("cambia una semilla firmada por un token, y solo una vez", async () => {
+        const a = appWith({});
+        const seed = await (await a.request("/fe/autenticacion/api/semilla")).text();
+        expect(seed).toMatch(/<SemillaModel[^>]*><valor>[^<]+<\/valor><fecha>/);
+        const { res } = await login(a);
+        expect(res.status, await res.clone().text()).toBe(200);
+        const body = await j(res);
+        expect(body.token).toBeTruthy();
+        expect(body.expira).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+        expect(new Date(body.expira).getTime() - new Date(body.expedido).getTime()).toBe(3_600_000);
+        expect(verifyToken(env, body.token)).toEqual({ rnc: "101672919" });
+
+        // En XML si se pide.
+        const xmlSeed = await (await a.request("/fe/autenticacion/api/semilla")).text();
+        const asXml = await a.request("/fe/autenticacion/api/validacioncertificado", { method: "POST", headers: { accept: "application/xml" }, body: multipart(signXml(xmlSeed.replace(/^<\?xml[^>]*\?>/, ""), supplierAuth)) });
+        expect(await asXml.text()).toMatch(/<RespuestaAutenticacion><token>.+<\/token><expira>.+<\/expira><expedido>.+<\/expedido><\/RespuestaAutenticacion>/);
+
+        // La misma semilla firmada no sirve dos veces.
+        const signed = signXml(seed.replace(/^<\?xml[^>]*\?>/, ""), supplierAuth);
+        const once = await a.request("/fe/autenticacion/api/validacioncertificado", { method: "POST", body: multipart(signed) });
+        expect(once.status).toBe(200);
+        const twice = await a.request("/fe/autenticacion/api/validacioncertificado", { method: "POST", body: multipart(signed) });
+        expect(twice.status).toBe(400);
+        expect((await j(twice)).error).toMatch(/ya se usó/);
+      });
+
+      it("no da token por una semilla sin firmar, ajena, alterada, vencida ni con un certificado que no sirve", async () => {
+        const a = appWith({});
+        const exchange = async (xml: string) => a.request("/fe/autenticacion/api/validacioncertificado", { method: "POST", body: multipart(xml) });
+        const fresh = async () => (await (await a.request("/fe/autenticacion/api/semilla")).text()).replace(/^<\?xml[^>]*\?>/, "");
+        const reason = async (res: Response) => ((await res.json()) as { error: string }).error;
+
+        const unsigned = await exchange(await fresh());
+        expect(unsigned.status).toBe(400);
+        expect(await reason(unsigned)).toMatch(/firma/);
+
+        const foreign = '<SemillaModel><valor>inventada.9999999999999.abc</valor><fecha>x</fecha></SemillaModel>';
+        expect(await reason(await exchange(signXml(foreign, supplierAuth)))).toMatch(/no fue emitida/);
+
+        const tampered = signXml(await fresh(), supplierAuth).replace(/<valor>([^<.]+)/, "<valor>X$1");
+        expect((await exchange(tampered)).status).toBe(400);
+
+        const old = issueSeed(env, Date.now() - 10 * 60_000).replace(/^<\?xml[^>]*\?>/, "");
+        expect(await reason(await exchange(signXml(old, supplierAuth)))).toMatch(/venció/);
+
+        const expired = authCert("101672919", { notBefore: new Date("2020-01-01"), notAfter: new Date("2021-01-01") });
+        expect(await reason(await exchange(signXml(await fresh(), expired)))).toMatch(/vencido/);
+
+        const anonymous = loadCertificate(...(Object.values(testP12({ cn: "SIN IDENTIFICAR" })) as [Uint8Array, string]));
+        expect(await reason(await exchange(signXml(await fresh(), anonymous)))).toMatch(/no identifica/);
+
+        expect((await exchange("esto no es xml")).status).toBe(400);
+        expect((await exchange("<Otro/>")).status).toBe(400);
+      });
+
+      it("una empresa que exige autenticación solo recibe de quien se autentica con el certificado del emisor", async () => {
+        const a = appWith({});
+        const b = await comprador("rxfe3");
+        await requireAuth(b);
+        const post = (xml: string, token?: string) => a.request("/fe/recepcion/api/ecf", { method: "POST", headers: token ? { authorization: `bearer ${token}` } : {}, body: multipart(xml) });
+
+        const anonymous = await post(invoice(b).xml);
+        expect(anonymous.status).toBe(401);
+        expect((await j(anonymous)).error).toMatch(/exige autenticación/);
+        expect(await list(b)).toHaveLength(0);
+
+        const { token } = await j((await login(a)).res);
+        const ok = await post(invoice(b).xml, token);
+        expect(ok.status).toBe(200);
+        expect(estado(await ok.text())).toBe("0");
+        expect(await list(b)).toHaveLength(1);
+
+        // El certificado es de otro contribuyente: no puede mandar el e-CF del proveedor.
+        const other = await j((await login(a, authCert("IDCDO-131246796"))).res);
+        const forged = await post(invoice(b).xml, other.token);
+        expect(forged.status).toBe(403);
+        expect((await j(forged)).error).toMatch(/no corresponde al emisor/);
+
+        // Un token inválido, alterado o vencido se rechaza siempre.
+        expect((await post(invoice(b).xml, "basura")).status).toBe(401);
+        expect((await post(invoice(b).xml, token.slice(0, -2) + "xx")).status).toBe(401);
+        const past = Date.now() - 3 * 3_600_000;
+        const oldSeed = issueSeed(env, past).replace(/^<\?xml[^>]*\?>/, "");
+        const old = exchangeSeed(env, signXml(oldSeed, supplierAuth), new SeedStore(), past);
+        expect(old.ok).toBe(true);
+        expect((await post(invoice(b).xml, old.ok ? old.token : "")).status).toBe(401);
+        expect(await list(b)).toHaveLength(1);
+      });
+
+      it("sin la opción activada nadie necesita autenticarse, pero un token inválido igual se rechaza", async () => {
+        const a = appWith({});
+        const b = await comprador("rxfe4");
+        const post = (xml: string, token?: string) => a.request("/fe/recepcion/api/ecf", { method: "POST", headers: token ? { authorization: `bearer ${token}` } : {}, body: multipart(xml) });
+        expect((await post(invoice(b).xml)).status).toBe(200);
+        expect((await post(invoice(b).xml, "basura")).status).toBe(401);
+        // Con token válido de otro RNC también se rechaza: el token identifica a quien envía.
+        const other = await j((await login(a, authCert("IDCDO-131246796"))).res);
+        expect((await post(invoice(b).xml, other.token)).status).toBe(403);
+      });
+
+      it("la aprobación comercial de un cliente también exige autenticación y que el certificado sea el del comprador", async () => {
+        const a = appWith({});
+        const rnc = newRnc();
+        const e = await billing("rxfe5", { seqs: [["E31", 1, 10]], profile: false });
+        expect((await send("PUT", "/v1/company", { ...profileBody, rnc, requireReceiverAuth: true }, e.cookie)).status).toBe(200);
+        const cust = (await json(await post("/v1/customers", { name: "Cliente Fiscal", documentType: "RNC", documentNumber: "131246796" }, e.cookie))).data;
+        const doc = (await json(await issue(e, (await createDraft(e, { type: "E31", customerId: cust.id })).id))).data;
+        const clientCert = authCert("IDCDO-131246796");
+        const xml = signReply(buildAcecf({ sellerRnc: rnc, buyerRnc: "131246796", encf: doc.encf, issuedOn: "22-10-2026", total: toCents("236.00"), approved: true, at: new Date() }), clientCert, "ACECF");
+        const send1 = (token?: string) => a.request("/fe/aprobacioncomercial/api/ecf", { method: "POST", headers: token ? { authorization: `bearer ${token}` } : {}, body: multipart(xml) });
+
+        expect((await send1()).status).toBe(401);
+        const wrong = await j((await login(a, supplierAuth)).res); // el RNC del proveedor no es el del comprador
+        expect((await send1(wrong.token)).status).toBe(403);
+        const right = await j((await login(a, clientCert)).res);
+        const ok = await send1(right.token);
+        expect(ok.status).toBe(200);
+        expect((await json(await get(`/v1/documents/${doc.id}`, e.cookie))).data.approval).toMatchObject({ approved: true });
+      });
     });
 
     // ───────────── Registrar como compra ─────────────

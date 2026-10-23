@@ -9,7 +9,7 @@ import { categories } from "./routes/categories";
 import { company } from "./routes/company";
 import { customers } from "./routes/customers";
 import { documents } from "./routes/documents";
-import { fe } from "./routes/fe";
+import { createFe } from "./routes/fe";
 import { fiscal } from "./routes/fiscal";
 import { received } from "./routes/received";
 import { inventory } from "./routes/inventory";
@@ -70,7 +70,7 @@ export function createApp(deps: Deps) {
       await prisma.$queryRaw`SELECT 1`;
       return c.json({ status: "ready" });
     })
-    .route("/fe", fe)
+    .route("/fe", createFe())
     .on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw))
     .get("/v1/me", async (c) => {
       const session = await auth.api.getSession({ headers: c.req.raw.headers });

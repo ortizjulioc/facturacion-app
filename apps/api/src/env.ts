@@ -19,6 +19,16 @@ const schema = z.object({
   CERT_ENCRYPTION_KEY: z.string().optional(),
   /** Trabajador que envía los e-CF a la DGII y consulta sus resultados (se apaga con "false", p. ej. en una réplica). */
   FISCAL_WORKER: z.enum(["true", "false"]).default("true"),
+  /**
+   * "true" si la API está detrás de un proxy de confianza (Traefik/Dokploy): la dirección del cliente se toma de
+   * X-Forwarded-For. Con "false" ese encabezado se ignora (cualquiera podría falsearlo para saltarse el límite de uso).
+   */
+  TRUST_PROXY: z.enum(["true", "false"]).default("false"),
+  /** Límite de uso de los servicios públicos /fe: pedidos por minuto, por dirección y por empresa destinataria. */
+  FE_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).default(60),
+  FE_RATE_LIMIT_PER_RNC_PER_MINUTE: z.coerce.number().int().min(1).default(300),
+  /** Pedidos por minuto y dirección a la autenticación (semillas y tokens). */
+  FE_AUTH_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).default(20),
 }).superRefine((v, ctx) => {
   if (v.NODE_ENV === "production" && !v.CERT_ENCRYPTION_KEY) {
     ctx.addIssue({ code: "custom", path: ["CERT_ENCRYPTION_KEY"], message: "Es obligatoria en producción" });

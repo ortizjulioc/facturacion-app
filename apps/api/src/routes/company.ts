@@ -24,6 +24,8 @@ const companyInput = z.object({
   requireShift: z.boolean().optional(),
   /** Enviar cada e-CF firmado a la DGII de forma automática. */
   sendToDgii: z.boolean().optional(),
+  /** Exigir autenticación (semilla firmada) a quien nos envía e-CF o aprobaciones comerciales. */
+  requireReceiverAuth: z.boolean().optional(),
 });
 
 /** El .p12 viaja en base64 dentro del JSON (pesa unos pocos KB). */

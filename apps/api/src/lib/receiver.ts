@@ -30,13 +30,20 @@ const LOCK_SECONDS = 120;
  * La empresa que tiene ese RNC, para los servicios públicos que reciben un documento sin sesión. Solo lee los datos
  * fiscales (política `receiver_lookup`). null si no hay ninguna o hay más de una (no se puede saber de quién es).
  */
-export async function organizationByRnc(prisma: DbClient, rnc: string): Promise<string | null> {
+export async function organizationByRnc(prisma: DbClient, rnc: string): Promise<{ organizationId: string; requireAuth: boolean } | null> {
   const rows = await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT set_config('app.system', 'receiver', TRUE)`;
-    return tx.companyProfile.findMany({ where: { rnc }, select: { organizationId: true }, take: 2 });
+    return tx.companyProfile.findMany({ where: { rnc }, select: { organizationId: true, requireReceiverAuth: true }, take: 2 });
   });
-  return rows.length === 1 ? rows[0]!.organizationId : null;
+  return rows.length === 1 ? { organizationId: rows[0]!.organizationId, requireAuth: rows[0]!.requireReceiverAuth } : null;
 }
+
+/** Quien llama a un servicio público: si se autenticó (token válido) y con qué RNC (el de su certificado). */
+export type Caller = { authenticated: boolean; rnc: string | null };
+export const ANONYMOUS: Caller = { authenticated: false, rnc: null };
+
+/** XML con una declaración DOCTYPE o ENTITY: se rechaza sin leerlo (expansión de entidades, entidades externas). */
+export const isUnsafeXml = (xml: string) => /<!DOCTYPE|<!ENTITY/i.test(xml);
 
 /** «dd-MM-AAAA» → fecha (a medianoche UTC, para guardarla como DATE). */
 export function parseDmy(s: string): Date {
@@ -55,8 +62,9 @@ export type ReceiveOutcome = { status: number; xml: string } | { status: number;
  * de recibo firmado. Si el comprobante no se puede dar por recibido se contesta igual, con el motivo; solo cuando ni
  * siquiera se puede saber de quién es (o la empresa no tiene certificado para firmar el acuse) la respuesta es un error HTTP.
  */
-export async function receiveEcf(deps: FiscalDeps, xml: string, now: Date = new Date()): Promise<ReceiveOutcome> {
+export async function receiveEcf(deps: FiscalDeps, xml: string, now: Date = new Date(), caller: Caller = ANONYMOUS): Promise<ReceiveOutcome> {
   if (Buffer.byteLength(xml) > MAX_XML_BYTES) return { status: 400, error: "Archivo no válido: es demasiado grande" };
+  if (isUnsafeXml(xml)) return { status: 400, error: "Archivo no válido: no se admiten declaraciones DOCTYPE ni ENTITY" };
   const inspection = inspectIncomingEcf(xml);
   const read = inspection.ok
     ? { sellerRnc: inspection.facts.sellerRnc, buyerRnc: inspection.facts.buyerRnc, encf: inspection.facts.encf }
@@ -64,8 +72,16 @@ export async function receiveEcf(deps: FiscalDeps, xml: string, now: Date = new 
   if (!read.buyerRnc) return { status: 400, error: "No se pudo identificar al comprador del e-CF" };
   if (!read.sellerRnc || !read.encf) return { status: 400, error: "La estructura del archivo XML no es válida" };
 
-  const organizationId = await organizationByRnc(deps.prisma, read.buyerRnc);
-  if (!organizationId) return { status: 400, error: "El RNC del comprador no corresponde a ninguna empresa de este sistema" };
+  const target = await organizationByRnc(deps.prisma, read.buyerRnc);
+  if (!target) return { status: 400, error: "El RNC del comprador no corresponde a ninguna empresa de este sistema" };
+  const { organizationId } = target;
+  if (target.requireAuth && !caller.authenticated) {
+    return { status: 401, error: "Este receptor exige autenticación: pide una semilla, fírmala con tu certificado y cámbiala por un token" };
+  }
+  // Quien se autentica solo puede enviar sus propios comprobantes: el RNC de su certificado es el del emisor.
+  if (caller.authenticated && caller.rnc !== read.sellerRnc) {
+    return { status: 403, error: "El certificado con el que te autenticaste no corresponde al emisor del e-CF" };
+  }
 
   return tenantTransaction(deps.prisma, organizationId, async (tx): Promise<ReceiveOutcome> => {
     const cert = await loadSigner(tx, deps.env, organizationId);
@@ -298,14 +314,22 @@ const refused = (message: string): ApprovalReceipt => ({ status: 400, body: { me
  * Servicio de aprobación comercial: un cliente al que le emitimos un e-CF nos manda su aprobación o rechazo. Se guarda
  * junto al comprobante (que sigue congelado). Mensajes y códigos según «Descripción Técnica Servicios DGII».
  */
-export async function receiveApproval(deps: FiscalDeps, xml: string, now: Date = new Date()): Promise<ApprovalReceipt> {
-  if (Buffer.byteLength(xml) > MAX_XML_BYTES) return refused("Archivo no válido");
+export async function receiveApproval(deps: FiscalDeps, xml: string, now: Date = new Date(), caller: Caller = ANONYMOUS): Promise<ApprovalReceipt> {
+  if (Buffer.byteLength(xml) > MAX_XML_BYTES || isUnsafeXml(xml)) return refused("Archivo no válido");
   const r = inspectIncomingApproval(xml);
   if (!r.ok) return refused(r.error.startsWith("La estructura") ? r.error : "Tipo de archivo no válido, favor proveer un XML");
   if (!r.signatureValid) return refused("La firma del XML no es válida");
   const f = r.facts;
-  const organizationId = await organizationByRnc(deps.prisma, f.sellerRnc);
-  if (!organizationId) return refused("No se encuentra un e-CF válido para esta aprobación comercial");
+  const target = await organizationByRnc(deps.prisma, f.sellerRnc);
+  if (!target) return refused("No se encuentra un e-CF válido para esta aprobación comercial");
+  const { organizationId } = target;
+  if (target.requireAuth && !caller.authenticated) {
+    return { status: 401, body: { mensaje: ["Este receptor exige autenticación"], estado: "Aprobación comercial rechazada", codigo: "2" } };
+  }
+  // Quien se autentica solo puede responder por sí mismo: el RNC de su certificado es el del comprador.
+  if (caller.authenticated && caller.rnc !== f.buyerRnc) {
+    return { status: 403, body: { mensaje: ["El certificado con el que te autenticaste no corresponde al comprador"], estado: "Aprobación comercial rechazada", codigo: "2" } };
+  }
 
   return tenantTransaction(deps.prisma, organizationId, async (tx): Promise<ApprovalReceipt> => {
     const doc = await tx.document.findFirst({ where: { encf: f.encf, status: { not: "DRAFT" } }, select: { id: true, type: true, total: true, buyerDocNumber: true } });
