@@ -24,6 +24,7 @@ import { useDialogs } from "@/components/dialogs";
 import { usePanel } from "@/components/panel-context";
 import { api, errorMessage, unwrap } from "@/lib/api";
 import { useQuery } from "@/lib/use-query";
+import { AnnulDialog, AnnulmentHistory } from "./annulments";
 import { CertificateCard } from "./certificate-card";
 
 const ENVIRONMENTS = [
@@ -49,6 +50,8 @@ export function FiscalView() {
   const { toast } = useDialogs();
   const { data, error, reload } = useQuery(loadFiscal);
   const [sequenceModal, setSequenceModal] = useState(false);
+  const [annulTarget, setAnnulTarget] = useState<Sequence | null>(null);
+  const [annulTick, setAnnulTick] = useState(0);
   const [actionError, setActionError] = useState<string | null>(null);
 
   async function toggleSequence(s: Sequence) {
@@ -166,6 +169,11 @@ export function FiscalView() {
                         <Button variant="ghost" onClick={() => toggleSequence(s)}>
                           {s.active ? "Desactivar" : "Activar"}
                         </Button>
+                        {s.remaining > 0 && !s.offline && (
+                          <Button variant="ghost" onClick={() => setAnnulTarget(s)}>
+                            Anular sobrantes
+                          </Button>
+                        )}
                       </td>
                     )}
                   </tr>
@@ -181,6 +189,18 @@ export function FiscalView() {
           {!data && !error && <EmptyState>Cargando…</EmptyState>}
         </div>
       </section>
+
+      {canManage && <AnnulmentHistory refreshKey={annulTick} />}
+
+      <AnnulDialog
+        sequence={annulTarget}
+        onClose={() => setAnnulTarget(null)}
+        onDone={() => {
+          setAnnulTarget(null);
+          setAnnulTick((n) => n + 1);
+          reload();
+        }}
+      />
 
       <Modal
         open={sequenceModal}
