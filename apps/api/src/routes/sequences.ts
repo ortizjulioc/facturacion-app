@@ -3,6 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { ALL_ECF_TYPES } from "@facturacion/core";
 import type { Prisma } from "@facturacion/db";
+import { annulUnused, cancelStale } from "../lib/annulment";
 import { auditEntry } from "../lib/audit";
 import { uuidParam } from "../lib/schemas";
 import { zv } from "../lib/validator";
@@ -21,6 +22,8 @@ export const sequenceDto = (s: SequenceRow) => ({
   remaining: Number(s.toNumber - s.nextNumber + 1n),
   expiresAt: s.expiresAt.toISOString().slice(0, 10),
   terminalId: s.terminalId,
+  /** Bloque entregado a una caja sin conexión (no se anula desde la nube). */
+  offline: s.offline,
   active: s.active,
 });
 
@@ -48,12 +51,62 @@ const updateSequence = z.object({
 
 const canWrite = requireRole("owner", "admin");
 
+type AnnulmentRow = Prisma.SequenceAnnulmentGetPayload<object>;
+const annulmentDto = (a: AnnulmentRow) => ({
+  id: a.id,
+  sequenceId: a.sequenceId,
+  ecfType: a.ecfType,
+  fromNumber: Number(a.fromNumber),
+  toNumber: Number(a.toNumber),
+  count: a.count,
+  state: a.state,
+  messages: (a.responseMessages ?? []) as string[],
+  error: a.error,
+  createdAt: a.createdAt,
+  completedAt: a.completedAt,
+});
+
+const annulBody = z.object({
+  sequenceId: z.uuid(),
+  /** Primer y último número a anular; por omisión, todo lo que queda sin usar de la secuencia. */
+  from: number10.nullish(),
+  to: number10.nullish(),
+});
+
 export const sequences = new Hono<AppEnv>()
   .get("/", async (c) => {
     const rows = await c.get("db").sequence.findMany({
       orderBy: [{ ecfType: "asc" }, { fromNumber: "asc" }],
     });
     return c.json({ data: rows.map(sequenceDto) });
+  })
+  // Anulaciones de rangos de e-NCF ante la DGII (constancia).
+  .get("/annulments", canWrite, async (c) => {
+    const rows = await c.get("db").sequenceAnnulment.findMany({ orderBy: { createdAt: "desc" }, take: 100 });
+    return c.json({ data: rows.map(annulmentDto) });
+  })
+  // Anula ante la DGII los números sin usar de una secuencia (el inicio o el final de lo que queda).
+  .post("/annulments", canWrite, zv("json", annulBody), async (c) => {
+    const input = c.req.valid("json");
+    const deps = c.get("deps");
+    const row = await annulUnused(
+      { env: deps.env, prisma: deps.prisma, logger: deps.logger, ...(deps.fiscalFetch ? { fetch: deps.fiscalFetch } : {}) },
+      c.get("organizationId"),
+      c.get("user").id,
+      { sequenceId: input.sequenceId, from: input.from == null ? null : BigInt(input.from), to: input.to == null ? null : BigInt(input.to) },
+    );
+    // Si la DGII la rechazó, se responde igual (con su motivo y estado FAILED): la secuencia no cambió.
+    return c.json({ data: annulmentDto(row) }, row.state === "DONE" ? 201 : 200);
+  })
+  .post("/annulments/:id/cancel", canWrite, zv("param", uuidParam), async (c) => {
+    const deps = c.get("deps");
+    const row = await cancelStale(
+      { env: deps.env, prisma: deps.prisma, logger: deps.logger },
+      c.get("organizationId"),
+      c.get("user").id,
+      c.req.valid("param").id,
+    );
+    return c.json({ data: annulmentDto(row) });
   })
   .post("/", canWrite, zv("json", createSequence), async (c) => {
     const input = c.req.valid("json");

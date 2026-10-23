@@ -47,6 +47,10 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     dgiiApprovals: [] as { name: string; xml: string }[],
     peerFails: [] as (() => Response)[],
     dgiiApprovalFails: [] as (() => Response)[],
+    /** Anulaciones de rangos de e-NCF recibidas, y cómo contestar la próxima (por omisión: anulado). */
+    annulments: [] as { name: string; xml: string }[],
+    annulFails: [] as (() => Response)[],
+    onAnnul: null as null | (() => Promise<void>),
     summaryHandlers: new Map<string, Json | (() => Json)>(),
     /** Respuestas que se dan, una por envío, en vez de aceptar el e-CF. */
     receptionFails: [] as (() => Response)[],
@@ -64,6 +68,9 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       this.dgiiApprovals = [];
       this.peerFails = [];
       this.dgiiApprovalFails = [];
+      this.annulments = [];
+      this.annulFails = [];
+      this.onAnnul = null;
       this.summaryHandlers = new Map();
       this.receptionFails = [];
       this.handlers = new Map();
@@ -88,6 +95,14 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
         const file = (init!.body as FormData).get("xml") as File;
         dgii.peerApprovals.push({ url: url.host + url.pathname, name: file.name, xml: await file.text() });
         return new Response("", { status: 200 });
+      }
+      if (method === "POST" && url.pathname.endsWith("/anulacionrangos/api/operaciones/anularrango")) {
+        await dgii.onAnnul?.();
+        const fail = dgii.annulFails.shift();
+        if (fail) return fail();
+        const file = (init!.body as FormData).get("xml") as File;
+        dgii.annulments.push({ name: file.name, xml: await file.text() });
+        return Response.json({ rnc: "x", codigo: "1", nombre: "Anulación", mensajes: ["Las secuencias fueron anuladas correctamente."] });
       }
       if (url.pathname.endsWith("/consultadirectorio/api/consultas/obtenerdirectorioporrnc")) {
         const row = dgii.directory.get(url.searchParams.get("RNC")!);
@@ -6360,6 +6375,173 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
         await refuse(acecf(e.rnc, consumo.encf), /no es requerida/);
         expect((await json(await get(`/v1/documents/${e.doc.id}`, e.cookie))).data.approval).toBeNull();
       });
+    });
+  });
+
+  describe("anulación de rangos de e-NCF", () => {
+    const Z = "/v1/sequences/annulments";
+    const ok = (extra: Json = {}) => Response.json({ rnc: "x", codigo: "1", nombre: "Anulación", mensajes: ["Las secuencias fueron anuladas correctamente."], ...extra });
+
+    /** Empresa con certificado y una secuencia E32 1–100 de la que ya se usaron 3 números. */
+    async function usada(label: string, opts: { cert?: boolean } = {}) {
+      const b = await billing(label, { seqs: [["E32", 1, 100]] });
+      if (opts.cert !== false) {
+        const { p12, password } = testP12();
+        expect((await send("PUT", "/v1/company/certificate", { p12: Buffer.from(p12).toString("base64"), password }, b.cookie)).status).toBe(200);
+      }
+      for (let i = 0; i < 3; i++) expect((await issue(b, (await createDraft(b)).id)).status).toBe(200);
+      const seq = ((await json(await get("/v1/sequences", b.cookie))).data as Json[])[0]!;
+      return { ...b, seq };
+    }
+    type Usada = Awaited<ReturnType<typeof usada>>;
+    const annul = (b: Usada, body: Json = {}, cookie = b.cookie) => post(Z, { sequenceId: b.seq.id, ...body }, cookie);
+    const seqNow = async (b: Usada) => ((await json(await get("/v1/sequences", b.cookie))).data as Json[]).find((s) => s.id === b.seq.id)!;
+    const nextEncf = async (b: Usada) => (await json(await issue(b, (await createDraft(b)).id))).data?.encf as string | undefined;
+
+    beforeEach(() => dgii.reset());
+
+    it("anula lo que queda sin usar: lo envía firmado a la DGII y agota la secuencia", async () => {
+      const b = await usada("an1");
+      expect(b.seq).toMatchObject({ nextNumber: 4, toNumber: 100, remaining: 97 });
+      const res = await annul(b);
+      expect(res.status, JSON.stringify(await res.clone().json())).toBe(201);
+      const row = (await json(res)).data;
+      expect(row).toMatchObject({ ecfType: "E32", fromNumber: 4, toNumber: 100, count: 97, state: "DONE", error: null });
+      expect(row.messages).toEqual(["Las secuencias fueron anuladas correctamente."]);
+
+      expect(dgii.annulments).toHaveLength(1);
+      const sent = dgii.annulments[0]!;
+      expect(sent.name).toMatch(/^\d{9}E320000000004\.xml$/);
+      expect(verifyEcfSignature(sent.xml)).toBe(true);
+      expect(sent.xml).toContain("<CantidadeNCFAnulados>97</CantidadeNCFAnulados>");
+      expect(sent.xml).toContain("<SecuenciaeNCFDesde>E320000000004</SecuenciaeNCFDesde><SecuenciaeNCFHasta>E320000000100</SecuenciaeNCFHasta>");
+
+      // La secuencia ya no da esos números y sigue disponible para consulta.
+      expect(await seqNow(b)).toMatchObject({ nextNumber: 101, toNumber: 100, remaining: 0, active: true });
+      const failed = await issue(b, (await createDraft(b)).id);
+      expect(failed.status).toBe(422);
+      expect(((await json(await get(Z, b.cookie))).data as Json[]).map((a) => [a.state, a.count])).toEqual([["DONE", 97]]);
+    });
+
+    it("anula el final: la secuencia se acorta y el siguiente número sigue siendo el que tocaba", async () => {
+      const b = await usada("an2");
+      const res = await annul(b, { from: 51 });
+      expect((await json(res)).data).toMatchObject({ fromNumber: 51, toNumber: 100, count: 50, state: "DONE" });
+      expect(await seqNow(b)).toMatchObject({ nextNumber: 4, toNumber: 50, remaining: 47 });
+      expect(await nextEncf(b)).toBe("E320000000004");
+    });
+
+    it("anula el inicio: se saltan esos números", async () => {
+      const b = await usada("an3");
+      const res = await annul(b, { to: 10 });
+      expect((await json(res)).data).toMatchObject({ fromNumber: 4, toNumber: 10, count: 7, state: "DONE" });
+      expect(await seqNow(b)).toMatchObject({ nextNumber: 11, toNumber: 100 });
+      expect(await nextEncf(b)).toBe("E320000000011");
+    });
+
+    it("rechaza un tramo del medio, números ya usados, fuera de la secuencia o una secuencia agotada", async () => {
+      const b = await usada("an4");
+      const bad = async (body: Json, message: RegExp) => {
+        const res = await annul(b, body);
+        expect(res.status, JSON.stringify(body)).toBe(422);
+        expect(await error(res)).toMatch(message);
+      };
+      await bad({ from: 20, to: 30 }, /inicio o el final/);
+      await bad({ from: 2, to: 10 }, /sin usar/); // el 2 ya se usó
+      await bad({ from: 90, to: 101 }, /sin usar/);
+      await bad({ from: 50, to: 40 }, /sin usar/);
+      expect(dgii.annulments).toHaveLength(0);
+      expect(await seqNow(b)).toMatchObject({ nextNumber: 4, toNumber: 100, active: true });
+
+      expect((await annul(b)).status).toBe(201);
+      const again = await annul(b);
+      expect(again.status).toBe(422);
+      expect(await error(again)).toMatch(/no le quedan números/);
+      expect((await post(Z, { sequenceId: randomUUID() }, b.cookie)).status).toBe(404);
+    });
+
+    it("si la DGII no anula, la secuencia queda exactamente como estaba y se deja constancia", async () => {
+      const b = await usada("an5");
+      dgii.annulFails = [() => Response.json({ mensajes: ["Las secuencias que está intentando anular han sido utilizadas"] }, { status: 400 })];
+      const res = await annul(b);
+      expect(res.status).toBe(200);
+      const row = (await json(res)).data;
+      expect(row).toMatchObject({ state: "FAILED" });
+      expect(row.error).toMatch(/han sido utilizadas/);
+      expect(await seqNow(b)).toMatchObject({ nextNumber: 4, toNumber: 100, remaining: 97, active: true });
+      expect(await nextEncf(b)).toBe("E320000000004");
+
+      // Una respuesta parcial tampoco se da por buena.
+      dgii.annulFails = [() => Response.json({ codigo: "2", mensajes: ["Las secuencias fueron anuladas correctamente. Con excepción de las secuencias del detalle"] })];
+      const partial = (await json(await annul(b))).data;
+      expect(partial.state).toBe("FAILED");
+      expect(await seqNow(b)).toMatchObject({ nextNumber: 5, toNumber: 100 });
+    });
+
+    it("sin respuesta de la DGII no se anula, avisa que se revise en la Oficina Virtual y reactiva la secuencia", async () => {
+      const b = await usada("an6");
+      dgii.annulFails = [() => new Response("", { status: 503 })];
+      const row = (await json(await annul(b))).data;
+      expect(row.state).toBe("FAILED");
+      expect(row.error).toMatch(/No se pudo confirmar.*Oficina Virtual/);
+      expect(await seqNow(b)).toMatchObject({ nextNumber: 4, toNumber: 100, active: true });
+    });
+
+    it("mientras se anula la secuencia está desactivada, y una secuencia que estaba inactiva queda inactiva", async () => {
+      const b = await usada("an7");
+      const observed: boolean[] = [];
+      dgii.onAnnul = async () => void observed.push((await withTenant(prisma, b.orgId).sequence.findFirstOrThrow({ where: { id: b.seq.id } })).active);
+      expect((await annul(b, { from: 90 })).status).toBe(201);
+      expect(observed).toEqual([false]);
+      expect((await seqNow(b)).active).toBe(true);
+
+      expect((await send("PATCH", `/v1/sequences/${b.seq.id}`, { active: false }, b.cookie)).status).toBe(200);
+      expect((await annul(b, { from: 80 })).status).toBe(201);
+      expect((await seqNow(b)).active).toBe(false); // como estaba
+    });
+
+    it("no anula bloques de una caja sin conexión, ni sin certificado, ni a un cajero", async () => {
+      const b = await usada("an8");
+      const t = (await json(await post("/v1/terminals", { branchId: b.branch.id, name: "Caja 1", code: "C1" }, b.cookie))).data;
+      await post("/v1/sync/sequence-blocks", { terminalId: t.id, ecfType: "E32", size: 10 }, b.cookie);
+      const block = await withTenant(prisma, b.orgId).sequence.findFirstOrThrow({ where: { offline: true } });
+      const res = await post(Z, { sequenceId: block.id }, b.cookie);
+      expect(res.status).toBe(422);
+      expect(await error(res)).toMatch(/caja sin conexión/);
+
+      const bare = await usada("an8b", { cert: false });
+      const noCert = await annul(bare);
+      expect(noCert.status).toBe(422);
+      expect(await error(noCert)).toMatch(/certificado/);
+
+      const cashier = await signUp("an8c");
+      await prisma.member.create({ data: { id: randomUUID(), organizationId: b.orgId, userId: cashier.userId, role: "member" } });
+      const cookie = await setActive(b.orgId, cashier.cookie);
+      expect((await annul(b, {}, cookie)).status).toBe(403);
+      expect((await get(Z, cookie)).status).toBe(403);
+      expect(dgii.annulments).toHaveLength(0);
+    });
+
+    it("una anulación que se quedó sin respuesta bloquea la secuencia hasta que se cancela", async () => {
+      const b = await usada("an9");
+      const tenant = withTenant(prisma, b.orgId);
+      await tenant.sequence.update({ where: { id: b.seq.id }, data: { active: false } });
+      const stuck = await tenant.sequenceAnnulment.create({
+        data: { organizationId: b.orgId, sequenceId: b.seq.id, ecfType: "E32", fromNumber: 4n, toNumber: 100n, count: 97, wasActive: true, requestedById: b.userId },
+      });
+      const busy = await annul(b);
+      expect(busy.status).toBe(409);
+      expect(await error(busy)).toMatch(/en curso/);
+      const tooSoon = await post(`${Z}/${stuck.id}/cancel`, {}, b.cookie);
+      expect(tooSoon.status).toBe(409);
+
+      await tenant.sequenceAnnulment.update({ where: { id: stuck.id }, data: { createdAt: new Date(Date.now() - 10 * 60_000) } });
+      const cancelled = await post(`${Z}/${stuck.id}/cancel`, {}, b.cookie);
+      expect(cancelled.status).toBe(200);
+      expect((await json(cancelled)).data).toMatchObject({ state: "FAILED" });
+      expect((await seqNow(b)).active).toBe(true);
+      expect((await post(`${Z}/${stuck.id}/cancel`, {}, b.cookie)).status).toBe(409);
+      expect((await annul(b)).status).toBe(201); // ya se puede anular
     });
   });
 
