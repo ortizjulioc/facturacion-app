@@ -15,6 +15,7 @@ import { received } from "./routes/received";
 import { inventory } from "./routes/inventory";
 import { products } from "./routes/products";
 import { purchases } from "./routes/purchases";
+import { dgiiReports } from "./routes/reports-dgii";
 import { reports } from "./routes/reports";
 import { restaurant } from "./routes/restaurant";
 import { restaurantMenu } from "./routes/restaurant-menu";
@@ -100,6 +101,7 @@ export function createApp(deps: Deps) {
     .route("/v1/received", received)
     .route("/v1/reports", reports)
     .route("/v1/reports", purchaseReports)
+    .route("/v1/reports", dgiiReports)
     .route("/v1/inventory", inventory)
     .route("/v1/suppliers", suppliers)
     .route("/v1/purchases", purchases)

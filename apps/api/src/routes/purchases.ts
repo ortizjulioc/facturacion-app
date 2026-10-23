@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { fromCents } from "@facturacion/core";
+import { fromCents, isIsrWithholdingType } from "@facturacion/core";
 import type { Prisma } from "@facturacion/db";
 import { auditEntry } from "../lib/audit";
 import {
@@ -147,6 +147,34 @@ export const purchases = new Hono<AppEnv>()
     });
     return c.body(null, 204);
   })
+  // Datos del 606 que no cambian la contabilidad —fecha de pago y tipo de retención en ISR—: se completan aun con la compra
+  // registrada (p. ej. cuando por fin se paga una compra a crédito).
+  .patch(
+    "/:id/dgii",
+    zv("param", uuidParam),
+    zv("json", z.object({ paymentDate: isoDate.nullable().optional(), isrWithholdingType: z.number().int().min(1).max(9).nullable().optional() })),
+    async (c) => {
+      const { id } = c.req.valid("param");
+      const input = c.req.valid("json");
+      const purchase = await c.get("run")(async (tx) => {
+        const current = await tx.purchase.findFirst({ where: { id } });
+        if (!current) throw notFound();
+        const paymentDate = input.paymentDate === undefined ? current.paymentDate : input.paymentDate ? new Date(`${input.paymentDate}T00:00:00Z`) : null;
+        if (paymentDate && paymentDate < current.invoiceDate) {
+          throw new HTTPException(422, { message: "La fecha de pago no puede ser anterior a la del comprobante" });
+        }
+        const type = input.isrWithholdingType === undefined ? current.isrWithholdingType : input.isrWithholdingType;
+        if (type !== null && !isIsrWithholdingType(type)) throw new HTTPException(422, { message: "Tipo de retención en ISR inválido" });
+        if (type !== null && current.isrWithheld === 0n) {
+          throw new HTTPException(422, { message: "La compra no tiene ISR retenido" });
+        }
+        const updated = await tx.purchase.update({ where: { id }, data: { paymentDate, isrWithholdingType: type }, include: FULL });
+        await tx.auditLog.create({ data: auditEntry(c, "purchase.dgii", "purchase", id, { paymentDate: input.paymentDate ?? null, isrWithholdingType: type }) });
+        return updated;
+      });
+      return c.json({ data: purchaseDto(purchase) });
+    },
+  )
   // Registra la compra: asigna el e-NCF (E41/E43), da entrada al inventario y la congela.
   .post("/:id/post", zv("param", uuidParam), async (c) => {
     const { id } = c.req.valid("param");

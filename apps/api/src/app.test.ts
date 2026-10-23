@@ -3073,6 +3073,166 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       expect(sales.data.totals.documents).toBe(0);
     });
 
+    // ───────────── Formatos de la DGII: 606, 607 y 608 ─────────────
+
+    describe("formatos 606 y 607 de la DGII", () => {
+      const period = todayStr.slice(0, 7).replace("-", "");
+      const preview = async (cookie: string, format: number | string, p = period) =>
+        json(await get(`/v1/reports/dgii/${format}?period=${p}`, cookie));
+      const file = (cookie: string, format: number, p = period) => get(`/v1/reports/dgii/${format}/file?period=${p}`, cookie);
+
+      it("606: junta las compras registradas, convierte los dólares y pide el tipo de retención de ISR antes de dejar enviar", async () => {
+        const s = await buying("fm1");
+        // Factura de proveedor al contado: 10 × 50.00 + ITBIS 18 % = 590.00 (tipo 9: bienes)
+        await postPurchase(s, (await draftPurchase(s)).id);
+        // Gasto menor con tarjeta de 30.00 (tipo 2: servicios), sin RNC
+        await postPurchase(s, (await json(await post("/v1/purchases", { kind: "E43", branchId: s.branch.id, invoiceDate: todayStr, expenseType: 2, paymentMethod: "CARD", lines: [{ name: "Parqueo", quantity: "1", unitCost: "30.00", tax: "EXENTO" }] }, s.cookie))).data.id);
+        // Servicio de un informal en dólares: US$10.00 × 60 con ISR retenido de US$1.00
+        const e41 = (await json(await post("/v1/purchases", { kind: "E41", branchId: s.branch.id, supplierId: s.informal.id, invoiceDate: todayStr, expenseType: 2, currency: "USD", exchangeRate: "60", isrWithheld: "1.00", lines: [{ name: "Servicio profesional", quantity: "1", unitCost: "10.00", tax: "EXENTO" }] }, s.cookie))).data;
+        await postPurchase(s, e41.id);
+        // Un borrador del período no cuenta, pero se avisa.
+        await draftPurchase(s, { ncf: "B0100000999" });
+
+        const p1 = (await preview(s.cookie, 606)).data;
+        expect(p1).toMatchObject({ format: 606, period, count: 3, ready: false, filename: `DGII_F_606_101001577_${period}.TXT` });
+        expect(p1.columns).toHaveLength(23);
+        expect(p1.rows.map((r: string[]) => r[3])).toEqual(["B0100000123", "E410000000001", "E430000000001"]);
+        expect(p1.errors).toEqual([{ ref: expect.stringContaining("E410000000001"), message: "Con retención de renta hay que indicar el tipo de retención en ISR" }]);
+        expect(p1.warnings.join(" ")).toMatch(/1 compra\(s\) en borrador/);
+        expect(p1.totals).toMatchObject({ "Total facturado": "1130.00", "ITBIS facturado": "90.00", "Retención de renta": "60.00" });
+        const refused = await file(s.cookie, 606);
+        expect(refused.status).toBe(422);
+        expect((await json(refused)).issues).toHaveLength(1);
+
+        // Se completa el dato aun con la compra registrada.
+        const fixed = await send("PATCH", `/v1/purchases/${e41.id}/dgii`, { isrWithholdingType: 2 }, s.cookie);
+        expect(fixed.status).toBe(200);
+        expect((await json(fixed)).data).toMatchObject({ isrWithholdingType: 2, status: "POSTED" });
+
+        const res = await file(s.cookie, 606);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-disposition")).toContain(`DGII_F_606_101001577_${period}.TXT`);
+        const lines = (await res.text()).split("\r\n");
+        expect(lines[0]).toBe(`606|101001577|${period}|3`);
+        const d = todayStr.replaceAll("-", "");
+        expect(lines[1]!.split("|")).toEqual(["131246796", "1", "09", "B0100000123", "", d, d, "0.00", "500.00", "500.00", "90.00", "", "", "", "90.00", "", "", "", "", "", "", "", "01"]);
+        // E41 en dólares: 600.00 de servicios, cédula, retención de ISR tipo 02 por 60.00
+        expect(lines[2]!.split("|")).toEqual(["00112345678", "2", "02", "E410000000001", "", d, d, "600.00", "0.00", "600.00", "0.00", "", "", "", "0.00", "", "02", "60.00", "", "", "", "", "01"]);
+        // Gasto menor con tarjeta: sin RNC, forma de pago 03
+        expect(lines[3]!.split("|")).toEqual(["", "", "02", "E430000000001", "", d, d, "30.00", "0.00", "30.00", "0.00", "", "", "", "0.00", "", "", "", "", "", "", "", "03"]);
+        expect(lines[4]).toBe("");
+      });
+
+      it("606: una compra a crédito va sin fecha de pago hasta que se indique, y con retenciones la exige", async () => {
+        const s = await buying("fm2");
+        const credit = await draftPurchase(s, { paymentMethod: "CREDIT", itbisWithheld: "10.00" });
+        await postPurchase(s, credit.id);
+        const p1 = (await preview(s.cookie, 606)).data;
+        expect(p1.rows[0][6]).toBe("");
+        expect(p1.errors.map((e: Json) => e.message)).toEqual(["Con retenciones hace falta la fecha de pago"]);
+        expect(p1.rows[0][23 - 12]).toBe("10.00"); // ITBIS retenido
+
+        const paid = await send("PATCH", `/v1/purchases/${credit.id}/dgii`, { paymentDate: todayStr }, s.cookie);
+        expect((await json(paid)).data.paymentDate).toBe(todayStr);
+        const p2 = (await preview(s.cookie, 606)).data;
+        expect(p2).toMatchObject({ ready: true, errors: [] });
+        expect(p2.rows[0][6]).toBe(todayStr.replaceAll("-", ""));
+        expect(p2.rows[0][22]).toBe("04"); // compra a crédito
+      });
+
+      it("606: fecha de pago anterior al comprobante o tipo de retención sin ISR se rechazan", async () => {
+        const s = await buying("fm3");
+        const d = await draftPurchase(s, { paymentMethod: "CREDIT" });
+        const early = await post("/v1/purchases", purchaseBody(s, { ncf: "B0100000777", paymentDate: "2020-01-01" }), s.cookie);
+        expect(early.status).toBe(422);
+        await postPurchase(s, d.id);
+        expect((await send("PATCH", `/v1/purchases/${d.id}/dgii`, { paymentDate: "2020-01-01" }, s.cookie)).status).toBe(422);
+        const noIsr = await send("PATCH", `/v1/purchases/${d.id}/dgii`, { isrWithholdingType: 2 }, s.cookie);
+        expect(noIsr.status).toBe(422);
+        expect(await error(noIsr)).toMatch(/no tiene ISR retenido/);
+        expect((await send("PATCH", `/v1/purchases/${d.id}/dgii`, { isrWithholdingType: 12 }, s.cookie)).status).toBe(400);
+        expect((await send("PATCH", `/v1/purchases/${randomUUID()}/dgii`, { paymentDate: todayStr }, s.cookie)).status).toBe(404);
+      });
+
+      it("607: lista lo emitido, deja las facturas de consumo pequeñas en el resumen y las notas llevan el NCF que modifican", async () => {
+        const b = await billing("fm4", { seqs: [["E31", 1, 10], ["E32", 1, 10], ["E34", 1, 10]] });
+        const company = (await json(await post("/v1/customers", { name: "Cliente SRL", documentType: "RNC", documentNumber: "131246796" }, b.cookie))).data;
+        const ok = async (id: string) => (await json(await issue(b, id))).data as Json;
+        // E31 pagada mitad efectivo, mitad tarjeta: 2 × 118.00 = 236.00
+        const e31 = await ok((await createDraft(b, { type: "E31", customerId: company.id, payments: [{ method: "CASH", amount: "100.00" }, { method: "CARD", amount: "136.00" }] })).id);
+        // Consumo pequeño: solo va en el resumen.
+        await ok((await createDraft(b)).id);
+        // Consumo grande (2,200 × 118.00 = 259,600.00): se lista, con el comprador.
+        const big = await ok((await createDraft(b, { customerId: company.id, lines: [{ productId: b.product.id, quantity: "2200" }], payments: [{ method: "CASH", amount: "259600.00" }] })).id);
+        // Nota de crédito sobre la E31, sin pagos: queda como a crédito.
+        const nc = await ok((await createDraft(b, { type: "E34", referencedDocumentId: e31.id, modificationCode: 3, lines: [{ name: "Ajuste", unitPrice: "50.00", tax: "EXENTO", quantity: "1" }], payments: [] })).id);
+        // Un borrador no cuenta.
+        await createDraft(b);
+
+        const p = (await preview(b.cookie, 607)).data;
+        expect(p).toMatchObject({ format: 607, count: 3, ready: true, errors: [] });
+        expect(p.columns).toHaveLength(23);
+        expect(p.rows.map((r: string[]) => r[2])).toEqual([e31.encf, big.encf, nc.encf]);
+        const d = todayStr.replaceAll("-", "");
+        expect(p.rows[0]).toEqual(["131246796", "1", e31.encf, "", "01", d, "", "200.00", "36.00", "", "", "", "", "", "", "", "100.00", "", "136.00", "", "", "", ""]);
+        expect(p.rows[1].slice(7, 9)).toEqual(["220000.00", "39600.00"]);
+        expect(p.rows[1][16]).toBe("259600.00");
+        const r = p.rows[2] as string[];
+        expect([r[2], r[3], r[4], r[5], r[7], r[8], r[19]]).toEqual([nc.encf, e31.encf, "01", d, "50.00", "0.00", "50.00"]);
+        expect(r.filter((v, i) => v !== "" && ![0, 1, 2, 3, 4, 5, 7, 8, 19].includes(i))).toEqual([]);
+        expect(p.consumerSummary).toEqual({ count: 2, billed: "220200.00", listedInFile: 1, belowThreshold: { count: 1, billed: "200.00" } });
+        expect(p.totals).toMatchObject({ "Monto facturado": "220250.00", "ITBIS facturado": "39636.00" });
+
+        const res = await file(b.cookie, 607);
+        expect(res.status).toBe(200);
+        const lines = (await res.text()).split("\r\n");
+        expect(lines[0]).toBe(`607|101001577|${period}|3`);
+        expect(lines).toHaveLength(5);
+      });
+
+      it("607: el comprobante en dólares se convierte a pesos y las formas de pago cuadran con el total", async () => {
+        const b = await billing("fm5", { seqs: [["E31", 1, 10]] });
+        const company = (await json(await post("/v1/customers", { name: "Cliente SRL", documentType: "RNC", documentNumber: "131246796" }, b.cookie))).data;
+        const e = (await json(await issue(b, (await createDraft(b, { type: "E31", customerId: company.id, currency: "USD", exchangeRate: "58.50", payments: [{ method: "TRANSFER", amount: "236.00" }] })).id))).data;
+        const p = (await preview(b.cookie, 607)).data;
+        expect(p.errors).toEqual([]);
+        // US$200.00 × 58.50 = 11,700.00; ITBIS 36.00 × 58.50 = 2,106.00; transferencia 236.00 × 58.50 = 13,806.00
+        expect(p.rows[0]).toEqual(["131246796", "1", e.encf, "", "01", todayStr.replaceAll("-", ""), "", "11700.00", "2106.00", "", "", "", "", "", "", "", "", "13806.00", "", "", "", "", ""]);
+      });
+
+      it("períodos sin movimiento dan el archivo en cero, y los datos no se mezclan entre empresas", async () => {
+        const s = await buying("fm6");
+        await postPurchase(s, (await draftPurchase(s)).id);
+        const other = await buying("fm6b");
+        for (const f of [606, 607]) {
+          const mine = (await preview(other.cookie, f)).data;
+          expect(mine).toMatchObject({ count: 0, ready: true, errors: [] });
+        }
+        expect((await preview(s.cookie, 606)).data.count).toBe(1);
+        const empty = await file(s.cookie, 606, "199901");
+        expect(empty.status).toBe(200);
+        expect(await empty.text()).toBe("606|101001577|199901|0\r\n");
+      });
+
+      it("pide período válido, formato válido, datos fiscales, sesión y rol de administración", async () => {
+        const s = await buying("fm7");
+        expect((await get(`/v1/reports/dgii/606?period=${period}`)).status).toBe(401);
+        for (const path of [`/v1/reports/dgii/609?period=${period}`, "/v1/reports/dgii/606", "/v1/reports/dgii/606?period=2026-10", "/v1/reports/dgii/606?period=202613"]) {
+          expect((await get(path, s.cookie)).status, path).toBe(400);
+        }
+        const bare = await billing("fm7b", { profile: false });
+        const res = await get(`/v1/reports/dgii/606?period=${period}`, bare.cookie);
+        expect(res.status).toBe(409);
+        expect(await error(res)).toMatch(/datos fiscales/);
+
+        const worker = await signUp("fm7w");
+        await prisma.member.create({ data: { id: randomUUID(), organizationId: s.orgId, userId: worker.userId, role: "member" } });
+        const cookie = await setActive(s.orgId, worker.cookie);
+        expect((await get(`/v1/reports/dgii/606?period=${period}`, cookie)).status).toBe(403);
+        expect((await send("PATCH", `/v1/purchases/${randomUUID()}/dgii`, { paymentDate: todayStr }, cookie)).status).toBe(403);
+      });
+    });
+
     it("sin sesión no se accede a las compras", async () => {
       for (const path of [
         "/v1/purchases",
@@ -6542,6 +6702,32 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       expect((await seqNow(b)).active).toBe(true);
       expect((await post(`${Z}/${stuck.id}/cancel`, {}, b.cookie)).status).toBe(409);
       expect((await annul(b)).status).toBe(201); // ya se puede anular
+    });
+
+    // 608: los números anulados de un rango (ANECF) se informan uno por uno.
+    it("608: informa cada número de los rangos anulados en el período, con el tipo 08", async () => {
+      const b = await usada("an608");
+      const period = new Intl.DateTimeFormat("sv-SE", { timeZone: "America/Santo_Domingo" }).format(new Date()).slice(0, 7).replace("-", "");
+      const today = period + new Intl.DateTimeFormat("sv-SE", { timeZone: "America/Santo_Domingo" }).format(new Date()).slice(8, 10);
+      const before = (await json(await get(`/v1/reports/dgii/608?period=${period}`, b.cookie))).data;
+      expect(before).toMatchObject({ count: 0, ready: true });
+
+      expect((await annul(b, { from: 51 })).status).toBe(201);
+      const p = (await json(await get(`/v1/reports/dgii/608?period=${period}`, b.cookie))).data;
+      expect(p).toMatchObject({ format: 608, count: 50, ready: true, errors: [], totals: { "Comprobantes anulados": "50" }, columns: ["NCF", "Fecha comprobante", "Tipo de anulación"] });
+      expect(p.rows[0]).toEqual(["E320000000051", expect.stringMatching(/^[0-9]{8}$/), "08"]);
+      expect(p.rows[49][0]).toBe("E320000000100");
+      expect(p.warnings.join(" ")).toMatch(/ANECF/);
+
+      const res = await get(`/v1/reports/dgii/608/file?period=${period}`, b.cookie);
+      expect(res.status).toBe(200);
+      const lines = (await res.text()).split("\r\n");
+      expect(lines[0]).toBe(`608|101001577|${period}|50`);
+      expect(lines[1]).toBe(`E320000000051|${today}|08`);
+      expect(lines).toHaveLength(52);
+
+      // Otro período no lo trae.
+      expect((await json(await get("/v1/reports/dgii/608?period=199901", b.cookie))).data.count).toBe(0);
     });
   });
 

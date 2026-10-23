@@ -7,6 +7,7 @@ import {
   EXPENSE_TYPES,
   fromCents,
   fromMilli,
+  isIsrWithholdingType,
   normalizeSupplierNcf,
   retentionErrors,
   TAX_CODES,
@@ -71,6 +72,9 @@ export const purchaseInput = z
     notes: optionalText(1000),
     itbisWithheld: money.default("0"),
     isrWithheld: money.default("0"),
+    /** 606: fecha de pago y tipo de retención en ISR (se pueden completar después de registrar, con `PATCH /:id/dgii`). */
+    paymentDate: isoDate.nullish(),
+    isrWithholdingType: z.number().int().min(1).max(9).nullish(),
     lines: z.array(purchaseLine).min(1, "Agrega al menos una línea").max(500),
   })
   .superRefine((v, ctx) => {
@@ -215,6 +219,13 @@ export async function buildPurchaseDraft(
   });
   if (retentionProblem) throw unprocessable(retentionProblem);
 
+  if (input.paymentDate && input.paymentDate < input.invoiceDate) {
+    throw unprocessable("La fecha de pago no puede ser anterior a la del comprobante");
+  }
+  if (input.isrWithholdingType && !isIsrWithholdingType(input.isrWithholdingType)) {
+    throw unprocessable("Tipo de retención en ISR inválido");
+  }
+
   const lines = resolved.map((r, i) => {
     const t = totals.lines[i]!;
     return {
@@ -270,6 +281,8 @@ export async function buildPurchaseDraft(
     total: totals.total,
     itbisWithheld,
     isrWithheld,
+    paymentDate: input.paymentDate ? new Date(`${input.paymentDate}T00:00:00Z`) : null,
+    isrWithholdingType: isrWithheld > 0n ? (input.isrWithholdingType ?? null) : null,
   };
 
   return { purchase, lines };
@@ -309,6 +322,8 @@ export const purchaseDto = (p: PurchaseFull) => ({
   branchId: p.branchId,
   exchangeRate: p.exchangeRate.toString(),
   paymentMethod: p.paymentMethod,
+  paymentDate: p.paymentDate ? p.paymentDate.toISOString().slice(0, 10) : null,
+  isrWithholdingType: p.isrWithholdingType,
   notes: p.notes,
   totals: {
     discount: m(p.totalDiscount),
