@@ -1,3 +1,4 @@
+import { compactXml } from "./format";
 import { FiscalError, type DirectoryEntry } from "./provider";
 import { signXml, type EcfCertificate } from "./sign";
 import type { FetchLike } from "./dgii";
@@ -32,7 +33,7 @@ export class PeerClient {
     const seed = await this.send("GET", peerEndpoint(host, "/fe/autenticacion/api/semilla"), { accept: "*/*" });
     if (typeof seed !== "string" || !/<semillamodel[\s>]/i.test(seed)) throw new FiscalError("El emisor no entregó una semilla válida", "server");
     const form = new FormData();
-    form.append("xml", new Blob([signXml(seed.replace(/^<\?xml[^>]*\?>\s*/, ""), this.opts.certificate)], { type: "text/xml" }), "semilla.xml");
+    form.append("xml", new Blob([signXml(compactXml(seed), this.opts.certificate)], { type: "text/xml" }), "semilla.xml");
     const res = (await this.send("POST", peerEndpoint(host, "/fe/autenticacion/api/validacioncertificado"), { form })) as { token?: string } | null;
     if (!res?.token) throw new FiscalError("El emisor no entregó un token de autenticación", "auth");
     return res.token;

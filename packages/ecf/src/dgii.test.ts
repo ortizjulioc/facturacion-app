@@ -221,3 +221,20 @@ describe("recepción y consulta", () => {
     ]);
   });
 });
+
+describe("semilla con sangrías (como la entrega la DGII)", () => {
+  it("se compacta antes de firmar: se firma sin preservar espacios", async () => {
+    const pretty = `<?xml version="1.0" encoding="utf-8"?>\r\n<SemillaModel xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">\r\n  <valor>0wXu8Niv/+abc==</valor>\r\n  <fecha>2026-10-23T08:58:23.0573212-04:00</fecha>\r\n</SemillaModel>`;
+    let signed = "";
+    const fetch: FetchLike = async (input, init) => {
+      const u = new URL(input);
+      if (u.pathname.endsWith("/semilla")) return new Response(pretty);
+      signed = await ((init!.body as FormData).get("xml") as File).text();
+      return Response.json({ token: "t", expira: new Date(Date.now() + 3_600_000).toISOString() });
+    };
+    await new DgiiClient({ env: "TEST", certificate: cert, fetch }).authenticate();
+    expect(signed).toMatch(/^<SemillaModel [^>]*><valor>0wXu8Niv\/\+abc==<\/valor><fecha>[^<]+<\/fecha><Signature/);
+    expect(signed).not.toMatch(/>\s+</);
+    expect(verifyEcfSignature(signed)).toBe(true);
+  });
+});

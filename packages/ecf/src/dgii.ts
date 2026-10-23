@@ -14,6 +14,7 @@ import {
   type TrackResult,
   type TrackSummary,
 } from "./provider";
+import { compactXml } from "./format";
 import { serviceUrls } from "./qr";
 import { signXml, type EcfCertificate } from "./sign";
 import type { EcfEnvironment } from "./types";
@@ -112,7 +113,8 @@ export class DgiiClient implements FiscalProvider {
     if (!/<SemillaModel[\s>]/.test(seedXml) || !/<valor>[^<]+<\/valor>/.test(seedXml)) {
       throw new FiscalError("La DGII no entregó una semilla de autenticación válida", "server");
     }
-    const signed = signXml(seedXml.replace(/^<\?xml[^>]*\?>\s*/, ""), this.opts.certificate);
+    // La DGII firma y valida sin preservar espacios: la semilla (que llega con sangrías) se compacta antes de firmarla.
+    const signed = signXml(compactXml(seedXml), this.opts.certificate);
 
     const form = new FormData();
     form.append("xml", new Blob([signed], { type: "text/xml" }), "semilla.xml");

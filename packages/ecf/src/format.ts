@@ -45,6 +45,12 @@ export function formatQuantity(quantity: Milli): string {
 /** Precio unitario: la DGII admite hasta 4 decimales; se envían 2 si los otros dos son cero. */
 export const formatUnitPrice = (cents: Cents): string => fromCents(cents);
 
+/**
+ * Quita la declaración XML y el espacio en blanco entre etiquetas. La DGII firma y valida sin preservar espacios
+ * (`preserveWhitespace = false`): un documento recibido con sangrías, como la semilla, se compacta ANTES de firmarlo.
+ */
+export const compactXml = (xml: string): string => xml.replace(/^\s*<\?xml[^>]*\?>\s*/, "").replace(/>\s+</g, "><").trim();
+
 const XML_ESCAPES: Record<string, string> = {
   "&": "&amp;",
   "<": "&lt;",
