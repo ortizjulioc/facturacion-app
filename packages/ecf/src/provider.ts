@@ -81,6 +81,15 @@ export type DirectoryEntry = { name: string; rnc: string; receptionUrl: string |
 /** Respuesta de la DGII a una aprobación comercial. */
 export type ApprovalResult = { approved: boolean; status: string; code: string; messages: string[] };
 
+/** Respuesta de la DGII a una anulación de rangos de e-NCF. */
+export type AnnulmentResult = {
+  /** true = todos los rangos quedaron anulados. */
+  annulled: boolean;
+  code: string;
+  name: string;
+  messages: string[];
+};
+
 export type TrackSummary = { trackId: string; status: FiscalStatus; statusText: string; receivedAt: string | null };
 
 export interface FiscalProvider {
@@ -99,6 +108,8 @@ export interface FiscalProvider {
   submitApproval(input: SubmitInput): Promise<ApprovalResult>;
   /** Servicios de recepción y aprobación de un contribuyente electrónico (null si no está en el directorio). */
   directoryOf(rnc: string): Promise<DirectoryEntry | null>;
+  /** Anula en la DGII rangos de e-NCF sin usar (ANECF firmado). Lanza `FiscalError` si los rechaza. */
+  annulRanges(input: { xml: string; rnc: string; firstEncf: string }): Promise<AnnulmentResult>;
   /** Todos los envíos que la DGII tiene de un e-NCF (puede haber varios si se reenvió). */
   trackIdsOf(rnc: string, encf: string): Promise<TrackSummary[]>;
 }

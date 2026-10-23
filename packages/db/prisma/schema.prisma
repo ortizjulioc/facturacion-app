@@ -110,6 +110,7 @@ model Organization {
   certificate      CompanyCertificate?
   fiscalSubmissions FiscalSubmission[]
   receivedDocuments ReceivedDocument[]
+  sequenceAnnulments SequenceAnnulment[]
   issuedApprovals  IssuedApproval[]
 
   @@map("organization")
@@ -379,6 +380,7 @@ model Sequence {
   updatedAt      DateTime     @updatedAt
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   terminal       Terminal?    @relation(fields: [terminalId], references: [id], onDelete: NoAction)
+  annulments     SequenceAnnulment[]
 
   @@unique([organizationId, ecfType, fromNumber])
   @@index([organizationId, ecfType, active])
@@ -1083,4 +1085,41 @@ model IssuedApproval {
   document       Document     @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   @@map("issued_approval")
+}
+
+enum AnnulmentState {
+  /// Reservado y enviado a la DGII; falta su respuesta.
+  PENDING
+  /// La DGII anuló los números y la secuencia ya no los usa.
+  DONE
+  /// No se anuló (la DGII lo rechazó o no se pudo confirmar): la secuencia quedó como estaba.
+  FAILED
+}
+
+/// Anulación de un rango de e-NCF SIN USAR de una secuencia ante la DGII (archivo ANECF). Queda como constancia.
+model SequenceAnnulment {
+  id               String         @id @default(uuid(7)) @db.Uuid
+  organizationId   String
+  sequenceId       String?        @db.Uuid
+  ecfType          EcfType
+  fromNumber       BigInt
+  toNumber         BigInt
+  count            Int
+  state            AnnulmentState @default(PENDING)
+  /// La secuencia se desactiva mientras se anula (nadie debe sacar números de ese rango); aquí cómo estaba.
+  wasActive        Boolean
+  /// ANECF firmado que se envió.
+  xml              String?
+  responseCode     String?
+  responseMessages Json?
+  error            String?
+  requestedById    String
+  createdAt        DateTime       @default(now())
+  completedAt      DateTime?
+  organization     Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sequence         Sequence?      @relation(fields: [sequenceId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([sequenceId, state])
+  @@map("sequence_annulment")
 }

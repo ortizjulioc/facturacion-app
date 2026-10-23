@@ -93,8 +93,8 @@ export function buildAcecf(a: ApprovalInput): string {
   return serialize(root);
 }
 
-/** Firma un acuse (ARECF) o una aprobación (ACECF). Es la misma firma XMLDSig de todos los documentos. */
-export function signReply(xml: string, cert: EcfCertificate, root: "ARECF" | "ACECF", at: Date = new Date()): string {
+/** Firma un acuse (ARECF), una aprobación (ACECF) o una anulación de rangos (ANECF). Es la misma firma XMLDSig de todos los documentos. */
+export function signReply(xml: string, cert: EcfCertificate, root: "ARECF" | "ACECF" | "ANECF", at: Date = new Date()): string {
   if (!xml.startsWith(`<${root}>`) || !xml.endsWith(`</${root}>`)) throw new EcfError(`El XML no es un ${root} sin firmar`);
   if (xml.includes("<Signature")) throw new EcfError("El documento ya está firmado");
   const problem = certificateProblem(cert, at);

@@ -5,6 +5,7 @@ import {
   type FiscalMessage,
   type FiscalProvider,
   type FiscalStatus,
+  type AnnulmentResult,
   type ApprovalResult,
   type DirectoryEntry,
   type SubmitInput,
@@ -65,6 +66,10 @@ function messageOf(body: unknown, fallback: string): string {
     }
     const direct = asString(b.mensaje) ?? asString(b.message) ?? asString(b.error) ?? asString(b.title);
     if (direct) return direct;
+    if (Array.isArray(b.mensajes)) {
+      const plain = (b.mensajes as unknown[]).flatMap((m) => asString(m) ?? []).join(" · ");
+      if (plain) return plain;
+    }
     const list = messagesOf(b.mensajes);
     if (list.length) return list.map((m) => m.text).join(" · ");
   }
@@ -174,6 +179,18 @@ export class DgiiClient implements FiscalProvider {
     const code = asString(b?.codigo) ?? "";
     const messages = Array.isArray(b?.mensaje) ? (b.mensaje as unknown[]).flatMap((m) => asString(m) ?? []) : asString(b?.mensaje) ? [asString(b?.mensaje)!] : [];
     return { approved: code === "1", status: asString(b?.estado) ?? "", code, messages };
+  }
+
+  async annulRanges(input: { xml: string; rnc: string; firstEncf: string }): Promise<AnnulmentResult> {
+    // El servicio de anulación no se publica en certificación.
+    if (this.opts.env === "CERT") throw new FiscalError("La anulación de rangos no está disponible en certificación", "config");
+    const form = new FormData();
+    form.append("xml", new Blob([input.xml], { type: "text/xml" }), `${input.rnc}${input.firstEncf}.xml`);
+    const b = (await this.authorized("POST", `${this.urls.annulment}/api/operaciones/anularrango`, { form })) as Record<string, unknown> | null;
+    const messages = Array.isArray(b?.mensajes) ? (b.mensajes as unknown[]).flatMap((m) => asString(m) ?? []) : asString(b?.mensajes) ? [asString(b?.mensajes)!] : [];
+    // Un 200 con «excepto…» o «no fue posible…» es una anulación parcial o fallida: no se da por hecha.
+    const failed = messages.some((m) => /excepci[oó]n|no fue posible|han sido utilizadas/i.test(m));
+    return { annulled: !failed, code: asString(b?.codigo) ?? "", name: asString(b?.nombre) ?? "", messages };
   }
 
   async directoryOf(rnc: string): Promise<DirectoryEntry | null> {

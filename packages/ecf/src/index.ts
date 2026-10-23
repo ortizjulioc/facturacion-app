@@ -24,6 +24,7 @@ export {
   FiscalError,
   isFinalStatus,
   isFiscallyValid,
+  type AnnulmentResult,
   type ApprovalResult,
   type DirectoryEntry,
   type FiscalMessage,
@@ -55,3 +56,4 @@ export {
   type Inspection,
   type NotReceivedReason,
 } from "./receiver";
+export { buildAnecf, countOf, type AnnulmentInput, type AnnulmentLine, type AnnulmentRange } from "./annulment";
