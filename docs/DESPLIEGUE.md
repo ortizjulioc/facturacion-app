@@ -57,6 +57,8 @@ COOKIE_DOMAIN=.tudominio.com
 LOG_LEVEL=info
 ```
 
+Opcional, para la auto-actualización de las cajas (ver [CAJA-INSTALADOR.md](CAJA-INSTALADOR.md)): `POS_RELEASES_DIR=/data/releases/caja`, con un volumen persistente montado en esa ruta donde se copian el instalador, su `.blockmap` y `latest.yml`.
+
 Al arrancar, el contenedor ejecuta `prisma migrate deploy` con `DATABASE_URL_MIGRATE` y luego inicia la API con `DATABASE_URL` (el rol sin privilegios, sujeto a RLS).
 
 ## 3. Aplicación `web`
