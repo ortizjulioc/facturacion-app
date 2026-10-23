@@ -34,12 +34,12 @@ Compras **registradas** (no borradores) cuya fecha de comprobante cae en el mes.
 | Fecha comprobante / Fecha de pago | La del comprobante / la **fecha de pago** de la compra; si está vacía, al contado es la del comprobante y a crédito queda vacía hasta que se pague. |
 | Monto en servicios / en bienes | La base sin impuestos: **bienes** si el tipo de gasto es 04, 09 o 10; **servicios** en los demás. |
 | ITBIS facturado, retenido | ITBIS de la compra y el ITBIS retenido. |
-| ITBIS proporcionalidad, al costo | 0 (aún no se capturan). **ITBIS por adelantar** = ITBIS facturado menos el llevado al costo. |
+| ITBIS proporcionalidad, al costo | Lo que se anote en la compra (0 si nada). **ITBIS por adelantar** = ITBIS facturado menos el llevado al costo. |
 | Tipo de retención en ISR, Retención renta | El **tipo de retención** (01–09) de la compra, obligatorio si hay ISR retenido, y el monto. |
 | Selectivo, otros impuestos, propina legal, percibidos | Vacíos. |
 | Forma de pago | Efectivo 01 · transferencia o cheque 02 · tarjeta 03 · crédito 04 · «Otro» se informa como 07 *Mixto* (con aviso). |
 
-**Fecha de pago y tipo de retención en ISR** son los únicos datos de una compra que se pueden completar **después de registrarla** (no cambian la contabilidad): en el detalle de la compra, bloque «Datos para el formato 606» (`PATCH /v1/purchases/:id/dgii`; la base de datos sigue bloqueando cualquier otro cambio).
+**Fecha de pago, tipo de retención en ISR, ITBIS llevado al costo y ITBIS por proporcionalidad** son los únicos datos de una compra que se pueden completar **después de registrarla** (no cambian la contabilidad): en el detalle de la compra, bloque «Datos para el formato 606» (`PATCH /v1/purchases/:id/dgii`; la base de datos sigue bloqueando cualquier otro cambio). El ITBIS al costo más el de proporcionalidad no pueden pasar del ITBIS de la compra.
 
 ### 607 · ventas
 Comprobantes emitidos (ni borradores ni rechazados por la DGII) por fecha de emisión en hora de Santo Domingo: facturas de crédito fiscal (E31), de consumo (E32), notas de débito (E33) y de crédito (E34). Los E41/E43 son compras y van en el 606.
@@ -51,7 +51,10 @@ Comprobantes emitidos (ni borradores ni rechazados por la DGII) por fecha de emi
 | Tipo de ingreso | 01 «Ingresos por operaciones (no financieros)» siempre. |
 | Monto facturado, ITBIS, propina legal | Subtotal sin impuestos, ITBIS y propina del comprobante. |
 | Efectivo, cheque/transferencia, tarjeta, crédito, otras formas | Los pagos del comprobante, con impuestos; **deben sumar el total** (lo que falta es venta a crédito, el vuelto sale del efectivo). |
-| Retenciones de terceros, selectivo, otros impuestos | Vacíos (no se capturan todavía). |
+| Fecha de retención, ITBIS retenido y retención de renta por terceros | Lo que se anote en el comprobante, en el bloque «Retenciones del cliente» de su detalle (`PATCH /v1/documents/:id/retentions`, en pesos; el comprobante sigue congelado, la base de datos solo deja cambiar esas tres columnas). |
+| Selectivo, otros impuestos | Vacíos (no se capturan todavía). |
+
+**Ventas con retención**: si el cliente retuvo en el **mismo mes** de la emisión, va en una sola línea con sus montos y fecha. Si retuvo en un **mes posterior**, la línea de la emisión va sin retención (el pago a crédito) y la venta **se repite en el mes de la retención**, con los montos y la fecha (así lo explica la ayuda de la DGII sobre ventas a crédito); el panel avisa cuántas se repiten.
 
 **Facturas de consumo (E32)**: solo las de **RD$250,000 o más** van en el archivo (con el comprador identificado); las menores se resumen en la Oficina Virtual.
 
@@ -67,7 +70,7 @@ NCF de 11 o 13 caracteres (19 solo para comprobantes de antes de mayo 2018) · R
 - **El diseño exacto del archivo de texto** no lo explican los instructivos (describen la plantilla de Excel que lo genera). Se armó como lo genera esa plantilla: primera línea `606|RNC|AAAAMM|cantidad`, un registro por línea con los campos separados por `|`, fechas `AAAAMMDD`, montos con punto y dos decimales, códigos con dos dígitos (`02`), campos vacíos sin nada entre las barras, y saltos de línea Windows. **No se probó contra la Herramienta de Pre-validación ni contra la Oficina Virtual.** Si la pre-validación rechaza algo (p. ej. si espera un código de un dígito o ceros en lugar de campos vacíos), es un ajuste de una línea en `packages/core/src/dgii-formats.ts`.
 - **Contribuyentes que emiten e-CF**: la DGII ya recibe sus comprobantes electrónicos y ha ido reemplazando el envío del 607 y del 608 de esos comprobantes por la información que ella misma tiene; **confirma con tu contador** qué sigue siendo obligatorio en tu caso antes de enviar. Los archivos sirven igual como cuadre contra lo que la DGII tiene.
 - Los 608 de comprobantes *distintos* de rangos anulados (una factura con serie B anulada, números dañados) no existen en el sistema: no se emiten comprobantes en papel.
-- **Retenciones que te hacen terceros** (607: ITBIS e ISR retenidos por el cliente, con su fecha) y **ITBIS llevado al costo / sujeto a proporcionalidad** (606): todavía no se registran.
+- La repetición de una venta en el mes de la retención y los montos de pago de esa segunda línea (se copian los de la emisión) se basan en la ayuda de la DGII, no en los instructivos: confírmalo con tu contador y con la pre-validación.
 - **Notas de crédito/débito de proveedores** en el 606 (NCF modificado): no se registran todavía.
 - Servicios o bienes: la separación del 606 se decide por el tipo de gasto, no línea por línea.
 - La separación del 607 de las facturas de consumo y su «Resumen General» está en el panel, pero el monto exacto que pide la Oficina Virtual (¿todas las E32 o solo las menores de RD$250,000?) conviene confirmarlo con el contador.
