@@ -3,9 +3,10 @@ import Link from "next/link";
 const TABS = [
   { id: "ventas", label: "Ventas", href: "/panel/reportes" },
   { id: "compras", label: "Compras (606)", href: "/panel/reportes/compras" },
+  { id: "dgii", label: "Formatos DGII", href: "/panel/reportes/dgii" },
 ] as const;
 
-/** Pestañas entre el reporte de ventas y el de compras. */
+/** Pestañas entre los reportes de ventas y compras y los formatos de la DGII. */
 export function ReportTabs({ active }: { active: (typeof TABS)[number]["id"] }) {
   return (
     <nav

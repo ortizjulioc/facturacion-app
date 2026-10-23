@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import {
   formatDocument,
+  ISR_WITHHOLDING_TYPES,
   TAX_LABELS,
   type DocumentType,
   type TaxCode,
@@ -124,6 +125,17 @@ export function PurchaseDetail({ id }: { id: string }) {
           {cur === "USD" && ` · Tasa de cambio ${p.exchangeRate}`}
         </p>
 
+        {!draft && (
+          <Datos606
+            id={p.id}
+            paymentDate={p.paymentDate}
+            isrType={p.isrWithholdingType}
+            hasIsr={Number(t.isrWithheld) > 0}
+            credit={p.paymentMethod === "CREDIT"}
+            onSaved={reload}
+          />
+        )}
+
         <div className={tableStyles.wrapper}>
           <table className={tableStyles.table}>
             <thead>
@@ -229,6 +241,95 @@ export function PurchaseDetail({ id }: { id: string }) {
         </div>
       )}
     </>
+  );
+}
+
+/**
+ * Datos del formato 606 que se completan aun con la compra registrada (no cambian la contabilidad): cuándo se pagó y,
+ * si hubo retención de renta, de qué tipo.
+ */
+function Datos606({
+  id,
+  paymentDate,
+  isrType,
+  hasIsr,
+  credit,
+  onSaved,
+}: {
+  id: string;
+  paymentDate: string | null;
+  isrType: number | null;
+  hasIsr: boolean;
+  credit: boolean;
+  onSaved: () => void;
+}) {
+  const { toast } = useDialogs();
+  const [date, setDate] = useState(paymentDate ?? "");
+  const [type, setType] = useState(isrType ? String(isrType) : "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const changed = date !== (paymentDate ?? "") || type !== (isrType ? String(isrType) : "");
+  const missing = hasIsr && !isrType;
+
+  async function save() {
+    setError(null);
+    setBusy(true);
+    try {
+      await unwrap(
+        await api.v1.purchases[":id"].dgii.$patch({
+          param: { id },
+          json: { paymentDate: date || null, ...(hasIsr ? { isrWithholdingType: type ? Number(type) : null } : {}) },
+        }),
+      );
+      toast("Datos del 606 guardados");
+      onSaved();
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="space-y-3 rounded-md border border-zinc-200 p-4 dark:border-zinc-800">
+      <h2 className="text-sm font-medium">Datos para el formato 606</h2>
+      <div className="flex flex-wrap items-end gap-4">
+        <label className="flex flex-col gap-1.5 text-sm font-medium">
+          Fecha de pago
+          <input
+            type="date"
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+            className="rounded-md border border-zinc-300 bg-background px-3 py-2 text-sm dark:border-zinc-700"
+          />
+          <span className="text-xs font-normal text-zinc-500">
+            {credit && !date ? "Compra a crédito: sin pagar todavía" : "Vacía: se toma la del comprobante"}
+          </span>
+        </label>
+        {hasIsr && (
+          <label className="flex flex-col gap-1.5 text-sm font-medium">
+            Tipo de retención en ISR
+            <select
+              value={type}
+              onChange={(e) => setType(e.target.value)}
+              className="rounded-md border border-zinc-300 bg-background px-3 py-2 text-sm dark:border-zinc-700"
+            >
+              <option value="">Elegir…</option>
+              {Object.entries(ISR_WITHHOLDING_TYPES).map(([k, label]) => (
+                <option key={k} value={k}>
+                  {k.padStart(2, "0")} · {label}
+                </option>
+              ))}
+            </select>
+            {missing && <span className="text-xs font-normal text-amber-700 dark:text-amber-400">Falta: el 606 no se puede enviar sin él</span>}
+          </label>
+        )}
+        <Button variant="secondary" disabled={busy || !changed} onClick={save}>
+          {busy ? "Guardando…" : "Guardar"}
+        </Button>
+      </div>
+      <ErrorNote message={error} />
+    </section>
   );
 }
 

@@ -6,6 +6,7 @@ import { useMemo, useState, type FormEvent } from "react";
 import {
   calculateDocument,
   EXPENSE_TYPES,
+  ISR_WITHHOLDING_TYPES,
   formatDocument,
   fromCents,
   TAX_CODES,
@@ -173,6 +174,11 @@ function EditorForm({ init, onSaved }: { init: Init; onSaved: () => void }) {
       ? purchase.totals.isrWithheld
       : "",
   );
+  // 606: fecha de pago y tipo de retención en ISR (se pueden completar después, en el detalle de la compra).
+  const [paymentDate, setPaymentDate] = useState(purchase?.paymentDate ?? "");
+  const [isrType, setIsrType] = useState(
+    purchase?.isrWithholdingType ? String(purchase.isrWithholdingType) : "",
+  );
   const [lines, setLines] = useState<PLine[]>(
     purchase?.lines.map((l) => ({
       key: nextKey(),
@@ -237,6 +243,9 @@ function EditorForm({ init, onSaved }: { init: Init; onSaved: () => void }) {
       notes: notes.trim(),
       itbisWithheld: isExpense ? "0" : num(itbisWithheld) || "0",
       isrWithheld: isExpense ? "0" : num(isrWithheld) || "0",
+      paymentDate: paymentDate || null,
+      isrWithholdingType:
+        !isExpense && num(isrWithheld) && isrType ? Number(isrType) : null,
       lines: lines.map((l) => ({
         productId: l.productId,
         name: l.name.trim() || undefined,
@@ -587,8 +596,23 @@ function EditorForm({ init, onSaved }: { init: Init; onSaved: () => void }) {
                   onChange={(e) => setIsrWithheld(e.target.value)}
                 />
               </Field>
+              {Number(num(isrWithheld)) > 0 && (
+                <Field label="Tipo de retención en ISR" hint="Lo pide el formato 606" className="col-span-2">
+                  <Select value={isrType} onChange={(e) => setIsrType(e.target.value)}>
+                    <option value="">Elegir…</option>
+                    {Object.entries(ISR_WITHHOLDING_TYPES).map(([k, label]) => (
+                      <option key={k} value={k}>
+                        {k.padStart(2, "0")} · {label}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+              )}
             </div>
           )}
+          <Field label="Fecha de pago" hint="606. Vacía: al contado es la del comprobante; a crédito, hasta que se pague">
+            <Input type="date" value={paymentDate} min={invoiceDate} onChange={(e) => setPaymentDate(e.target.value)} />
+          </Field>
           <Field label="Notas internas">
             <Textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
           </Field>
