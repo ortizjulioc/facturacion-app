@@ -29,6 +29,11 @@ const schema = z.object({
   FE_RATE_LIMIT_PER_RNC_PER_MINUTE: z.coerce.number().int().min(1).default(300),
   /** Pedidos por minuto y dirección a la autenticación (semillas y tokens). */
   FE_AUTH_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).default(20),
+  /**
+   * Carpeta con las versiones de la caja (lo que deja `pnpm --filter @facturacion/pos dist`: el instalador, su .blockmap y
+   * latest.yml). La API las publica en /updates/caja para la auto-actualización; sin ella no hay versiones que ofrecer.
+   */
+  POS_RELEASES_DIR: z.string().min(1).optional(),
 }).superRefine((v, ctx) => {
   if (v.NODE_ENV === "production" && !v.CERT_ENCRYPTION_KEY) {
     ctx.addIssue({ code: "custom", path: ["CERT_ENCRYPTION_KEY"], message: "Es obligatoria en producción" });

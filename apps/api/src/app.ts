@@ -25,6 +25,7 @@ import { purchaseReports } from "./routes/reports-purchases";
 import { sequences } from "./routes/sequences";
 import { suppliers } from "./routes/suppliers";
 import { terminals } from "./routes/terminals";
+import { createUpdates } from "./routes/updates";
 import { requireTenant } from "./middleware/tenant";
 import { webOrigins } from "./env";
 import type { AppEnv, Deps } from "./types";
@@ -71,6 +72,8 @@ export function createApp(deps: Deps) {
       return c.json({ status: "ready" });
     })
     .route("/fe", createFe())
+    // Versiones de la caja (instalador y latest.yml): públicas, las consulta la auto-actualización.
+    .route("/updates/caja", createUpdates(env.POS_RELEASES_DIR))
     .on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw))
     .get("/v1/me", async (c) => {
       const session = await auth.api.getSession({ headers: c.req.raw.headers });
