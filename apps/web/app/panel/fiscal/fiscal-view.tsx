@@ -239,6 +239,7 @@ function CompanyForm({
             environment: text("environment") as "TEST" | "CERT" | "PROD",
             requireShift: f.get("requireShift") === "on",
             sendToDgii: f.get("sendToDgii") === "on",
+            requireReceiverAuth: f.get("requireReceiverAuth") === "on",
           },
         }),
       );
@@ -343,6 +344,14 @@ function CompanyForm({
         />
         <p className="-mt-2 text-xs text-zinc-500">
           Necesita el certificado digital cargado y que la empresa esté habilitada como emisor electrónico en el ambiente elegido. Los envíos que fallen por la red se reintentan solos; los demás quedan para revisión.
+        </p>
+        <Checkbox
+          name="requireReceiverAuth"
+          label="Exigir autenticación a quienes me envían comprobantes electrónicos"
+          defaultChecked={company?.requireReceiverAuth ?? false}
+        />
+        <p className="-mt-2 text-xs text-zinc-500">
+          Con esta opción, tus proveedores deben pedir una semilla, firmarla con su certificado y usar el token que reciben; solo pueden enviarte comprobantes emitidos por el RNC de su certificado. Si la activas, registra también la dirección de autenticación en la DGII. Sin ella, cualquiera puede enviarte comprobantes (se validan igual).
         </p>
       </fieldset>
       <ErrorNote message={error} />

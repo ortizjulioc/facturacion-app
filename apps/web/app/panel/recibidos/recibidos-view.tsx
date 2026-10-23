@@ -189,7 +189,11 @@ function ServicesNote() {
         <p>
           Aprobación comercial: <code className="font-mono text-xs">{base}/fe/aprobacioncomercial/api/ecf</code>
         </p>
-        <p>Necesitas el certificado digital cargado para que se pueda firmar el acuse de recibo. La autenticación por semilla (opcional en el estándar) no está habilitada.</p>
+        <p>
+          Autenticación (opcional, se activa en Configuración fiscal): <code className="font-mono text-xs">{base}/fe/autenticacion/api/semilla</code> y{" "}
+          <code className="font-mono text-xs">{base}/fe/autenticacion/api/validacioncertificado</code>
+        </p>
+        <p>Necesitas el certificado digital cargado para que se pueda firmar el acuse de recibo. Los servicios tienen límite de uso por dirección y por empresa.</p>
       </div>
     </details>
   );
