@@ -423,6 +423,10 @@ model Document {
   propinaAmount        BigInt           @default(0)
   total                BigInt           @default(0)
   issuedAt             DateTime?
+  /// Retenciones que el comprador nos hizo al pagar (607). Se completan después de emitir.
+  itbisWithheldByThirds BigInt          @default(0)
+  isrWithheldByThirds   BigInt          @default(0)
+  withholdingDate       DateTime?       @db.Date
   createdById          String
   createdAt            DateTime         @default(now())
   updatedAt            DateTime         @updatedAt
@@ -585,6 +589,9 @@ model Purchase {
   paymentDate       DateTime?       @db.Date
   /// Tipo de retención en ISR del 606 (1–9); obligatorio si hay ISR retenido.
   isrWithholdingType Int?
+  /// ITBIS que se lleva directo al costo (no se adelanta) y el sujeto a proporcionalidad (606). Se completan después de registrar.
+  itbisToCost       BigInt          @default(0)
+  itbisProportional BigInt          @default(0)
   postedAt          DateTime?
   createdById       String
   createdAt         DateTime        @default(now())

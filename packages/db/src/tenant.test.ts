@@ -224,6 +224,15 @@ describe.skipIf(!process.env.DATABASE_URL)("RLS multiempresa", () => {
       await expect(
         asA.document.update({ where: { id: doc.id }, data: { notes: "x" } }),
       ).rejects.toThrow();
+      // Solo las retenciones que el comprador hace al pagar se pueden anotar después.
+      const withheld = await asA.document.update({
+        where: { id: doc.id },
+        data: { itbisWithheldByThirds: 100n, isrWithheldByThirds: 50n, withholdingDate: new Date("2026-10-20T00:00:00Z") },
+      });
+      expect(withheld).toMatchObject({ status: "ISSUED", itbisWithheldByThirds: 100n });
+      await expect(
+        asA.document.update({ where: { id: doc.id }, data: { isrWithheldByThirds: 0n, total: 2n } }),
+      ).rejects.toThrow(/no se puede modificar/);
       // …ni volver a borrador, ni borrarlo.
       await expect(
         asA.document.update({ where: { id: doc.id }, data: { status: "DRAFT" } }),
