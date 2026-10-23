@@ -324,6 +324,8 @@ export const purchaseDto = (p: PurchaseFull) => ({
   paymentMethod: p.paymentMethod,
   paymentDate: p.paymentDate ? p.paymentDate.toISOString().slice(0, 10) : null,
   isrWithholdingType: p.isrWithholdingType,
+  itbisToCost: m(p.itbisToCost),
+  itbisProportional: m(p.itbisProportional),
   notes: p.notes,
   totals: {
     discount: m(p.totalDiscount),

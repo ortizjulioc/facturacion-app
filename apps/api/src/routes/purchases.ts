@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { fromCents, isIsrWithholdingType } from "@facturacion/core";
+import { fromCents, isIsrWithholdingType, toCents } from "@facturacion/core";
 import type { Prisma } from "@facturacion/db";
 import { auditEntry } from "../lib/audit";
 import {
@@ -13,7 +13,7 @@ import {
   purchaseInput,
   purchaseSummaryDto,
 } from "../lib/purchases";
-import { isoDate, listQuery, pageOf, uuidParam } from "../lib/schemas";
+import { isoDate, listQuery, money, pageOf, uuidParam } from "../lib/schemas";
 import { zv } from "../lib/validator";
 import { requireRole } from "../middleware/tenant";
 import type { AppEnv } from "../types";
@@ -152,7 +152,7 @@ export const purchases = new Hono<AppEnv>()
   .patch(
     "/:id/dgii",
     zv("param", uuidParam),
-    zv("json", z.object({ paymentDate: isoDate.nullable().optional(), isrWithholdingType: z.number().int().min(1).max(9).nullable().optional() })),
+    zv("json", z.object({ paymentDate: isoDate.nullable().optional(), isrWithholdingType: z.number().int().min(1).max(9).nullable().optional(), itbisToCost: money.optional(), itbisProportional: money.optional() })),
     async (c) => {
       const { id } = c.req.valid("param");
       const input = c.req.valid("json");
@@ -168,8 +168,13 @@ export const purchases = new Hono<AppEnv>()
         if (type !== null && current.isrWithheld === 0n) {
           throw new HTTPException(422, { message: "La compra no tiene ISR retenido" });
         }
-        const updated = await tx.purchase.update({ where: { id }, data: { paymentDate, isrWithholdingType: type }, include: FULL });
-        await tx.auditLog.create({ data: auditEntry(c, "purchase.dgii", "purchase", id, { paymentDate: input.paymentDate ?? null, isrWithholdingType: type }) });
+        const itbisToCost = input.itbisToCost === undefined ? current.itbisToCost : toCents(input.itbisToCost);
+        const itbisProportional = input.itbisProportional === undefined ? current.itbisProportional : toCents(input.itbisProportional);
+        if (itbisToCost + itbisProportional > current.totalTax) {
+          throw new HTTPException(422, { message: "El ITBIS llevado al costo y el sujeto a proporcionalidad no pueden sumar más que el ITBIS de la compra" });
+        }
+        const updated = await tx.purchase.update({ where: { id }, data: { paymentDate, isrWithholdingType: type, itbisToCost, itbisProportional }, include: FULL });
+        await tx.auditLog.create({ data: auditEntry(c, "purchase.dgii", "purchase", id, { paymentDate: input.paymentDate ?? null, isrWithholdingType: type, itbisToCost: itbisToCost.toString(), itbisProportional: itbisProportional.toString() }) });
         return updated;
       });
       return c.json({ data: purchaseDto(purchase) });

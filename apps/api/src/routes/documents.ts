@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { ECF_TYPES } from "@facturacion/core";
+import { convertCents, ECF_TYPES, toCents } from "@facturacion/core";
 import type { Prisma } from "@facturacion/db";
 import { auditEntry } from "../lib/audit";
 import {
@@ -15,7 +15,7 @@ import { issueDocument } from "../lib/issue";
 import { enqueueIfAuto, enqueueSubmission, fiscalBlock, processDue, retrySubmission } from "../lib/fiscal";
 import { signIssued } from "../lib/signing";
 import { requireRole } from "../middleware/tenant";
-import { listQuery, pageOf, uuidParam } from "../lib/schemas";
+import { isoDate, listQuery, money, pageOf, uuidParam } from "../lib/schemas";
 import { zv } from "../lib/validator";
 import type { AppEnv } from "../types";
 
@@ -231,6 +231,53 @@ export const documents = new Hono<AppEnv>()
     });
     return c.json({ data: documentDto(doc, profile) });
   })
+  // Retenciones que el comprador nos hizo al pagar (607): llegan después de emitir, así que se anotan aquí (en pesos).
+  // El comprobante sigue congelado: la base de datos solo deja cambiar estas tres columnas.
+  .patch(
+    "/:id/retentions",
+    requireRole("owner", "admin"),
+    zv("param", uuidParam),
+    zv(
+      "json",
+      z.object({
+        itbisWithheld: money.default("0"),
+        isrWithheld: money.default("0"),
+        date: isoDate.nullish(),
+      }),
+    ),
+    async (c) => {
+      const { id } = c.req.valid("param");
+      const input = c.req.valid("json");
+      const doc = await c.get("run")(async (tx) => {
+        const current = await tx.document.findFirst({ where: { id }, include: FULL });
+        if (!current) throw notFound();
+        if (current.status === "DRAFT" || !current.issuedAt || !["E31", "E32", "E33", "E34"].includes(current.type)) {
+          throw new HTTPException(422, { message: "Solo los comprobantes de venta emitidos llevan retenciones" });
+        }
+        const itbis = toCents(input.itbisWithheld);
+        const isr = toCents(input.isrWithheld);
+        const rate = current.exchangeRate.toString();
+        if (itbis > convertCents(current.totalTax, rate)) throw new HTTPException(422, { message: "El ITBIS retenido no puede superar el ITBIS del comprobante" });
+        if (isr > convertCents(current.subtotal, rate)) throw new HTTPException(422, { message: "La retención de renta no puede superar el monto del comprobante sin impuestos" });
+        if ((itbis > 0n || isr > 0n) && !input.date) throw new HTTPException(422, { message: "Con retenciones hace falta la fecha de retención" });
+        const issuedOn = new Intl.DateTimeFormat("sv-SE", { timeZone: "America/Santo_Domingo" }).format(current.issuedAt);
+        if (input.date && input.date < issuedOn) throw new HTTPException(422, { message: "La fecha de retención no puede ser anterior a la emisión" });
+        const none = itbis === 0n && isr === 0n;
+        const updated = await tx.document.update({
+          where: { id },
+          data: {
+            itbisWithheldByThirds: itbis,
+            isrWithheldByThirds: isr,
+            withholdingDate: none || !input.date ? null : new Date(`${input.date}T00:00:00Z`),
+          },
+          include: FULL,
+        });
+        await tx.auditLog.create({ data: auditEntry(c, "document.retentions", "document", id, { itbis: input.itbisWithheld, isr: input.isrWithheld, date: input.date ?? null }) });
+        return updated;
+      });
+      return c.json({ data: documentDto(doc, await c.get("db").companyProfile.findFirst({ select: { rnc: true, environment: true } })) });
+    },
+  )
   // Pone el comprobante firmado en la cola de envío a la DGII (o vuelve a ponerlo si falló).
   .post("/:id/send", requireRole("owner", "admin"), zv("param", uuidParam), async (c) => {
     const { id } = c.req.valid("param");

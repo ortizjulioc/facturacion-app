@@ -3190,6 +3190,91 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
         expect(lines).toHaveLength(5);
       });
 
+      it("606: el ITBIS llevado al costo y el sujeto a proporcionalidad se completan después y alimentan el ITBIS por adelantar", async () => {
+        const s = await buying("fm8");
+        const p = await draftPurchase(s); // ITBIS 90.00
+        await postPurchase(s, p.id);
+        const patch = (body: Json) => send("PATCH", `/v1/purchases/${p.id}/dgii`, body, s.cookie);
+        const ok = await patch({ itbisToCost: "30.00", itbisProportional: "20.00" });
+        expect(ok.status).toBe(200);
+        expect((await json(ok)).data).toMatchObject({ itbisToCost: "30.00", itbisProportional: "20.00" });
+        const row = (await preview(s.cookie, 606)).data.rows[0] as string[];
+        expect(row.slice(10, 15)).toEqual(["90.00", "", "20.00", "30.00", "60.00"]);
+
+        const tooMuch = await patch({ itbisToCost: "80.00" });
+        expect(tooMuch.status).toBe(422);
+        expect(await error(tooMuch)).toMatch(/no pueden sumar más/);
+        expect((await patch({ itbisToCost: "-1" })).status).toBe(400);
+        // Lo anterior queda como estaba.
+        expect(((await preview(s.cookie, 606)).data.rows[0] as string[])[13]).toBe("30.00");
+      });
+
+      it("607: las retenciones del cliente se anotan después de emitir y van con su fecha en el mismo mes", async () => {
+        const b = await billing("fm9", { seqs: [["E31", 1, 10], ["E34", 1, 10]] });
+        const company = (await json(await post("/v1/customers", { name: "Cliente SRL", documentType: "RNC", documentNumber: "131246796" }, b.cookie))).data;
+        const draft = await createDraft(b, { type: "E31", customerId: company.id, payments: [{ method: "CASH", amount: "236.00" }] });
+        const patch = (id: string, body: Json, cookie = b.cookie) => send("PATCH", `/v1/documents/${id}/retentions`, body, cookie);
+
+        const early = await patch(draft.id, { itbisWithheld: "10.00", date: todayStr });
+        expect(early.status).toBe(422); // un borrador no lleva retenciones
+        const e31 = (await json(await issue(b, draft.id))).data as Json;
+        expect(e31.retentions).toEqual({ itbisWithheld: "0.00", isrWithheld: "0.00", date: null });
+
+        const bad = async (body: Json, message: RegExp) => {
+          const res = await patch(e31.id, body);
+          expect(res.status, JSON.stringify(body)).toBe(422);
+          expect(await error(res)).toMatch(message);
+        };
+        await bad({ itbisWithheld: "36.01", date: todayStr }, /ITBIS retenido no puede superar/);
+        await bad({ isrWithheld: "200.01", date: todayStr }, /retención de renta no puede superar/);
+        await bad({ itbisWithheld: "10.00" }, /fecha de retención/);
+        await bad({ itbisWithheld: "10.00", date: "2020-01-01" }, /anterior a la emisión/);
+
+        const res = await patch(e31.id, { itbisWithheld: "36.00", isrWithheld: "20.00", date: todayStr });
+        expect(res.status, JSON.stringify(await res.clone().json())).toBe(200);
+        expect((await json(res)).data.retentions).toEqual({ itbisWithheld: "36.00", isrWithheld: "20.00", date: todayStr });
+
+        const p = (await preview(b.cookie, 607)).data;
+        expect(p.errors).toEqual([]);
+        const r = p.rows[0] as string[];
+        expect([r[6], r[9], r[11]]).toEqual([todayStr.replaceAll("-", ""), "36.00", "20.00"]);
+        expect(p.totals["Retenido por clientes"]).toBe("56.00");
+
+        // Se puede quitar: en cero y sin fecha.
+        const cleared = await patch(e31.id, { itbisWithheld: "0", isrWithheld: "0" });
+        expect((await json(cleared)).data.retentions).toEqual({ itbisWithheld: "0.00", isrWithheld: "0.00", date: null });
+
+        // Solo propietarios y administradores.
+        const worker = await signUp("fm9w");
+        await prisma.member.create({ data: { id: randomUUID(), organizationId: b.orgId, userId: worker.userId, role: "member" } });
+        expect((await patch(e31.id, { itbisWithheld: "1.00", date: todayStr }, await setActive(b.orgId, worker.cookie))).status).toBe(403);
+      });
+
+      it("607: si el cliente retiene en un mes posterior, la venta se repite en ese mes con la retención", async () => {
+        const b = await billing("fm10", { seqs: [["E31", 1, 10]] });
+        const company = (await json(await post("/v1/customers", { name: "Cliente SRL", documentType: "RNC", documentNumber: "131246796" }, b.cookie))).data;
+        const e31 = (await json(await issue(b, (await createDraft(b, { type: "E31", customerId: company.id, payments: [{ method: "CREDIT", amount: "236.00" }] })).id))).data as Json;
+        const next = new Date(`${todayStr.slice(0, 7)}-01T00:00:00Z`);
+        next.setUTCMonth(next.getUTCMonth() + 1);
+        const nextDay = next.toISOString().slice(0, 10);
+        const nextPeriod = nextDay.slice(0, 7).replace("-", "");
+        expect((await send("PATCH", `/v1/documents/${e31.id}/retentions`, { itbisWithheld: "36.00", date: nextDay }, b.cookie)).status).toBe(200);
+
+        // En el mes de la emisión va sin retención (a crédito) y no se repite nada.
+        const now = (await preview(b.cookie, 607)).data;
+        expect(now.count).toBe(1);
+        expect((now.rows[0] as string[]).slice(6, 12)).toEqual(["", "200.00", "36.00", "", "", ""]);
+        expect((now.rows[0] as string[])[19]).toBe("236.00");
+
+        // En el mes de la retención aparece otra vez, con la fecha y el monto retenido.
+        const later = (await preview(b.cookie, 607, nextPeriod)).data;
+        expect(later).toMatchObject({ count: 1, errors: [] });
+        const r = later.rows[0] as string[];
+        expect([r[2], r[5], r[6], r[9]]).toEqual([e31.encf, todayStr.replaceAll("-", ""), nextDay.replaceAll("-", ""), "36.00"]);
+        expect(later.warnings.join(" ")).toMatch(/1 venta\(s\) de meses anteriores/);
+        expect(later.consumerSummary.count).toBe(0);
+      });
+
       it("607: el comprobante en dólares se convierte a pesos y las formas de pago cuadran con el total", async () => {
         const b = await billing("fm5", { seqs: [["E31", 1, 10]] });
         const company = (await json(await post("/v1/customers", { name: "Cliente SRL", documentType: "RNC", documentNumber: "131246796" }, b.cookie))).data;

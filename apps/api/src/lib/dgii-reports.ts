@@ -72,8 +72,8 @@ export function row606(p: PurchaseData): Row606 {
     goods: goods ? net : 0n,
     itbis: toDop(p.totalTax, p.exchangeRate),
     itbisWithheld: toDop(p.itbisWithheld, p.exchangeRate),
-    itbisProportional: 0n,
-    itbisToCost: 0n,
+    itbisProportional: toDop(p.itbisProportional, p.exchangeRate),
+    itbisToCost: toDop(p.itbisToCost, p.exchangeRate),
     isrType: p.isrWithholdingType,
     isrWithheld: toDop(p.isrWithheld, p.exchangeRate),
     selective: 0n,
@@ -92,7 +92,13 @@ export const SALE_TYPES = ["E31", "E32", "E33", "E34"] as const;
 
 const ID_TYPE_607: Record<string, IdType> = { RNC: 1, CEDULA: 2, PASAPORTE: 3 };
 
-export function row607(d: DocumentData): Row607 {
+/**
+ * Una venta con retenciones se informa en el período en que se retuvo (si es el mismo de la emisión, en una sola línea;
+ * si es posterior, la de la emisión va sin retenciones y se repite en el período de la retención, con sus montos y fecha).
+ */
+export function row607(d: DocumentData, period?: { from: string; to: string }): Row607 {
+  const retained = d.withholdingDate ? d.withholdingDate.toISOString().slice(0, 10) : null;
+  const withheld = retained !== null && (!period || (retained >= period.from && retained <= period.to));
   const rate = d.exchangeRate;
   const billed = toDop(d.subtotal, rate);
   const itbis = toDop(d.totalTax, rate);
@@ -130,11 +136,11 @@ export function row607(d: DocumentData): Row607 {
     modifiedNcf: modifies ? d.referencedEncf : null,
     incomeType: 1,
     date: localDate(d.issuedAt!),
-    withholdingDate: null,
+    withholdingDate: withheld ? retained : null,
     billed,
     itbis,
-    itbisWithheldByThirds: 0n,
-    isrWithheldByThirds: 0n,
+    itbisWithheldByThirds: withheld ? d.itbisWithheldByThirds : 0n,
+    isrWithheldByThirds: withheld ? d.isrWithheldByThirds : 0n,
     selective: 0n,
     otherTaxes: 0n,
     tip,
@@ -224,23 +230,34 @@ export async function previewFormat(tx: Prisma.TransactionClient, format: Format
     totals["Retención de renta"] = fromCents(sum(rows.map((r) => r.isrWithheld)));
   } else if (format === 607) {
     const docs = await tx.document.findMany({
-      where: { type: { in: [...SALE_TYPES] }, status: { notIn: ["DRAFT", "REJECTED"] }, issuedAt: { gte: range.start, lt: range.end } },
+      where: {
+        type: { in: [...SALE_TYPES] },
+        status: { notIn: ["DRAFT", "REJECTED"] },
+        OR: [
+          { issuedAt: { gte: range.start, lt: range.end } },
+          // Emitidas antes, con retención en este período: se repiten con la retención.
+          { issuedAt: { lt: range.start }, withholdingDate: { gte: new Date(`${range.from}T00:00:00Z`), lte: new Date(`${range.to}T00:00:00Z`) } },
+        ],
+      },
       include: { payments: true },
       orderBy: [{ issuedAt: "asc" }, { encf: "asc" }],
     });
     const rejected = await tx.document.count({ where: { type: { in: [...SALE_TYPES] }, status: "REJECTED", issuedAt: { gte: range.start, lt: range.end } } });
     if (rejected > 0) warnings.push(`Hay ${rejected} comprobante(s) rechazados por la DGII en este período: no se incluyen.`);
-    const all = docs.map((d) => ({ doc: d, row: row607(d) }));
+    const all = docs.map((d) => ({ doc: d, row: row607(d, range) }));
+    const repeated = docs.filter((d) => d.issuedAt! < range.start).length;
+    if (repeated > 0) warnings.push(`${repeated} venta(s) de meses anteriores se repiten aquí porque el cliente retuvo en este período (con sus montos y fecha de retención).`);
     // Las facturas de consumo menores de RD$250,000 no van en el archivo: se resumen en la Oficina Virtual.
     const small = all.filter(({ doc, row }) => doc.type === "E32" && row.billed + row.itbis + row.tip < CONSUMER_INVOICE_LISTING_THRESHOLD);
     const listed = all.filter((x) => !small.includes(x));
-    const consumo = all.filter(({ doc }) => doc.type === "E32");
+    const consumo = all.filter(({ doc }) => doc.type === "E32" && doc.issuedAt! >= range.start); // las repetidas de otros meses ya se resumieron entonces
     const bill = (xs: typeof all) => fromCents(sum(xs.map((x) => x.row.billed)));
-    consumerSummary = { count: consumo.length, billed: bill(consumo), listedInFile: consumo.length - small.length, belowThreshold: { count: small.length, billed: bill(small) } };
+    const smallNow = small.filter((x) => consumo.includes(x));
+    consumerSummary = { count: consumo.length, billed: bill(consumo), listedInFile: consumo.length - smallNow.length, belowThreshold: { count: smallNow.length, billed: bill(smallNow) } };
     file = build607({ rnc, period, rows: listed.map((x) => x.row) });
     totals["Monto facturado"] = bill(listed);
     totals["ITBIS facturado"] = fromCents(sum(listed.map((x) => x.row.itbis)));
-    warnings.push("Las retenciones que te hicieron terceros (ITBIS e ISR) todavía no se registran en el sistema: si te retuvieron, agrégalas al archivo con tu contador.");
+    if (all.some((x) => x.row.itbisWithheldByThirds > 0n || x.row.isrWithheldByThirds > 0n)) totals["Retenido por clientes"] = fromCents(sum(listed.map((x) => x.row.itbisWithheldByThirds + x.row.isrWithheldByThirds)));
   } else {
     const anns = await tx.sequenceAnnulment.findMany({ where: { state: "DONE", completedAt: { gte: range.start, lt: range.end } }, orderBy: { completedAt: "asc" } });
     const rows = anns.flatMap(rows608);

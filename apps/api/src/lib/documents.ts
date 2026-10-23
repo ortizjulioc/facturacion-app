@@ -439,6 +439,12 @@ export const documentDto = (d: DocumentFull, profile: StampProfile | null = null
     propina: m(d.propinaAmount),
     total: m(d.total),
   },
+  // Retenciones que el comprador nos hizo al pagar (607), siempre en pesos.
+  retentions: {
+    itbisWithheld: m(d.itbisWithheldByThirds),
+    isrWithheld: m(d.isrWithheldByThirds),
+    date: d.withholdingDate ? d.withholdingDate.toISOString().slice(0, 10) : null,
+  },
   lines: d.lines.map((l) => ({
     lineNumber: l.lineNumber,
     productId: l.productId,
