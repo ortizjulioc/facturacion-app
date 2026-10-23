@@ -37,3 +37,6 @@ npm-debug.log*
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+
+# Salida del prototipo contra TesteCF (XML firmados, respuestas, números usados)
+testecf-out/
