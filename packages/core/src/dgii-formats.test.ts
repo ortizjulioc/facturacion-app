@@ -185,6 +185,28 @@ describe("608: anulados", () => {
   });
 });
 
+describe("retenciones e ITBIS al costo", () => {
+  it("606: el ITBIS al costo y por proporcionalidad no pueden pasar del ITBIS, y el retenido tampoco", () => {
+    expect(check606(row606({ itbisToCost: 10_000n, itbisProportional: 8_000n }))).toEqual([]);
+    expect(check606(row606({ itbisToCost: 10_000n, itbisProportional: 8_001n }))).toContain(
+      "El ITBIS al costo y el sujeto a proporcionalidad no pueden sumar más que el ITBIS facturado",
+    );
+    expect(check606(row606({ itbisWithheld: 18_001n }))).toContain("El ITBIS retenido no puede superar el ITBIS facturado");
+    const c = build606({ rnc: "130000001", period: "202610", rows: [row606({ itbisToCost: 5_000n, itbisProportional: 3_000n })] }).text.split("\r\n")[1]!.split("|");
+    expect(c.slice(10, 15)).toEqual(["180.00", "", "30.00", "50.00", "130.00"]);
+  });
+
+  it("607: las retenciones del comprador no pueden pasar de lo facturado y su fecha no puede ser anterior al comprobante", () => {
+    const ok = row607({ itbisWithheldByThirds: 18_000n, isrWithheldByThirds: 10_000n, withholdingDate: "2026-10-20" });
+    expect(check607(ok)).toEqual([]);
+    const c = build607({ rnc: "130000001", period: "202610", rows: [ok] }).text.split("\r\n")[1]!.split("|");
+    expect([c[6], c[9], c[11]]).toEqual(["20261020", "180.00", "100.00"]);
+    expect(check607({ ...ok, itbisWithheldByThirds: 18_001n })).toContain("El ITBIS retenido por el comprador no puede superar el ITBIS facturado");
+    expect(check607({ ...ok, isrWithheldByThirds: 100_001n })).toContain("La retención de renta no puede superar el monto facturado");
+    expect(check607({ ...ok, withholdingDate: "2026-10-01" })).toContain("La fecha de retención no puede ser anterior al comprobante");
+  });
+});
+
 describe("períodos", () => {
   it("da el primer y el último día del mes", () => {
     expect(periodBounds("202610")).toEqual({ from: "2026-10-01", to: "2026-10-31" });

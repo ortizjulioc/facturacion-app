@@ -181,6 +181,8 @@ export function check606(r: Row606): string[] {
   if (r.isrType !== null && r.isrWithheld === 0n) e.push("Hay un tipo de retención en ISR pero no hay monto retenido");
   if (r.paymentDate && r.paymentDate < r.date) e.push("La fecha de pago no puede ser anterior a la del comprobante");
   if (r.itbisToCost > r.itbis) e.push("El ITBIS llevado al costo no puede superar el ITBIS facturado");
+  if (r.itbisToCost + r.itbisProportional > r.itbis) e.push("El ITBIS al costo y el sujeto a proporcionalidad no pueden sumar más que el ITBIS facturado");
+  if (r.itbisWithheld > r.itbis) e.push("El ITBIS retenido no puede superar el ITBIS facturado");
   if (!(r.paymentForm in PAYMENT_FORMS_606)) e.push("Forma de pago inválida");
   const money = [r.services, r.goods, r.itbis, r.itbisWithheld, r.itbisProportional, r.itbisToCost, r.isrWithheld, r.selective, r.otherTaxes, r.tip];
   if (money.some((v) => v < 0n)) e.push("Los montos no pueden ser negativos");
@@ -267,6 +269,9 @@ export function check607(r: Row607): string[] {
   else if (r.idType === null) e.push("No se sabe si el documento del comprador es RNC, cédula o pasaporte");
   if (!(r.incomeType in INCOME_TYPES)) e.push("Tipo de ingreso inválido");
   if ((r.itbisWithheldByThirds > 0n || r.isrWithheldByThirds > 0n) && !r.withholdingDate) e.push("Con retenciones hace falta la fecha de retención");
+  if (r.itbisWithheldByThirds > r.itbis) e.push("El ITBIS retenido por el comprador no puede superar el ITBIS facturado");
+  if (r.isrWithheldByThirds > r.billed) e.push("La retención de renta no puede superar el monto facturado");
+  if (r.withholdingDate && r.withholdingDate < r.date) e.push("La fecha de retención no puede ser anterior al comprobante");
   if (paid607(r) !== total607(r)) e.push(`Las formas de pago (${amount(paid607(r))}) no suman el total del comprobante (${amount(total607(r))})`);
   const money = [r.billed, r.itbis, r.itbisWithheldByThirds, r.isrWithheldByThirds, r.selective, r.otherTaxes, r.tip, r.cash, r.bankTransfer, r.card, r.credit, r.giftVouchers, r.swap, r.otherForms];
   if (money.some((v) => v < 0n)) e.push("Los montos no pueden ser negativos");
