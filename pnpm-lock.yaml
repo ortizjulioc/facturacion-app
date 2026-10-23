@@ -72,6 +72,9 @@ importers:
       '@types/node':
         specifier: ^24
         version: 24.19.2
+      '@xmldom/xmldom':
+        specifier: ^0.9.12
+        version: 0.9.12
       pino-pretty:
         specifier: ^13.2.0
         version: 13.2.0

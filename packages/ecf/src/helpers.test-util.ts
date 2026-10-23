@@ -4,7 +4,7 @@ import { toCents, toMilli, type EcfType } from "@facturacion/core";
 import type { EcfInput } from "./types";
 
 /** Genera un .p12 autofirmado de prueba (RSA 2048). */
-export function testP12(opts: { password?: string; notBefore?: Date; notAfter?: Date; cn?: string } = {}) {
+export function testP12(opts: { password?: string; notBefore?: Date; notAfter?: Date; cn?: string; serialNumber?: string } = {}) {
   const password = opts.password ?? "clave-de-prueba";
   const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const key = forge.pki.privateKeyFromPem(privateKey.export({ type: "pkcs8", format: "pem" }) as string);
@@ -13,7 +13,7 @@ export function testP12(opts: { password?: string; notBefore?: Date; notAfter?: 
   cert.serialNumber = "01";
   cert.validity.notBefore = opts.notBefore ?? new Date("2026-01-01T00:00:00Z");
   cert.validity.notAfter = opts.notAfter ?? new Date("2036-01-01T00:00:00Z");
-  const attrs = [{ name: "commonName", value: opts.cn ?? "EMISOR DE PRUEBA SRL" }];
+  const attrs = [{ name: "commonName", value: opts.cn ?? "EMISOR DE PRUEBA SRL" }, ...(opts.serialNumber ? [{ name: "serialNumber", value: opts.serialNumber }] : [])];
   cert.setSubject(attrs);
   cert.setIssuer(attrs);
   cert.sign(key, forge.md.sha256.create());

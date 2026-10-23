@@ -185,3 +185,26 @@ export function readSignedEcf(xml: string) {
     signedAt: tag("FechaHoraFirma"),
   };
 }
+
+/** Datos del certificado que firmó un XML (el que va en KeyInfo): titular, vigencia y el RNC o cédula que lleva. */
+export type SignerInfo = { subject: string; notBefore: Date; notAfter: Date; rnc: string | null };
+
+/**
+ * Lee el certificado de un XML firmado. El estándar de la DGII pide que el campo SN del certificado sea el RNC,
+ * cédula o pasaporte del titular; se busca ahí (número de serie del sujeto y apellido) y, si no, en el nombre común.
+ * No valida la cadena de confianza del certificado.
+ */
+export function signerInfoOf(signedXml: string): SignerInfo | null {
+  const b64 = signerCertificateOf(signedXml);
+  if (!b64) return null;
+  try {
+    const cert = forge.pki.certificateFromAsn1(forge.asn1.fromDer(forge.util.decode64(b64)));
+    // Por OID: forge solo busca por nombre corto, y serialNumber (2.5.4.5) y surname/SN (2.5.4.4) no lo tienen.
+    const field = (oid: string) => String(cert.subject.attributes.find((x) => x.type === oid)?.value ?? "");
+    const candidates = [field("2.5.4.5"), field("2.5.4.4"), field("2.5.4.3")];
+    const rnc = candidates.map((v) => /(?<!\d)(\d{11}|\d{9})(?!\d)/.exec(v)?.[1] ?? null).find(Boolean) ?? null;
+    return { subject: field("2.5.4.3"), notBefore: cert.validity.notBefore, notAfter: cert.validity.notAfter, rnc };
+  } catch {
+    return null;
+  }
+}

@@ -10,9 +10,11 @@ export {
   signRfce,
   signXml,
   signerCertificateOf,
+  signerInfoOf,
   verifyEcfSignature,
   type EcfCertificate,
   type SignedEcf,
+  type SignerInfo,
 } from "./sign";
 export { ENVIRONMENT_PATH, isSummaryInvoice, serviceUrls, stampUrl, type StampData } from "./qr";
 export { DgiiClient, type DgiiClientOptions, type FetchLike } from "./dgii";

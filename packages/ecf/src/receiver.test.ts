@@ -260,3 +260,17 @@ describe("precio unitario con más de 2 decimales", () => {
     expect(lines[1]!.unitPrice).toBe(toCents("40.00")); // (55.00 + 5.00) / 1.5
   });
 });
+
+describe("titular del certificado que firmó", () => {
+  it("lee el RNC o la cédula del número de serie, del apellido (SN) o del nombre común", async () => {
+    const { signerInfoOf, signXml } = await import("./index");
+    const infoOf = (opts: Parameters<typeof testP12>[0]) => signerInfoOf(signXml("<Doc><v>1</v></Doc>", loadCertificate(...(Object.values(testP12(opts)) as [Uint8Array, string]))));
+    expect(infoOf({ cn: "PROVEEDOR", serialNumber: "IDCDO-101672919" })).toMatchObject({ subject: "PROVEEDOR", rnc: "101672919" });
+    expect(infoOf({ cn: "ANA PEREZ", serialNumber: "00112345678" })!.rnc).toBe("00112345678");
+    expect(infoOf({ cn: "EMPRESA 131246796" })!.rnc).toBe("131246796");
+    expect(infoOf({ cn: "SIN NUMERO" })!.rnc).toBeNull();
+    expect(infoOf({ cn: "X", serialNumber: "1234567890123" })!.rnc).toBeNull(); // 13 dígitos: ni RNC ni cédula
+    expect(signerInfoOf("<Doc/>")).toBeNull();
+    expect(infoOf({ cn: "V", notAfter: new Date("2030-01-01T00:00:00Z") })!.notAfter.toISOString()).toBe("2030-01-01T00:00:00.000Z");
+  });
+});
