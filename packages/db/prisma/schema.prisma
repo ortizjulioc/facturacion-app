@@ -581,6 +581,10 @@ model Purchase {
   total             BigInt          @default(0)
   itbisWithheld     BigInt          @default(0)
   isrWithheld       BigInt          @default(0)
+  /// Fecha en que se pagó (606). Vacía = al contado el día del comprobante, o aún sin pagar si fue a crédito.
+  paymentDate       DateTime?       @db.Date
+  /// Tipo de retención en ISR del 606 (1–9); obligatorio si hay ISR retenido.
+  isrWithholdingType Int?
   postedAt          DateTime?
   createdById       String
   createdAt         DateTime        @default(now())

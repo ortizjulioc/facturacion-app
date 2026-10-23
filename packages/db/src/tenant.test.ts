@@ -520,6 +520,15 @@ describe.skipIf(!process.env.DATABASE_URL)("RLS multiempresa", () => {
       await expect(
         a.as.purchase.update({ where: { id: draft.id }, data: { status: "DRAFT" } }),
       ).rejects.toThrow();
+      // Solo dos datos del 606 se pueden completar después: la fecha de pago y el tipo de retención en ISR.
+      const paid = await a.as.purchase.update({
+        where: { id: draft.id },
+        data: { paymentDate: new Date("2026-10-20T00:00:00Z"), isrWithholdingType: 2 },
+      });
+      expect(paid).toMatchObject({ status: "POSTED", isrWithholdingType: 2 });
+      await expect(
+        a.as.purchase.update({ where: { id: draft.id }, data: { paymentDate: null, notes: "no" } }),
+      ).rejects.toThrow(/no se puede modificar/);
       await expect(a.as.purchase.delete({ where: { id: draft.id } })).rejects.toThrow(
         /no se puede eliminar/,
       );
