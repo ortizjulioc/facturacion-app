@@ -6,3 +6,4 @@ export * from "./document";
 export * from "./ecf";
 export * from "./purchases";
 export * from "./pin";
+export * from "./dgii-formats";
