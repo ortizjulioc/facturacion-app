@@ -130,7 +130,10 @@ export function PurchaseDetail({ id }: { id: string }) {
             id={p.id}
             paymentDate={p.paymentDate}
             isrType={p.isrWithholdingType}
+            itbisToCost={p.itbisToCost}
+            itbisProportional={p.itbisProportional}
             hasIsr={Number(t.isrWithheld) > 0}
+            hasItbis={Number(t.tax) > 0}
             credit={p.paymentMethod === "CREDIT"}
             onSaved={reload}
           />
@@ -246,29 +249,43 @@ export function PurchaseDetail({ id }: { id: string }) {
 
 /**
  * Datos del formato 606 que se completan aun con la compra registrada (no cambian la contabilidad): cuándo se pagó y,
- * si hubo retención de renta, de qué tipo.
+ * si hubo retención de renta, de qué tipo, y cuánto del ITBIS se lleva al costo o queda sujeto a proporcionalidad.
  */
 function Datos606({
   id,
   paymentDate,
   isrType,
+  itbisToCost,
+  itbisProportional,
   hasIsr,
+  hasItbis,
   credit,
   onSaved,
 }: {
   id: string;
   paymentDate: string | null;
   isrType: number | null;
+  itbisToCost: string;
+  itbisProportional: string;
   hasIsr: boolean;
+  hasItbis: boolean;
   credit: boolean;
   onSaved: () => void;
 }) {
   const { toast } = useDialogs();
   const [date, setDate] = useState(paymentDate ?? "");
   const [type, setType] = useState(isrType ? String(isrType) : "");
+  const shown = (v: string) => (Number(v) > 0 ? v : "");
+  const [toCost, setToCost] = useState(shown(itbisToCost));
+  const [proportional, setProportional] = useState(shown(itbisProportional));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const changed = date !== (paymentDate ?? "") || type !== (isrType ? String(isrType) : "");
+  const amount = (v: string) => v.trim().replace(",", ".") || "0";
+  const changed =
+    date !== (paymentDate ?? "") ||
+    type !== (isrType ? String(isrType) : "") ||
+    Number(amount(toCost)) !== Number(itbisToCost) ||
+    Number(amount(proportional)) !== Number(itbisProportional);
   const missing = hasIsr && !isrType;
 
   async function save() {
@@ -278,7 +295,11 @@ function Datos606({
       await unwrap(
         await api.v1.purchases[":id"].dgii.$patch({
           param: { id },
-          json: { paymentDate: date || null, ...(hasIsr ? { isrWithholdingType: type ? Number(type) : null } : {}) },
+          json: {
+            paymentDate: date || null,
+            ...(hasIsr ? { isrWithholdingType: type ? Number(type) : null } : {}),
+            ...(hasItbis ? { itbisToCost: amount(toCost), itbisProportional: amount(proportional) } : {}),
+          },
         }),
       );
       toast("Datos del 606 guardados");
@@ -323,6 +344,32 @@ function Datos606({
             </select>
             {missing && <span className="text-xs font-normal text-amber-700 dark:text-amber-400">Falta: el 606 no se puede enviar sin él</span>}
           </label>
+        )}
+        {hasItbis && (
+          <>
+            <label className="flex flex-col gap-1.5 text-sm font-medium">
+              ITBIS llevado al costo
+              <input
+                inputMode="decimal"
+                placeholder="0.00"
+                value={toCost}
+                onChange={(e) => setToCost(e.target.value)}
+                className="w-32 rounded-md border border-zinc-300 bg-background px-3 py-2 text-sm dark:border-zinc-700"
+              />
+              <span className="text-xs font-normal text-zinc-500">No se adelanta en el ITBIS</span>
+            </label>
+            <label className="flex flex-col gap-1.5 text-sm font-medium">
+              ITBIS por proporcionalidad
+              <input
+                inputMode="decimal"
+                placeholder="0.00"
+                value={proportional}
+                onChange={(e) => setProportional(e.target.value)}
+                className="w-32 rounded-md border border-zinc-300 bg-background px-3 py-2 text-sm dark:border-zinc-700"
+              />
+              <span className="text-xs font-normal text-zinc-500">Art. 349 de la Ley 11-92</span>
+            </label>
+          </>
         )}
         <Button variant="secondary" disabled={busy || !changed} onClick={save}>
           {busy ? "Guardando…" : "Guardar"}

@@ -299,6 +299,13 @@ export function InvoiceDetail({ id }: { id: string }) {
                 {doc.notes}
               </p>
             )}
+            {!draft && canManage && ["E31", "E32", "E33", "E34"].includes(doc.type) && (
+              <Retenciones
+                id={doc.id}
+                retentions={doc.retentions}
+                onSaved={reload}
+              />
+            )}
           </div>
 
           <div className="space-y-1.5 text-sm tabular-nums">
@@ -409,6 +416,72 @@ export function InvoiceDetail({ id }: { id: string }) {
         </div>
       )}
     </>
+  );
+}
+
+/**
+ * Retenciones que el cliente nos hizo al pagar (ITBIS y renta), con su fecha. Van en el formato 607 y se anotan aquí
+ * porque se conocen después de emitir; el comprobante no cambia.
+ */
+function Retenciones({
+  id,
+  retentions,
+  onSaved,
+}: {
+  id: string;
+  retentions: { itbisWithheld: string; isrWithheld: string; date: string | null };
+  onSaved: () => void;
+}) {
+  const { toast } = useDialogs();
+  const [itbis, setItbis] = useState(Number(retentions.itbisWithheld) > 0 ? retentions.itbisWithheld : "");
+  const [isr, setIsr] = useState(Number(retentions.isrWithheld) > 0 ? retentions.isrWithheld : "");
+  const [date, setDate] = useState(retentions.date ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const num = (v: string) => v.trim().replace(",", ".") || "0";
+
+  async function save() {
+    setError(null);
+    setBusy(true);
+    try {
+      await unwrap(
+        await api.v1.documents[":id"].retentions.$patch({
+          param: { id },
+          json: { itbisWithheld: num(itbis), isrWithheld: num(isr), date: date || null },
+        }),
+      );
+      toast("Retenciones guardadas");
+      onSaved();
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const field = "rounded-md border border-zinc-300 bg-background px-3 py-2 text-sm dark:border-zinc-700";
+  return (
+    <section className="space-y-2 rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
+      <p className="text-xs uppercase tracking-wide text-zinc-500">Retenciones del cliente (formato 607, en pesos)</p>
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="flex flex-col gap-1 text-xs font-medium">
+          ITBIS retenido
+          <input className={`${field} w-28`} inputMode="decimal" placeholder="0.00" value={itbis} onChange={(e) => setItbis(e.target.value)} />
+        </label>
+        <label className="flex flex-col gap-1 text-xs font-medium">
+          Renta retenida
+          <input className={`${field} w-28`} inputMode="decimal" placeholder="0.00" value={isr} onChange={(e) => setIsr(e.target.value)} />
+        </label>
+        <label className="flex flex-col gap-1 text-xs font-medium">
+          Fecha de retención
+          <input className={field} type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+        </label>
+        <Button variant="secondary" disabled={busy} onClick={save}>
+          {busy ? "Guardando…" : "Guardar"}
+        </Button>
+      </div>
+      <ErrorNote message={error} />
+    </section>
   );
 }
 
