@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { METHODS, type IpcResult, type PosBridge, type SyncReport } from "../shared/api";
+import { METHODS, type IpcResult, type PosBridge, type SyncReport, type UpdateState } from "../shared/api";
 
 /**
  * Puente seguro entre la pantalla y el proceso principal: la pantalla recibe SOLO estos métodos (no tiene Node
@@ -27,6 +27,11 @@ const bridge = {
     const listener = (_e: unknown, info: { saleId: string; message: string }) => callback(info);
     ipcRenderer.on("pos:print-failed", listener);
     return () => ipcRenderer.removeListener("pos:print-failed", listener);
+  },
+  onUpdate(callback: (state: UpdateState) => void) {
+    const listener = (_e: unknown, state: UpdateState) => callback(state);
+    ipcRenderer.on("pos:update", listener);
+    return () => ipcRenderer.removeListener("pos:update", listener);
   },
 } as unknown as PosBridge;
 

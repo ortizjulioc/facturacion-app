@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { calculateDocument, formatDop, fromCents, toCents, toMilli, type TaxCode } from "@facturacion/core";
-import type { LocalCustomer, LocalProduct, LocalSale, LocalShift, PosState, PrinterConfig, Receipt, SaleInput, ShiftReport } from "../../shared/api";
+import type { LocalCustomer, LocalProduct, LocalSale, LocalShift, PosState, PrinterConfig, Receipt, SaleInput, ShiftReport, UpdateState } from "../../shared/api";
 import { ReconnectModal } from "./Reconnect";
 import { PrinterModal, PrintButton, isPrintable } from "./Printer";
 import { RefundModal } from "./Refund";
@@ -34,6 +34,8 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
   const [message, setMessage] = useState<string | null>(null);
   const [modal, setModal] = useState<null | "pay" | "customer" | "sales" | "reconnect" | "openShift" | "closeShift" | "xreport" | "refund" | "printer">(null);
   const [printer, setPrinter] = useState<PrinterConfig | null>(null);
+  const [update, setUpdate] = useState<UpdateState | null>(null);
+  const [confirmUpdate, setConfirmUpdate] = useState(false);
   const [printFailed, setPrintFailed] = useState<{ saleId: string; message: string } | null>(null);
   const [refundSale, setRefundSale] = useState<LocalSale | undefined>(undefined);
   const [zReport, setZReport] = useState<{ shift: LocalShift; report: ShiftReport } | null>(null);
@@ -45,6 +47,12 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
   useEffect(() => {
     void window.pos.printerConfig().then(setPrinter, () => undefined);
     return window.pos.onPrintFailed(setPrintFailed);
+  }, []);
+
+  // Actualización del programa: se descarga sola; el cajero decide cuándo reiniciar.
+  useEffect(() => {
+    void window.pos.updateState().then(setUpdate, () => undefined);
+    return window.pos.onUpdate(setUpdate);
   }, []);
 
   // Catálogo (se vuelve a leer cuando termina una sincronización: cambia `state.products`).
@@ -142,7 +150,7 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
       <header className="topbar">
         <div className="brand">
           <strong>{state.company?.tradeName ?? state.company?.legalName ?? state.organization?.name}</strong>
-          <span className="muted">{state.terminal?.name} · {state.cashier?.name ?? state.user?.name}</span>
+          <span className="muted" title={update ? `Versión ${update.current}` : undefined}>{state.terminal?.name} · {state.cashier?.name ?? state.user?.name}</span>
         </div>
         <div className="statuses">
           <span className={`badge ${online ? "ok" : "warn"}`} title={lastSync ? `Última sincronización: ${new Date(lastSync.at).toLocaleString("es-DO")}` : "Aún no se ha sincronizado"}>
@@ -165,6 +173,7 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
           >
             {state.signing.certificate && !state.signing.certificate.problem ? "Firma local" : "Sin firma local"}
           </span>
+          {update?.phase === "downloading" && <span className="badge" title={`Descargando la versión ${update.version}`}>Actualización {update.percent}%</span>}
           {state.pendingSales > 0 && <span className="badge warn">{state.pendingSales} por subir</span>}
           {state.shiftErrors.length > 0 && <span className="badge bad" title={state.shiftErrors.join(" · ")}>Turno sin subir</span>}
           {state.rejectedSales > 0 && <span className="badge bad">{state.rejectedSales} rechazadas</span>}
@@ -172,6 +181,15 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
           <span className={`badge ${low(state.numbers.E31) ? "bad" : ""}`} title="Números de e-NCF que quedan para crédito fiscal">E31: {state.numbers.E31}</span>
         </div>
         <div className="actions">
+          {update?.phase === "ready" && (
+            <button
+              className="primary"
+              title={`Versión ${update.version} lista. Se instala sola al cerrar la caja.`}
+              onClick={() => (cart.length > 0 ? setConfirmUpdate(true) : void window.pos.installUpdate())}
+            >
+              Actualizar a v{update.version}
+            </button>
+          )}
           {!state.signedIn && <button onClick={() => setModal("reconnect")}>Iniciar sesión</button>}
           {state.shift ? (
             <>
@@ -348,6 +366,15 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
         />
       )}
       {modal === "xreport" && <ShiftReportModal printer={printer} onClose={() => setModal(null)} />}
+      {confirmUpdate && (
+        <Modal title="Reiniciar para actualizar" onClose={() => setConfirmUpdate(false)}>
+          <p>La caja se cerrará unos segundos y volverá a abrir sola con la versión {update?.version}. <strong>Hay productos en el carrito: se perderán.</strong></p>
+          <div className="row">
+            <button onClick={() => setConfirmUpdate(false)}>Seguir vendiendo</button>
+            <button className="primary" onClick={() => void window.pos.installUpdate()}>Reiniciar y actualizar</button>
+          </div>
+        </Modal>
+      )}
       {modal === "printer" && <PrinterModal onClose={() => setModal(null)} onSaved={setPrinter} />}
       {zReport && (
         <Modal title="Turno cerrado" onClose={() => setZReport(null)}>

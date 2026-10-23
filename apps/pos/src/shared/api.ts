@@ -30,6 +30,20 @@ export type {
   SyncReport,
 };
 
+/** Estado de la auto-actualización de la caja. */
+export type UpdateState = {
+  phase: "idle" | "checking" | "downloading" | "ready" | "error";
+  /** Versión instalada. */
+  current: string;
+  /** Última vez que se revisó (ISO), o null si aún no. */
+  checkedAt: string | null;
+  /** Versión nueva que se descarga o está lista. */
+  version: string | null;
+  percent: number;
+  /** Último error al revisar (sin internet, servidor sin versiones…); no es grave. */
+  message: string | null;
+};
+
 /** Lo que la pantalla puede pedirle al programa. Cada método viaja por IPC al proceso principal, donde vive el motor. */
 export type PosApi = {
   state(): Promise<PosState>;
@@ -65,6 +79,10 @@ export type PosApi = {
   printShift(shiftId?: string): Promise<void>;
   openDrawer(): Promise<void>;
   testPrint(config?: Partial<PrinterConfig>): Promise<void>;
+  /** Auto-actualización: estado, revisar ahora, y cerrar e instalar la versión ya descargada. */
+  updateState(): Promise<UpdateState>;
+  checkUpdates(): Promise<UpdateState>;
+  installUpdate(): Promise<boolean>;
 };
 
 /** Lista de métodos (la usan el proceso principal y el preload para registrar cada canal). */
@@ -99,6 +117,9 @@ export const METHODS = [
   "printShift",
   "openDrawer",
   "testPrint",
+  "updateState",
+  "checkUpdates",
+  "installUpdate",
 ] as const satisfies readonly (keyof PosApi)[];
 
 /** Error que cruza el IPC: solo viaja el mensaje (y el código HTTP, si lo hubo). */
@@ -109,4 +130,6 @@ export type PosBridge = PosApi & {
   onSynced(callback: (report: SyncReport) => void): () => void;
   /** Avisa cuando una impresión automática (al vender o devolver) falla. */
   onPrintFailed(callback: (info: { saleId: string; message: string }) => void): () => void;
+  /** Avisa cada vez que cambia el estado de la actualización. */
+  onUpdate(callback: (state: UpdateState) => void): () => void;
 };

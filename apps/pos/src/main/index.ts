@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { app, BrowserWindow, ipcMain, Menu, safeStorage, shell } from "electron";
+import electronUpdater from "electron-updater";
 import { ApiError, PosEngine, type SecretBox, type SyncReport } from "@facturacion/pos-engine";
 import {
   colsOf,
@@ -14,7 +15,8 @@ import {
   type PrinterConfig,
   type ReceiptData,
 } from "@facturacion/printing";
-import { METHODS, type IpcResult, type PosApi } from "../shared/api";
+import { METHODS, type IpcResult, type PosApi, type UpdateState } from "../shared/api";
+import { feedUrlFor, UpdateManager, type UpdaterLike } from "./updates";
 
 /**
  * Proceso principal: dueño de la base de datos SQLite y del motor de la caja. La pantalla (renderer) no toca nada
@@ -39,6 +41,12 @@ const secretBox: SecretBox = {
 
 let engine: PosEngine;
 let win: BrowserWindow | null = null;
+
+// ───────────── Auto-actualización ─────────────
+// Solo en la caja instalada (o forzada con POS_UPDATE_FORCE para probar). Las versiones las publica la propia API.
+const updatesEnabled = !smoke && (app.isPackaged || process.env.POS_UPDATE_FORCE === "1");
+let updates: UpdateManager | null = null;
+const noUpdates = (): UpdateState => ({ phase: "idle", current: app.getVersion(), checkedAt: null, version: null, percent: 0, message: null });
 
 // Una sincronización a la vez: el temporizador y el botón comparten la misma en curso.
 let syncing: Promise<SyncReport> | null = null;
@@ -187,6 +195,9 @@ function register() {
       const config = normalizePrinterConfig({ ...engine.printerConfig(), ...draft });
       return enqueue(async () => printBytes(config, testTicket(ticketOpts(config, { openDrawer: false }))));
     },
+    updateState: () => updates?.state() ?? noUpdates(),
+    checkUpdates: () => updates?.check() ?? noUpdates(),
+    installUpdate: () => updates?.installNow() ?? false,
   };
 
   for (const name of METHODS) {
@@ -206,6 +217,14 @@ const notify = (report: SyncReport) => win?.webContents.send("pos:synced", repor
 
 app.whenReady().then(() => {
   engine = PosEngine.open({ dbPath: join(app.getPath("userData"), "pos.sqlite"), secretBox });
+  if (updatesEnabled) {
+    updates = new UpdateManager(electronUpdater.autoUpdater as unknown as UpdaterLike, {
+      currentVersion: app.getVersion(),
+      feedUrl: () => feedUrlFor(engine.state().serverUrl, process.env.POS_UPDATE_URL),
+      onChange: (state) => win?.webContents.send("pos:update", state),
+    });
+    updates.start();
+  }
   register();
   Menu.setApplicationMenu(null);
   createWindow();
@@ -226,7 +245,10 @@ app.whenReady().then(() => {
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
-app.on("before-quit", () => engine?.close());
+app.on("before-quit", () => {
+  updates?.stop();
+  engine?.close();
+});
 
 /**
  * Verificación automática (POS_SMOKE=1): carga la pantalla de verdad, comprueba que el puente IPC funciona de punta
