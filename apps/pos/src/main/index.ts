@@ -1,3 +1,4 @@
+import { existsSync, writeFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -16,6 +17,7 @@ import {
   type ReceiptData,
 } from "@facturacion/printing";
 import { METHODS, type IpcResult, type PosApi, type UpdateState } from "../shared/api";
+import { AutoStart } from "./autostart";
 import { feedUrlFor, UpdateManager, type UpdaterLike } from "./updates";
 
 /**
@@ -41,6 +43,15 @@ const secretBox: SecretBox = {
 
 let engine: PosEngine;
 let win: BrowserWindow | null = null;
+
+// Abrir con el sistema: solo la caja instalada, y activado de entrada la primera vez (ver `AutoStart`).
+const autoStart = new AutoStart(app, {
+  supported: !smoke && app.isPackaged && process.platform === "win32",
+  initialized: {
+    read: () => existsSync(join(app.getPath("userData"), "autostart-initialized")),
+    write: () => writeFileSync(join(app.getPath("userData"), "autostart-initialized"), "1"),
+  },
+});
 
 // ───────────── Auto-actualización ─────────────
 // Solo en la caja instalada (o forzada con POS_UPDATE_FORCE para probar). Las versiones las publica la propia API.
@@ -198,6 +209,8 @@ function register() {
     updateState: () => updates?.state() ?? noUpdates(),
     checkUpdates: () => updates?.check() ?? noUpdates(),
     installUpdate: () => updates?.installNow() ?? false,
+    autoStart: () => autoStart.state(),
+    setAutoStart: (enabled) => autoStart.set(enabled),
   };
 
   for (const name of METHODS) {
@@ -225,6 +238,7 @@ app.whenReady().then(() => {
     });
     updates.start();
   }
+  autoStart.applyDefault();
   register();
   Menu.setApplicationMenu(null);
   createWindow();

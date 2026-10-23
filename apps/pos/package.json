@@ -13,7 +13,8 @@
     "smoke": "node scripts/smoke.mjs",
     "test": "vitest run",
     "pack": "electron-vite build && electron-builder --dir --publish never",
-    "dist": "electron-vite build && electron-builder --publish never"
+    "dist": "node scripts/dist.mjs",
+    "dist:signed": "node scripts/dist.mjs --signed"
   },
   "devDependencies": {
     "@facturacion/core": "workspace:*",

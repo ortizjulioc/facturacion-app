@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { calculateDocument, formatDop, fromCents, toCents, toMilli, type TaxCode } from "@facturacion/core";
-import type { LocalCustomer, LocalProduct, LocalSale, LocalShift, PosState, PrinterConfig, Receipt, SaleInput, ShiftReport, UpdateState } from "../../shared/api";
+import type { LocalCustomer, LocalProduct, LocalSale, LocalShift, AutoStartState, PosState, PrinterConfig, Receipt, SaleInput, ShiftReport, UpdateState } from "../../shared/api";
 import { ReconnectModal } from "./Reconnect";
 import { PrinterModal, PrintButton, isPrintable } from "./Printer";
 import { RefundModal } from "./Refund";
@@ -36,6 +36,7 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
   const [printer, setPrinter] = useState<PrinterConfig | null>(null);
   const [update, setUpdate] = useState<UpdateState | null>(null);
   const [confirmUpdate, setConfirmUpdate] = useState(false);
+  const [autoStart, setAutoStart] = useState<AutoStartState | null>(null);
   const [printFailed, setPrintFailed] = useState<{ saleId: string; message: string } | null>(null);
   const [refundSale, setRefundSale] = useState<LocalSale | undefined>(undefined);
   const [zReport, setZReport] = useState<{ shift: LocalShift; report: ShiftReport } | null>(null);
@@ -47,6 +48,11 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
   useEffect(() => {
     void window.pos.printerConfig().then(setPrinter, () => undefined);
     return window.pos.onPrintFailed(setPrintFailed);
+  }, []);
+
+  // Abrir la caja al encender la PC (solo aparece en la caja instalada).
+  useEffect(() => {
+    void window.pos.autoStart().then(setAutoStart, () => undefined);
   }, []);
 
   // Actualización del programa: se descarga sola; el cajero decide cuándo reiniciar.
@@ -206,6 +212,14 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
             <button onClick={() => void window.pos.openDrawer().catch((e: unknown) => setMessage(errorOf(e)))} title="Abrir la gaveta de dinero">Gaveta</button>
           )}
           <button onClick={() => setModal("printer")} title="Configurar la impresora">Impresora</button>
+          {autoStart?.supported && (
+            <button
+              onClick={() => void window.pos.setAutoStart(!autoStart.enabled).then(setAutoStart, (e: unknown) => setMessage(errorOf(e)))}
+              title="La caja se abre sola al encender la PC"
+            >
+              Abrir al encender: {autoStart.enabled ? "sí" : "no"}
+            </button>
+          )}
           {state.pinRequired && (
             <button onClick={() => void window.pos.lock().then(reload)} title="Bloquear la caja">Bloquear</button>
           )}

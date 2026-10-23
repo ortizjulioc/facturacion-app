@@ -44,6 +44,9 @@ export type UpdateState = {
   message: string | null;
 };
 
+/** Si la caja se abre sola al encender la PC (solo en la caja instalada). */
+export type AutoStartState = { supported: boolean; enabled: boolean };
+
 /** Lo que la pantalla puede pedirle al programa. Cada método viaja por IPC al proceso principal, donde vive el motor. */
 export type PosApi = {
   state(): Promise<PosState>;
@@ -83,6 +86,9 @@ export type PosApi = {
   updateState(): Promise<UpdateState>;
   checkUpdates(): Promise<UpdateState>;
   installUpdate(): Promise<boolean>;
+  /** Abrir la caja al encender la PC: ver y cambiar. */
+  autoStart(): Promise<AutoStartState>;
+  setAutoStart(enabled: boolean): Promise<AutoStartState>;
 };
 
 /** Lista de métodos (la usan el proceso principal y el preload para registrar cada canal). */
@@ -120,6 +126,8 @@ export const METHODS = [
   "updateState",
   "checkUpdates",
   "installUpdate",
+  "autoStart",
+  "setAutoStart",
 ] as const satisfies readonly (keyof PosApi)[];
 
 /** Error que cruza el IPC: solo viaja el mensaje (y el código HTTP, si lo hubo). */
