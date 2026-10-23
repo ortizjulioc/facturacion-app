@@ -1,0 +1,41 @@
+# Instalador de Windows de la caja. Se genera con `pnpm --filter @facturacion/pos dist`.
+# La versión sale de package.json; las actualizaciones las publica la API (ver docs/CAJA-INSTALADOR.md).
+appId: do.facturacion.caja
+productName: Caja Facturación
+copyright: Facturación
+
+directories:
+  output: dist
+  buildResources: assets
+
+# Todo el código (incluidos los paquetes del monorepo y electron-updater) ya viene compilado dentro de `out/`.
+files:
+  - out/**
+  - package.json
+
+asar: true
+compression: normal
+
+win:
+  target:
+    - target: nsis
+      arch: x64
+  icon: assets/icon.ico
+  # Sin firma de código por ahora (ver la guía): Windows mostrará «editor desconocido» al instalar.
+  signAndEditExecutable: true
+  signExecutable: false
+
+nsis:
+  oneClick: true
+  perMachine: false
+  deleteAppDataOnUninstall: false # las ventas locales pendientes no se borran al desinstalar
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: Caja Facturación
+  artifactName: Caja-Facturacion-Setup-${version}.${ext}
+
+# El latest.yml y el .blockmap salen junto al instalador; es lo que publica la API para las cajas.
+# La dirección real no se fija aquí: la caja la toma del servidor al que está conectada (`setFeedURL` al revisar).
+publish:
+  provider: generic
+  url: http://localhost/updates/caja

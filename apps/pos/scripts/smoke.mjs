@@ -1,5 +1,6 @@
 // Arranca la caja de verdad (Electron) con una carpeta de datos temporal y comprueba que la pantalla carga y que el
 // puente IPC → motor → SQLite responde. Requiere haber compilado antes (`pnpm build`).
+// Con `POS_EXE=<ruta al .exe>` prueba la caja ya empaquetada (`pnpm run pack` → dist/win-unpacked) en vez de la de desarrollo.
 import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -8,10 +9,10 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
-const electron = require("electron"); // ruta del ejecutable
+const electron = process.env.POS_EXE || require("electron"); // ruta del ejecutable
 const dir = await mkdtemp(join(tmpdir(), "pos-smoke-"));
 
-const child = spawn(electron, ["."], {
+const child = spawn(electron, process.env.POS_EXE ? [] : ["."], {
   cwd: fileURLToPath(new URL("..", import.meta.url)),
   env: { ...process.env, POS_SMOKE: "1", POS_USER_DATA: dir },
   stdio: ["ignore", "pipe", "pipe"],
