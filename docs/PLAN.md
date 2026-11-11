@@ -6,7 +6,7 @@ Sistema de facturación y punto de venta **multiempresa y multigiro** (tienda, r
 
 ## 0. Estado actual y cómo continuar
 
-> **Última actualización:** 2026-10-21 · **Repositorio:** `github.com/ortizjulioc/facturacion-app` (rama `main`)
+> **Última actualización:** 2026-11-11 (último trabajo de código: 2026-10-23) · **Repositorio:** `github.com/ortizjulioc/facturacion-app` (se trabaja en la rama `dev`; `main` va atrás)
 > **Regla del proyecto:** el despliegue en Dokploy se hace **cuando el producto esté terminado y pulido**, no antes. Mientras tanto se desarrolla y prueba todo en local.
 
 ### 0.1 Resumen en una mirada
@@ -15,11 +15,13 @@ Sistema de facturación y punto de venta **multiempresa y multigiro** (tienda, r
 |---|---|
 | 0 · Fundamentos (monorepo, BD, auth, CI, Dockerfiles) | ✅ hecha en local · ⏸ despliegue de prueba en Dokploy **aplazado a propósito** |
 | 1 · Núcleo de negocio | 🔶 **~85 %**: catálogo, clientes, cajas, motor de cálculo, **datos fiscales, secuencias e-NCF y facturas (E31/E32/E33/E34) emitibles y congeladas**; **cada comprobante se firma al emitirse si la empresa sube su certificado `.p12` (cifrado), con QR y código de seguridad; **el envío a la DGII ya está conectado (cola con reintentos, TrackId y estados ACEPTADO/RECHAZADO), probado solo con una DGII simulada; incluye el resumen RFCE de las facturas de consumo < RD$250,000; **recibe e-CF de proveedores (acuse de recibo y aprobación comercial)**; falta TesteCF y los XSD** y validar RNC contra el padrón; **equipo e invitaciones ya funcionan** |
-| 2 · Facturación en la web | 🔶 emisión desde el back-office **hecha** (sin enviar a la DGII); faltan PDF con QR, envío por correo y workers |
-| 5 · Inventario y compras | 🔶 **inventario y compras hechos** (existencias por sucursal, descuento al vender, proveedores, facturas de proveedor, E41, E43, retenciones, último costo, reporte de compras tipo 606); faltan transferencias entre sucursales, cuentas por pagar, costo promedio y la recepción de e-CF de proveedores |
+| 2 · Facturación en la web | 🔶 emisión desde el back-office **hecha**, con firma, QR en el detalle y **envío a la DGII por la cola con reintentos** (incluye RFCE); faltan PDF A4 con QR y envío por correo |
+| 5 · Inventario y compras | 🔶 **inventario y compras hechos** (existencias por sucursal, descuento al vender, proveedores, facturas de proveedor, E41, E43, retenciones, último costo, reporte de compras tipo 606); **la recepción de e-CF de proveedores y su registro como compra también están hechos**; faltan transferencias entre sucursales, cuentas por pagar y costo promedio |
 | 6 · Restaurante | 🔶 **mesas, comandas, cocina/bar, cobro con propina legal y cuenta dividida hechos** (salón, comanda, pantalla de cocina, cobro que emite E32/E31); **modificadores con precio, cursos (envío por tiempos) y combos hechos**; faltan impresión de comanda/pre-cuenta (llega con la caja Electron), unir/dividir mesas, reservas y PWA de meseros |
 | 3 · Caja offline | 🔶 **caja Electron funcionando (`apps/pos`)**: SQLite local, venta sin internet con e-NCF de un bloque propio, cobro mixto, ticket, sincronización idempotente (catálogo hacia abajo, ventas hacia arriba) y reconexión; **turnos de caja** con informe X/Z en la nube. **login con PIN, turnos dentro de la caja (sincronizados) y devoluciones con nota de crédito** también funcionan sin internet, e **imprime en térmica ESC/POS** (red o impresora de Windows, con apertura de gaveta). El ticket sale **con el QR de la DGII** cuando hay conexión (la nube firma la venta antes de imprimir) y lo trae al reimprimir; **la caja firma sola, sin internet**, con el certificado de la empresa guardado en el almacén seguro del sistema (el ticket sale con QR aunque no haya conexión); **se instala con un instalador de Windows (NSIS) y se actualiza sola** (la API publica las versiones; la caja las descarga en segundo plano y el cajero decide cuándo reiniciar); **abre sola al encender la PC** y el proceso de **firma de código** está listo (falta el certificado); falta restaurante y existencias en la caja |
-| 4, 7, 8 | ⬜ sin empezar (la 7 tiene el reporte de ventas y los **formatos 606/607/608 de la DGII**) |
+| 4 · Certificación DGII | 🔶 **receptor electrónico hecho** (servicios públicos `/fe` con acuse, aprobación comercial y protección); falta correr TesteCF con el certificado real y el set de pruebas de la DGII |
+| 7 · Reportes y cumplimiento | 🔶 reporte de ventas y **formatos 606/607/608 de la DGII** (con retenciones e ITBIS al costo); falta probarlos con la pre-validación de la DGII |
+| 8 | ⬜ sin empezar |
 
 Calidad actual (todo en verde): `lint`, `typecheck`, `build` y **561 pruebas** (77 `core` + 38 de BD + 49 del motor de la caja + 14 de la caja (auto-actualización y arranque) + 21 de impresión + 69 de `ecf` + 293 de la API contra Postgres real, incluida la caja completa). Verificado además a mano en el navegador: registro → datos fiscales → secuencias → factura con código de barras → emisión → nota de crédito → factura de crédito fiscal con RNC → reportes → invitar a un cajero, que crea su cuenta con el enlace y trabaja con permisos limitados → inventario (entrada, venta que descuenta, stock bajo, bloqueo de ventas sin existencia) → proveedores y compras (factura de proveedor que da entrada al inventario con costo, E43, E41 con retenciones, reporte de compras) → restaurante (crear mesas, abrir mesa, anotar, enviar a cocina, marcar listo, cobrar una parte y luego el resto con pago dividido, la mesa queda libre, E31 exige cliente con RNC) → carta (grupos «Término» obligatorio y «Extras» con recargo, hamburguesa con opciones a RD$410, combo con partes que van a cocina y bar, envío «solo plato fuerte», factura que detalla las opciones) → caja Electron (configurar contra la API, escanear código de barras, vender con pago dividido, ticket de 80 mm con el e-NCF del bloque, sincronizar y ver la venta ya emitida en la nube) → caja con PIN, turno y devolución (identificarse con el teclado de la pantalla, PIN equivocado rechazado, turno obligatorio, vender, devolver 1 de 2 en efectivo, cerrar con diferencia que pide motivo, informe Z, sincronizar y bloquear) → impresión térmica (configurar una impresora de red simulada desde la pantalla, imprimir la prueba, ticket de venta con gaveta, nota de crédito, informe Z, y una impresora apagada que no frena la venta y se reintenta) → turnos de caja (abrir con fondo, vender en esa caja, informe X en vivo, cerrar con diferencia que exige motivo, informe Z imprimible).
 
@@ -96,7 +98,7 @@ pnpm db:deploy && pnpm exec prisma generate
 
 **`packages/core`** (lógica fiscal pura, sin frameworks): dinero en centavos `bigint`, cantidades en milésimas, impuestos `ITBIS18 / ITBIS16 / ITBIS0 / EXENTO` con etiquetas, `calculateLine` y `calculateDocument` (precio con o sin ITBIS, descuentos por % o monto, redondeo mitad-arriba **por línea**, totales agrupados por tasa como en el e-CF, propina legal 10 %) normalización/formato de RNC, cédula y pasaporte (solo formato; sin dígito verificador a propósito) y **`ecf.ts`**: tipos E31/E32/E33/E34, formato y lectura del **e-NCF** (`E` + tipo + 10 dígitos), umbral de RD$250,000 para identificar al comprador, reglas del comprador por tipo, códigos de modificación de las notas y cálculo de lo que queda por acreditar.
 
-**`packages/db`**: tablas `user/session/account/verification/organization/member/invitation` (Better Auth), `branch`, `terminal`, `category`, `product`, `customer`, `audit_log`, y las fiscales **`company_profile`, `sequence`, `document`, `document_line`, `payment`**; y las de restaurante **`dining_table`, `restaurant_order`, `order_item`** (+ `Product.prepStation/course/isCombo`, `Document.orderId`) **`cashier_pin`** (PIN de cajero, solo el resumen PBKDF2), `CashShift.clientId` (turnos subidos desde la caja), `Document.returnsStock` (nota de crédito que devuelve mercancía), `CompanyProfile.requireShift` (turno obligatorio), las de la caja offline (**`Sequence.offline`**: bloques de e-NCF exclusivos de una caja; **`Document.clientId`**: idempotencia de la subida), las de turnos **`cash_shift`** (+ `Document.shiftId`, enum `ShiftStatus`) y las de la carta **`modifier_group`, `modifier`, `product_modifier_group`, `combo_component`** (+ `order_item.course/modifiers/parentItemId`); enums `TaxCode`, `DocumentType`, `EcfType`, `DocumentStatus`, `PaymentMethod`, `EcfEnvironment`, `PrepStation`, `OrderStatus`, `OrderItemStatus`; 13 migraciones (la última, `pos_pin_shifts_returns`; antes, `offline_sync`; antes, `cash_shifts`; antes, `restaurant_menu`; antes, `restaurant`; antes, `purchases`: `supplier`, `purchase`, `purchase_line`, `lastCost` en el producto y `purchaseId` en los movimientos; la anterior, `inventory`: `stock_level` y `stock_movement`, campos `trackInventory` y `minStock` en el producto y `allowNegativeStock` en la empresa). La base de datos **impide por sí misma** modificar o borrar un comprobante emitido (triggers), que una secuencia retroceda o que se reescriba un rango en uso, y valida el formato del e-NCF y que su tipo coincida con el del documento.
+**`packages/db`**: tablas `user/session/account/verification/organization/member/invitation` (Better Auth), `branch`, `terminal`, `category`, `product`, `customer`, `audit_log`, y las fiscales **`company_profile`, `sequence`, `document`, `document_line`, `payment`**; y las de restaurante **`dining_table`, `restaurant_order`, `order_item`** (+ `Product.prepStation/course/isCombo`, `Document.orderId`) **`cashier_pin`** (PIN de cajero, solo el resumen PBKDF2), `CashShift.clientId` (turnos subidos desde la caja), `Document.returnsStock` (nota de crédito que devuelve mercancía), `CompanyProfile.requireShift` (turno obligatorio), las de la caja offline (**`Sequence.offline`**: bloques de e-NCF exclusivos de una caja; **`Document.clientId`**: idempotencia de la subida), las de turnos **`cash_shift`** (+ `Document.shiftId`, enum `ShiftStatus`) y las de la carta **`modifier_group`, `modifier`, `product_modifier_group`, `combo_component`** (+ `order_item.course/modifiers/parentItemId`); enums `TaxCode`, `DocumentType`, `EcfType`, `DocumentStatus`, `PaymentMethod`, `EcfEnvironment`, `PrepStation`, `OrderStatus`, `OrderItemStatus`; 23 migraciones (la última, `dgii_retentions`; las de la 14.ª en adelante —firma, cola de envío, RFCE, e-CF recibidos, anulaciones y datos DGII de compras— están en `packages/db/prisma/migrations`; la 13.ª, `pos_pin_shifts_returns`; antes, `offline_sync`; antes, `cash_shifts`; antes, `restaurant_menu`; antes, `restaurant`; antes, `purchases`: `supplier`, `purchase`, `purchase_line`, `lastCost` en el producto y `purchaseId` en los movimientos; la anterior, `inventory`: `stock_level` y `stock_movement`, campos `trackInventory` y `minStock` en el producto y `allowNegativeStock` en la empresa). La base de datos **impide por sí misma** modificar o borrar un comprobante emitido (triggers), que una secuencia retroceda o que se reescriba un rango en uso, y valida el formato del e-NCF y que su tipo coincida con el del documento.
 
 **`apps/api`** (Hono, JSON con montos como **texto decimal** `"19.99"`, errores `{ error, issues? }`):
 
@@ -163,18 +165,18 @@ Cada cambio escribe en `audit_log` **dentro de la misma transacción** (si falla
 1. ✅ ~~Datos fiscales de la empresa~~ (el certificado digital `.p12` ya se sube desde Configuración fiscal).
 2. ✅ ~~Modelo y API de documentos~~ con líneas copiadas del producto, pagos, totales recalculados en el servidor e inmutabilidad en la BD.
 3. ✅ ~~Secuencias e-NCF~~ con asignación atómica y rangos sin solape.
-4. **`packages/ecf`** + interfaz `FiscalProvider`: XML de E32 y E31, validación contra los XSD oficiales, firma XMLDSig, autenticación (semilla → token), envío, consulta por TrackId, código de seguridad y QR. Evaluar primero la librería `dgii-ecf` de npm.
-5. **Prototipo contra TesteCF**: emitir y consultar un E32 y un E31 de prueba. *Necesita de ti:* un certificado digital de pruebas y acceso a la Oficina Virtual de la DGII (verifica en dgii.gov.do cómo obtenerlo y su costo).
+4. ✅ ~~**`packages/ecf`** + interfaz `FiscalProvider`~~: XML, firma XMLDSig, semilla → token, envío, consulta por TrackId, código de seguridad, QR, RFCE y ANECF. **Falta** validar contra los XSD oficiales.
+5. **Correr el prototipo contra TesteCF** (el script y la guía [PRUEBA-TESTECF.md](PRUEBA-TESTECF.md) ya están listos). *Necesita de ti:* el certificado digital `.p12` de pruebas, su contraseña y la empresa habilitada en la pre-certificación de la Oficina Virtual de la DGII.
 6. ✅ ~~Invitar usuarios y gestionar miembros~~: hoy se comparte un **enlace** (no se envía correo hasta elegir proveedor de correo; `sendInvitationEmail` de Better Auth es opcional y queda por conectar).
 7. **Validar RNC contra el padrón de la DGII** (archivo público) y autocompletar el nombre del cliente.
 
 **A-bis. Facturación pendiente (Fase 2)**
 
-- PDF / representación impresa con **código QR y código de seguridad** (hoy el detalle se imprime con el navegador, sin QR).
-- Envío del comprobante por correo y *workers* (pg-boss) para enviar a la DGII con reintentos.
-- E32 de menos de RD$250,000: **resumen RFCE**. Estados `SIGNED/SENT/ACCEPTED/REJECTED` (ya existen en el enum, nada los usa todavía).
+- PDF A4 / representación impresa con **código QR y código de seguridad** (hoy el detalle ya muestra el QR, pero se imprime con el navegador).
+- Envío del comprobante por correo (requiere elegir proveedor de correo, §7).
+- ✅ ~~Cola de envío a la DGII con reintentos~~ (`fiscal_submission`, trabajador en el servidor), ✅ ~~resumen RFCE~~ y estados `SENT/ACCEPTED/REJECTED` en uso.
 - Ficha rápida para crear un cliente desde el editor de facturas.
-- Devoluciones desde la caja, anulación de rangos (ANECF) y reportes de ventas.
+- ✅ ~~Devoluciones desde la caja, anulación de rangos (ANECF) y reportes de ventas~~.
 
 **B. Pulido antes de desplegar** (requisito tuyo: "terminado y pulido")
 
@@ -216,7 +218,7 @@ Cada cambio escribe en `audit_log` **dentro de la misma transacción** (si falla
 - **Zod 4**: `.partial()` **conserva** los `.default()`, y eso pisaría campos en un PATCH. Por eso los valores por defecto de producto se aplican en el POST, no en el esquema (ver `routes/products.ts`).
 - **JSON no admite `BigInt`**: los montos salen como texto decimal (`fromCents`) y entran como texto (`toCents`).
 - **Referencias entre tablas y RLS**: una clave foránea comprueba la existencia **saltándose RLS**, así que antes de enlazar (p. ej. una caja con su sucursal) hay que verificar que el registro pertenece a la empresa con el cliente de tenant (ver `routes/terminals.ts`).
-- **Los miembros no se pueden invitar todavía**: las pruebas de roles insertan el `member` directo en BD.
+- **Pruebas de roles**: aunque ya se puede invitar desde el panel, las pruebas de roles insertan el `member` directo en BD (más rápido que el flujo de invitación).
 - **El panel del navegador integrado puede estar oculto**: ahí fallan las capturas de pantalla; se verifica con texto/JS.
 - **Docker no está instalado** en la PC de desarrollo original: nada de `docker build` se ha probado.
 - **Next 16 conserva ocultas las pantallas anteriores** (React `Activity` con `cacheComponents`): su estado (`useState`) sobrevive aunque salgas de la ruta, y al volver los *efectos* se ejecutan de nuevo (por eso los listados se refrescan solos). Consecuencia: un formulario **no se reinicia** al reabrirlo. El editor de facturas lo resuelve con una `key` (sesión + comprobante + referencia) que cambia al guardar y al abrir otra referencia. Al probar con JavaScript en el navegador, filtra por `offsetParent !== null` o contarás elementos de pantallas ocultas.
@@ -456,13 +458,14 @@ facturacion/
 - [x] **Prototipo contra TesteCF preparado**: script `pnpm --filter @facturacion/ecf testecf` y guía `docs/PRUEBA-TESTECF.md` (E31, E32 por resumen, E32 grande y nota de crédito; simulacro sin enviar; informe y archivos de cada corrida).
 - [ ] **Correr el prototipo con el certificado real** (necesita de ti: el `.p12`, su contraseña y la empresa habilitada en la pre-certificación), corregir lo que la DGII rechace, validar contra los XSD oficiales y reglas ante rechazos (reemitir cuando `secuenciaUtilizada` es falso).
 - [ ] **Decisión:** proveedor certificado o conexión directa con la DGII (ver §7).
-- [ ] Invitar usuarios y gestionar miembros; validar RNC contra el padrón de la DGII.
+- [x] Invitar usuarios y gestionar miembros.
+- [ ] Validar RNC contra el padrón de la DGII.
 
-### Fase 2 – Facturación en la web (3 semanas) · 🔶 emisión hecha, falta el envío a la DGII
+### Fase 2 – Facturación en la web (3 semanas) · 🔶 emisión y envío a la DGII hechos, faltan PDF y correo
 - [x] Emisión desde el back-office: E31, E32, E34, E33 con pagos y multimoneda (DOP/USD).
-- Workers: envío, reintentos, consulta de estado, RFCE para consumo < RD$250,000.
-- Representación impresa: PDF (A4) con QR y código de seguridad.
-- Envío al cliente por correo.
+- [x] Cola de envío: reintentos, consulta de estado, RFCE para consumo < RD$250,000 (probado con una DGII simulada).
+- [ ] Representación impresa: PDF (A4) con QR y código de seguridad.
+- [ ] Envío al cliente por correo.
 
 ### Fase 3 – Caja offline (4–5 semanas) · 🔶 caja funcionando, falta pulirla
 - [x] App Electron (`apps/pos`): configuración contra la API, venta rápida, búsqueda por código de barras, pagos mixtos, cobro con cambio, consumo y crédito fiscal, propina legal, ticket de 80 mm (se imprime con el diálogo del sistema), historial.
@@ -499,7 +502,7 @@ facturacion/
 - [x] Al registrar: entrada al inventario con **costo unitario neto en pesos** (promedio dentro del mismo comprobante), actualización del **último costo** del producto y compra congelada (trigger).
 - [x] Reporte de compras y CSV tipo 606 (borrador para el contador, no el archivo oficial de la DGII).
 - [ ] Cuentas por pagar (pagos a crédito y vencimientos), anulación de compras (hoy se corrige con un ajuste de inventario), costo promedio ponderado y valorización del inventario.
-- [ ] Recepción de e-CF de proveedores directamente en el sistema (Fase 4: endpoints receptor de la DGII).
+- [x] Recepción de e-CF de proveedores directamente en el sistema y registro como compra con un clic (ver Fase 4).
 - [x] **Archivos oficiales 606, 607 y 608 de la DGII** (texto con `|`, validaciones de los instructivos, vista previa en Reportes → Formatos DGII). Ver `docs/FORMATOS-DGII.md`.
 - [ ] Probar los archivos con la Herramienta de Pre-validación de la DGII, y registrar lo que aún falta (notas de crédito de proveedores, selectivo y otros impuestos).
 
