@@ -160,6 +160,8 @@ Cada cambio escribe en `audit_log` **dentro de la misma transacción** (si falla
 
 ### 0.5 Lo que falta (backlog en orden de prioridad)
 
+> **Prioridad actual: emitir e-CF reales y certificarse.** El plan detallado, hecho tras revisar toda la documentación oficial de la DGII contra el código, está en **[PLAN-ECF.md](PLAN-ECF.md)** (correcciones al XML, envío robusto, modo certificación con el Excel de la DGII, PDF, entrega al comprador electrónico, contingencia y trámites).
+
 **A. Terminar la Fase 1 (siguiente trabajo inmediato)**
 
 1. ✅ ~~Datos fiscales de la empresa~~ (el certificado digital `.p12` ya se sube desde Configuración fiscal).
