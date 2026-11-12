@@ -1,7 +1,7 @@
 import { HTTPException } from "hono/http-exception";
 import { buyerErrors, formatDop, isModifier, remainingCredit } from "@facturacion/core";
 import { auditRow } from "./audit";
-import { asSalesType, FULL, type DocumentFull } from "./documents";
+import { asSalesType, FULL, isCreditSale, type DocumentFull } from "./documents";
 import { allocateEncf } from "./encf";
 import { enqueueIfAuto } from "./fiscal-queue";
 import { acceptLocalSignature, signDocumentData, type LocalSignature, type Signature } from "./signing";
@@ -10,6 +10,9 @@ import type { Env } from "../env";
 import type { TenantTx } from "../types";
 
 const unprocessable = (message: string) => new HTTPException(422, { message });
+
+/** Fecha (AAAA-MM-DD) de un instante en hora dominicana. */
+const dominicanDate = (at: Date) => new Intl.DateTimeFormat("sv-SE", { timeZone: "America/Santo_Domingo" }).format(at);
 
 /**
  * Emite un borrador: valida las reglas fiscales, asigna el e-NCF, descuenta el inventario y lo congela.
@@ -76,6 +79,15 @@ export async function issueDocument(
       throw unprocessable(
         `Los pagos (${formatDop(paid)}) deben sumar el total del comprobante (${formatDop(draft.total)})`,
       );
+    }
+
+    // Venta a crédito (TipoPago 2): la DGII exige la fecha límite de pago, que no puede ser anterior a la emisión.
+    // Las ventas de la caja sin conexión (preset) ya ocurrieron y no se rechazan por esto.
+    if (!preset && isCreditSale(draft.payments)) {
+      if (!draft.paymentDueDate) throw unprocessable("Indica la fecha límite de pago de la venta a crédito");
+      if (draft.paymentDueDate.toISOString().slice(0, 10) < dominicanDate(new Date())) {
+        throw unprocessable("La fecha límite de pago no puede ser anterior a la fecha de emisión");
+      }
     }
   }
 

@@ -4,7 +4,7 @@ import { useState, type FormEvent } from "react";
 import {
   ALL_ECF_LABELS,
   ALL_ECF_TYPES,
-  formatDocument,
+  formatTaxId,
   type AnyEcfType,
 } from "@facturacion/core";
 import {
@@ -284,7 +284,7 @@ function CompanyForm({
             <Input
               name="rnc"
               required
-              defaultValue={company ? formatDocument("RNC", company.rnc) : ""}
+              defaultValue={company ? formatTaxId(company.rnc) : ""}
             />
           </Field>
           <Field label="Razón social" className="md:col-span-2">

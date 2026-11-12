@@ -78,6 +78,9 @@ type EditorPayment = { key: string; method: string; amount: string; reference: s
 let counter = 0;
 const nextKey = () => `k${++counter}`;
 const num = (v: string) => v.trim().replace(",", ".");
+/** Fecha AAAA-MM-DD de hoy + `days` en hora dominicana. */
+const daysFromToday = (days: number) =>
+  new Intl.DateTimeFormat("sv-SE", { timeZone: "America/Santo_Domingo" }).format(new Date(Date.now() + days * 86_400_000));
 
 const emptyManual = (): EditorLine => ({
   key: nextKey(),
@@ -211,6 +214,7 @@ function EditorForm({
   const [rate, setRate] = useState(doc && doc.currency === "USD" ? doc.exchangeRate : "");
   const [propina, setPropina] = useState(doc?.propinaLegal ?? false);
   const [notes, setNotes] = useState(doc?.notes ?? "");
+  const [dueDate, setDueDate] = useState(doc?.paymentDueDate ?? "");
   const [code, setCode] = useState(String(doc?.modificationCode ?? 3));
   const [lines, setLines] = useState<EditorLine[]>(doc ? linesFromDoc(doc) : []);
   const [payments, setPayments] = useState<EditorPayment[]>(
@@ -254,8 +258,15 @@ function EditorForm({
 
   const updateLine = (key: string, patch: Partial<EditorLine>) =>
     setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)));
-  const updatePayment = (key: string, patch: Partial<EditorPayment>) =>
+  const updatePayment = (key: string, patch: Partial<EditorPayment>) => {
     setPayments((ps) => ps.map((p) => (p.key === key ? { ...p, ...patch } : p)));
+    // Al pasar a crédito se propone un plazo de 30 días (la DGII exige la fecha límite en ventas a crédito).
+    if (patch.method === "CREDIT" && !dueDate) setDueDate(daysFromToday(30));
+  };
+
+  // Toda la venta a crédito (TipoPago 2): hace falta la fecha límite de pago.
+  const creditSale =
+    !modifier && payments.some((p) => num(p.amount)) && payments.filter((p) => num(p.amount)).every((p) => p.method === "CREDIT");
 
   function buildPayload() {
     return {
@@ -275,6 +286,7 @@ function EditorForm({
       exchangeRate: effectiveCurrency === "USD" ? num(rate) : "1",
       propinaLegal: propina,
       notes: notes.trim(),
+      paymentDueDate: creditSale && dueDate ? dueDate : null,
       referencedDocumentId: modifier ? (referenced?.id ?? null) : null,
       modificationCode: modifier ? Number(code) : null,
       lines: lines.map((l) => ({
@@ -725,6 +737,11 @@ function EditorForm({
                   </span>
                 )}
               </p>
+              {creditSale && (
+                <Field label="Fecha límite de pago">
+                  <Input type="date" required value={dueDate} min={daysFromToday(0)} onChange={(e) => setDueDate(e.target.value)} />
+                </Field>
+              )}
             </div>
           )}
           <Field label="Notas internas">

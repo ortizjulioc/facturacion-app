@@ -6,6 +6,7 @@ import { useMemo, useState } from "react";
 import {
   ECF_LABELS,
   formatDocument,
+  formatTaxId,
   TAX_LABELS,
   type DocumentType,
   type EcfType,
@@ -17,6 +18,7 @@ import { usePanel } from "@/components/panel-context";
 import { Badge, Button, ErrorNote, PageHeader, tableStyles } from "@/components/ui";
 import { api, errorMessage, expectOk, unwrap } from "@/lib/api";
 import {
+  formatDate,
   formatDateTime,
   isDebitCredit,
   money,
@@ -201,7 +203,7 @@ export function InvoiceDetail({ id }: { id: string }) {
             </p>
             {company && (
               <p className="text-sm text-zinc-600 dark:text-zinc-400">
-                {company.legalName} · RNC {formatDocument("RNC", company.rnc)}
+                {company.legalName} · RNC {formatTaxId(company.rnc)}
                 <br />
                 {company.address}
               </p>
@@ -289,6 +291,12 @@ export function InvoiceDetail({ id }: { id: string }) {
                     <span>{money(p.amount, cur)}</span>
                   </div>
                 ))}
+                {doc.paymentDueDate && (
+                  <div className="flex justify-between">
+                    <span>Fecha límite de pago</span>
+                    <span>{formatDate(doc.paymentDueDate)}</span>
+                  </div>
+                )}
               </>
             )}
             {doc.notes && (

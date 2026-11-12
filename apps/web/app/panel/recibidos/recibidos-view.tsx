@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useState } from "react";
-import { formatDocument } from "@facturacion/core";
+import { formatTaxId } from "@facturacion/core";
 import {
   Badge,
   Button,
@@ -141,7 +141,7 @@ export function RecibidosView() {
                   </td>
                   <td className={tableStyles.td}>
                     {r.emitterName ?? "—"}
-                    <div className="text-xs text-zinc-500">{formatDocument("RNC", r.emitterRnc)}</div>
+                    <div className="text-xs text-zinc-500">{formatTaxId(r.emitterRnc)}</div>
                   </td>
                   <td className={`${tableStyles.td} text-right tabular-nums`}>{money(r.total, "DOP")}</td>
                   <td className={tableStyles.td}>
@@ -233,7 +233,7 @@ function Detail({ id, canManage, onClose, onChanged }: { id: string; canManage: 
           <dl className="grid grid-cols-2 gap-x-4 gap-y-2">
             <Item label="Emisor">
               {r.emitterName ?? "—"}
-              <div className="text-xs text-zinc-500">{formatDocument("RNC", r.emitterRnc)}</div>
+              <div className="text-xs text-zinc-500">{formatTaxId(r.emitterRnc)}</div>
             </Item>
             <Item label="Tipo">{TYPE_LABELS[r.ecfType] ?? `Tipo ${r.ecfType}`}</Item>
             <Item label="Fecha de emisión">{r.issuedOnText}</Item>

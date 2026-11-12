@@ -3253,7 +3253,14 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       it("607: si el cliente retiene en un mes posterior, la venta se repite en ese mes con la retención", async () => {
         const b = await billing("fm10", { seqs: [["E31", 1, 10]] });
         const company = (await json(await post("/v1/customers", { name: "Cliente SRL", documentType: "RNC", documentNumber: "131246796" }, b.cookie))).data;
-        const e31 = (await json(await issue(b, (await createDraft(b, { type: "E31", customerId: company.id, payments: [{ method: "CREDIT", amount: "236.00" }] })).id))).data as Json;
+        const e31 = (
+          await json(
+            await issue(
+              b,
+              (await createDraft(b, { type: "E31", customerId: company.id, payments: [{ method: "CREDIT", amount: "236.00" }], paymentDueDate: "2099-12-31" })).id,
+            ),
+          )
+        ).data as Json;
         const next = new Date(`${todayStr.slice(0, 7)}-01T00:00:00Z`);
         next.setUTCMonth(next.getUTCMonth() + 1);
         const nextDay = next.toISOString().slice(0, 10);
@@ -5445,6 +5452,62 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       const xml = (await rawDoc(b, doc.id)).ecfXml!;
       expect(xml).toContain("<RNCComprador>131246796</RNCComprador>");
       expect(xml).toMatch(/<FechaVencimientoSecuencia>\d{2}-\d{2}-\d{4}<\/FechaVencimientoSecuencia>/);
+    });
+
+    it("un emisor persona física registra su cédula como RNC y firma con ella", async () => {
+      const b = await billing("sig4p", { profile: false, seqs: [] });
+      const bad = await send("PUT", "/v1/company", { ...profileBody, rnc: "1234567890" }, b.cookie);
+      expect(bad.status).toBe(422);
+      expect(await error(bad)).toMatch(/9 dígitos.*11/);
+
+      const res = await send("PUT", "/v1/company", { ...profileBody, rnc: "001-1234567-8", legalName: "Juan Pérez" }, b.cookie);
+      expect(res.status, JSON.stringify(await res.clone().json())).toBe(200);
+      expect((await json(res)).data.rnc).toBe("00112345678");
+      expect((await post("/v1/sequences", seqBody("E32", 1, 10), b.cookie)).status).toBe(201);
+      expect((await putCert(b, certBody())).status).toBe(200);
+
+      const doc = (await json(await issue(b, (await createDraft(b)).id))).data;
+      expect(doc.ecf.qrUrl).toContain("consultatimbrefc?rncemisor=00112345678&encf=E320000000001");
+      const xml = (await rawDoc(b, doc.id)).ecfXml!;
+      expect(xml).toContain("<RNCEmisor>00112345678</RNCEmisor>");
+      expect(verifyEcfSignature(xml)).toBe(true);
+    });
+
+    it("una venta a crédito exige la fecha límite de pago y la lleva en el e-CF", async () => {
+      const b = await billing("sig4c", { seqs: [["E31", 1, 10]] });
+      await putCert(b, certBody());
+      const cust = (
+        await json(await post("/v1/customers", { name: "Cliente a Crédito", documentType: "RNC", documentNumber: "131246796" }, b.cookie))
+      ).data;
+      const credit = (over: Json = {}) =>
+        createDraft(b, { type: "E31", customerId: cust.id, payments: [{ method: "CREDIT", amount: "236.00" }], ...over });
+
+      // Sin fecha, o con una fecha pasada, no se emite (y no se gasta ningún e-NCF).
+      const sinFecha = await issue(b, (await credit()).id);
+      expect(sinFecha.status).toBe(422);
+      expect(await error(sinFecha)).toMatch(/fecha límite de pago/);
+      const pasada = await issue(b, (await credit({ paymentDueDate: "2020-01-01" })).id);
+      expect(pasada.status).toBe(422);
+      expect(await error(pasada)).toMatch(/anterior a la fecha de emisión/);
+
+      const due = new Intl.DateTimeFormat("sv-SE", { timeZone: "America/Santo_Domingo" }).format(new Date(Date.now() + 30 * 86_400_000));
+      const res = await issue(b, (await credit({ paymentDueDate: due })).id);
+      expect(res.status, JSON.stringify(await res.clone().json())).toBe(200);
+      const doc = (await json(res)).data;
+      expect(doc.encf).toBe("E310000000001");
+      expect(doc.paymentDueDate).toBe(due);
+      const xml = (await rawDoc(b, doc.id)).ecfXml!;
+      const [y, m, d] = due.split("-");
+      expect(xml).toContain(`<TipoPago>2</TipoPago><FechaLimitePago>${d}-${m}-${y}</FechaLimitePago>`);
+
+      // Si no toda la venta es a crédito, la fecha no se guarda.
+      const mixto = await createDraft(b, {
+        type: "E31",
+        customerId: cust.id,
+        paymentDueDate: due,
+        payments: [{ method: "CREDIT", amount: "100.00" }, { method: "CASH", amount: "136.00" }],
+      });
+      expect(mixto.paymentDueDate).toBeNull();
     });
 
     it("sin certificado se emite sin firma, y después se firma uno por uno o todos a la vez", async () => {

@@ -154,6 +154,7 @@ async function ecfInputFor(tx: TenantTx, doc: DocumentFull, profile: Profile): P
     })),
     propinaLegal: doc.propinaLegal,
     payments: doc.payments.map((p) => ({ method: p.method, amount: p.amount })),
+    paymentDueDate: doc.paymentDueDate ? doc.paymentDueDate.toISOString().slice(0, 10) : null,
     reference,
   };
 }

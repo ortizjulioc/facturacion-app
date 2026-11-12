@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { normalizeDocument } from "@facturacion/core";
+import { normalizeTaxId } from "@facturacion/core";
 import { auditEntry } from "../lib/audit";
 import { optionalText } from "../lib/schemas";
 import { certificateInfo, saveCertificate } from "../lib/signing";
@@ -75,7 +75,7 @@ export const company = new Hono<AppEnv>()
   })
   .put("/", requireRole("owner", "admin"), zv("json", companyInput), async (c) => {
     const input = c.req.valid("json");
-    const rnc = normalizeDocument("RNC", input.rnc);
+    const rnc = normalizeTaxId(input.rnc);
     if (!rnc.ok) throw new HTTPException(422, { message: rnc.error });
 
     const values = { ...input, rnc: rnc.value, email: input.email ?? null };

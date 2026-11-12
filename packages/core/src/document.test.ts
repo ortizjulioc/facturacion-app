@@ -1,5 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { formatDocument, normalizeDocument } from "./document";
+import { formatDocument, formatTaxId, normalizeDocument, normalizeTaxId } from "./document";
+
+describe("RNC del contribuyente (persona jurídica o física)", () => {
+  it("acepta 9 dígitos o una cédula de 11, con o sin guiones", () => {
+    expect(normalizeTaxId("1-01-00157-7")).toEqual({ ok: true, value: "101001577" });
+    expect(normalizeTaxId("001-1234567-8")).toEqual({ ok: true, value: "00112345678" });
+    expect(normalizeTaxId("1234567890").ok).toBe(false);
+    expect(normalizeTaxId("12345678").ok).toBe(false);
+    expect(normalizeTaxId("ABC").ok).toBe(false);
+  });
+
+  it("se muestra con el formato que corresponde a su largo", () => {
+    expect(formatTaxId("101001577")).toBe("1-01-00157-7");
+    expect(formatTaxId("00112345678")).toBe("001-1234567-8");
+  });
+});
 
 describe("normalizeDocument", () => {
   it("RNC: acepta guiones y espacios, exige 9 dígitos", () => {

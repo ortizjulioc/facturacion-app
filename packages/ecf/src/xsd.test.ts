@@ -47,6 +47,8 @@ const CASES: [string, EcfInput][] = [
   ["E31 con propina legal", sample("E31", { buyer: RNC_BUYER, propinaLegal: true, payments: undefined })],
   ["E31 con precios que incluyen ITBIS", sample("E31", { buyer: RNC_BUYER, payments: undefined, lines: MIXED.map((l) => ({ ...l, priceIncludesTax: true })) })],
   ["E32 sin comprador", sample("E32")],
+  ["E32 de un emisor persona física (cédula como RNC)", sample("E32", { seller: { ...SELLER, rnc: "00112345678", legalName: "Juan Pérez" } })],
+  ["E31 de un emisor persona física", sample("E31", { buyer: RNC_BUYER, seller: { ...SELLER, rnc: "00112345678", legalName: "Juan Pérez" } })],
   ["E32 con propina y tasas mezcladas", sample("E32", { lines: MIXED, propinaLegal: true, payments: undefined })],
   ["E32 desde RD$250,000 con cédula", sample("E32", { buyer: { docType: "CEDULA", docNumber: "00112345678", name: "Juan Pérez" }, lines: [{ name: "Nevera", quantity: toMilli("5"), unitPrice: toCents("70000.00"), tax: "ITBIS18", unit: "UND" }], payments: undefined })],
   ["E33 nota de débito", sample("E33", { buyer: RNC_BUYER, payments: undefined, reference: { ...ORIGINAL, code: 3, reason: "Corrige montos" } })],

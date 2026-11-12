@@ -42,7 +42,7 @@ Llevan semanas y no dependen del código:
 | A1 | **RFCE**: quitar `ITBIS1/2/3` y `TasaImpuestoAdicional` (el XSD del RFCE no los tiene). Hoy **todo** resumen con ITBIS sería rechazado. | `xml.ts:362` usa `totales()` | ✔️ hecho (2026-11-11) |
 | A2 | **E32 < RD$250,000 sin comprador**: el XSD exige `<Comprador>`; en la simulación se sube el XML completo al portal. Emitir el elemento (vacío o con lo que haya) solo en ese caso. Confirmar en TesteCF qué acepta. | `xml.ts` (comprador) | ✔️ hecho (2026-11-11) |
 | A3 | **ANECF**: `<Secuencia>` → `<Secuencias>`. | `annulment.ts` | ✔️ hecho (2026-11-11) |
-| A4 | **Venta a crédito**: pasar `paymentDueDate` (y `incomeType`) al armar el e-CF; hoy sale `TipoPago 2` sin `FechaLimitePago`. Pedir la fecha límite en el editor si el pago es a crédito. | `apps/api/src/lib/signing.ts:135` | ✅ |
+| A4 | **Venta a crédito**: pasar `paymentDueDate` (y `incomeType`) al armar el e-CF; hoy sale `TipoPago 2` sin `FechaLimitePago`. Pedir la fecha límite en el editor si el pago es a crédito. | `apps/api/src/lib/signing.ts:135` | ✔️ hecho (2026-11-11): columna `paymentDueDate`, obligatoria al emitir si todo es a crédito; `TipoIngresos` sigue en «01» |
 | A5 | **`IndicadorNotaCredito`**: comparar días calendario en hora RD, no milisegundos / 24 h. | `xml.ts:177` | ✅ |
 | A6 | **E31 con cédula** (personas físicas): `RNCComprador` admite 9 u 11 dígitos. | `packages/core/src/ecf.ts:86` | ✅ |
 | A7 | **Nombre del comprador obligatorio** en E31 y en E32 ≥ RD$250,000. | `core/src/ecf.ts` (`buyerErrors`) | 🔎 |

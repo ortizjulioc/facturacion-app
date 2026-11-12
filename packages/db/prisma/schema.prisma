@@ -406,6 +406,8 @@ model Document {
   exchangeRate         Decimal          @default(1) @db.Decimal(14, 4)
   propinaLegal         Boolean          @default(false)
   notes                String?
+  /// Fecha límite de pago (FechaLimitePago del e-CF). Obligatoria cuando toda la venta es a crédito (TipoPago 2).
+  paymentDueDate       DateTime?        @db.Date
   /// Solo notas de crédito/débito.
   referencedDocumentId String?          @db.Uuid
   referencedEncf       String?

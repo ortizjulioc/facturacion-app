@@ -16,7 +16,7 @@ import {
   type LineInput,
 } from "@facturacion/core";
 import { Prisma } from "@facturacion/db";
-import { money, optionalText, quantity } from "./schemas";
+import { isoDate, money, optionalText, quantity } from "./schemas";
 import { fiscalBlock } from "./fiscal-queue";
 import { stampOf, type StampProfile } from "./stamp";
 import type { TenantTx } from "../types";
@@ -46,6 +46,10 @@ export const paymentInput = z.object({
   reference: optionalText(100),
 });
 
+/** Toda la venta es a crédito (TipoPago 2 en el e-CF): entonces la DGII exige la fecha límite de pago. */
+export const isCreditSale = (payments: readonly { method: string }[]) =>
+  payments.length > 0 && payments.every((p) => p.method === "CREDIT");
+
 export const documentInput = z
   .object({
     type: z.enum(ECF_TYPES),
@@ -71,6 +75,8 @@ export const documentInput = z
     modificationCode: z.number().int().min(1).max(5).nullish(),
     lines: z.array(lineInput).min(1, "Agrega al menos una línea").max(500),
     payments: z.array(paymentInput).max(20).default([]),
+    /** Fecha límite de pago (AAAA-MM-DD). Solo se guarda si toda la venta es a crédito; ahí es obligatoria al emitir. */
+    paymentDueDate: isoDate.nullish(),
   })
   .superRefine((v, ctx) => {
     if (v.currency === "DOP" && Number(v.exchangeRate) !== 1) {
@@ -280,6 +286,7 @@ export async function buildDraft(
     exchangeRate: referenced ? referenced.exchangeRate : input.exchangeRate,
     propinaLegal: input.propinaLegal,
     notes: input.notes ?? null,
+    paymentDueDate: isCreditSale(payments) && input.paymentDueDate ? new Date(`${input.paymentDueDate}T00:00:00Z`) : null,
     referencedDocumentId: referenced?.id ?? null,
     referencedEncf: referenced?.encf ?? null,
     modificationCode: input.modificationCode ?? null,
@@ -424,6 +431,8 @@ export const documentDto = (d: DocumentFull, profile: StampProfile | null = null
   exchangeRate: d.exchangeRate.toString(),
   propinaLegal: d.propinaLegal,
   notes: d.notes,
+  /** Fecha límite de pago (AAAA-MM-DD) de una venta a crédito. */
+  paymentDueDate: d.paymentDueDate ? d.paymentDueDate.toISOString().slice(0, 10) : null,
   referencedDocumentId: d.referencedDocumentId,
   modificationCode: d.modificationCode,
   totals: {

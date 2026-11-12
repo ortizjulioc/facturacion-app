@@ -32,6 +32,20 @@ export function normalizeDocument(type: DocumentType, raw: string): NormalizedDo
   }
 }
 
+/**
+ * RNC de un contribuyente (emisor, proveedor que emite e-CF…): 9 dígitos si es persona jurídica u 11 si es persona
+ * física, que usa su cédula como RNC. Así lo admite la DGII en `RNCEmisor`.
+ */
+export function normalizeTaxId(raw: string): NormalizedDocument {
+  const digits = raw.replace(/[\s-]/g, "");
+  return /^(\d{9}|\d{11})$/.test(digits)
+    ? { ok: true, value: digits }
+    : { ok: false, error: "El RNC debe tener 9 dígitos (u 11 si es una persona física con cédula)" };
+}
+
+/** Formato de un RNC de contribuyente según su largo: "1-01-00157-7" o, si es cédula, "001-1234567-8". */
+export const formatTaxId = (value: string): string => formatDocument(value.length === 11 ? "CEDULA" : "RNC", value);
+
 /** "101001577" → "1-01-00157-7"; "00112345678" → "001-1234567-8". Otros valores quedan igual. */
 export function formatDocument(type: DocumentType, value: string): string {
   if (type === "RNC" && /^\d{9}$/.test(value)) {
