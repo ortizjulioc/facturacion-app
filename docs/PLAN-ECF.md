@@ -1,7 +1,7 @@
 # Plan: emitir e-CF reales y certificarse ante la DGII
 
 > **Creado:** 2026-11-11 · **Base:** revisión completa de la documentación oficial descargada (5 carpetas: Informe y descripción técnica, Formatos XML, XSD, Proceso de certificación, Instructivos) contra el código de `packages/ecf`, `apps/api`, `packages/pos-engine`, `packages/printing` y `apps/web`.
-> **Siguiente paso acordado:** revisar el *sandbox* que simula la DGII antes de tocar TesteCF.
+> **Siguiente paso:** trámites de §2 y Fase A (empezando por A0). El sandbox externo se revisó y queda solo como referencia (§7, E1).
 
 Leyenda: 🧑‍💻 código · 📋 trámite tuyo (no es código) · ✅ comprobado a mano · 🔎 hallazgo de revisión, se confirma al arreglarlo.
 
@@ -74,7 +74,7 @@ Llevan semanas y no dependen del código:
 1. **Modo certificación (set de pruebas)** — *la pieza más importante*.
    - Importar el **Excel** de la DGII (pruebas de datos) y armar cada e-CF **con los mismos campos y en el mismo orden**, sin pasar por las facturas del sistema; validar contra XSD (A0) **antes** de enviar; firmar, enviar, consultar y mostrar el resultado de cada fila.
    - Lo mismo para el Excel de **aprobaciones/rechazos comerciales**.
-   - Probablemente el set incluya tipos o campos que el sistema aún no emite (otros tipos de e-CF, ISC, otra moneda…): el generador debe ser **genérico por campo**, guiado por el Excel. Se precisará al ver el primer Excel real (en TesteCF/portal).
+   - Probablemente el set incluya tipos o campos que el sistema aún no emite (otros tipos de e-CF, ISC, otra moneda…): el generador debe ser **genérico por campo**, guiado por el Excel. Se precisará al ver el primer Excel real (en TesteCF/portal). Indicio: un ejemplo con datos del set («DOCUMENTOS ELECTRONICOS DE 02») es un **E47** con `OtraMoneda` (USD), `Retencion` de ISR por línea, `Transporte` y `TerminoPago`; representarlo como JSON anidado en el orden del XML (como hace el servicio de §7 E1) es un buen modelo.
 2. **PDF de la representación impresa** (A4 y ticket), conforme a los modelos de la DGII; en la simulación se suben estos PDF (máx. 10 MB) y la DGII los **aprueba o rechaza**. Debe incluir:
    - fecha de vencimiento de la secuencia (E31/E33), «NCF modificado» y motivo (E33/E34) **impresos** (hoy son `no-print`), ITBIS por línea, «Subtotal gravado», sucursal, municipio/provincia, paginación «Página X de Y» con subtotales por página, fecha de firma en `dd-MM-aaaa HH:mm:ss`;
    - leyendas de **envío diferido** (24 h) y **contingencia** (72 h); documento «no válido para fines fiscales» cuando no se pudo generar el e-CF.
@@ -93,7 +93,7 @@ Llevan semanas y no dependen del código:
 
 ## 7. Fase E — Prueba real en TesteCF y certificación
 
-**E1. Sandbox (simulador de tu primo):** correr contra él el flujo completo antes de TesteCF. No es fuente de verdad: si choca con la documentación oficial, manda la oficial.
+**E1. Sandbox (`dgiiconnect.taveras.com.do`) — decidido: solo como referencia (2026-11-11).** No simula la DGII: es un servicio de terceros que recibe el e-CF en **JSON**, arma el XML, lo firma y lo envía (`POST /ecf/workflow`); su `/ecf/workflow/sandbox` solo valida la forma del JSON (aceptó totales que no cuadran) y responde con un formato que no es el de la DGII (`codigo 200/400`, trackId = código de seguridad, QR en `/sandbox/`). `?simulate_error=true` simula un rechazo; `?simulate_error_type=dgii_500` se ignora. Token en `.env` (`token_sandbox`). **Sirve para:** ver cómo representa cada uno de los 10 tipos (31–34, 41, 43–47) y la experiencia de su autor con TesteCF (llevarle la lista de dudas de E2). **No sirve** como banco de pruebas de nuestro cliente DGII ni lo usamos como proveedor (certificados y facturas de los clientes en un tercero).
 
 **E2. TesteCF (pre-certificación):** `pnpm --filter @facturacion/ecf testecf` (guía en [PRUEBA-TESTECF.md](PRUEBA-TESTECF.md)) y luego desde la aplicación. Dudas que solo resuelve la DGII real — anota la respuesta de cada una:
 
@@ -136,4 +136,4 @@ Llevan semanas y no dependen del código:
 3. 🧑‍💻 B1, B6, B8, B9 (lo más riesgoso del envío) y el resto de B.
 4. 🧑‍💻 Fase C: modo certificación, PDF, entrega al comprador, túnel.
 5. 🧑‍💻 Fase D (leyendas y alerta de 72 h primero; serie B después).
-6. Sandbox → TesteCF → certificación (Fase E).
+6. TesteCF → certificación (Fase E). El sandbox de E1 queda solo como referencia.
