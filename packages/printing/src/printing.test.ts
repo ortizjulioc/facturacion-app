@@ -151,6 +151,13 @@ describe("tickets", () => {
     });
   }
 
+  it("una venta hecha sin conexión lleva la leyenda de contingencia de la DGII", () => {
+    const offline = paper(receiptTicket(receipt({ sale: { ...receipt().sale, status: "PENDING" } }), { cols: 48 })).lines.join(" ");
+    expect(offline).toMatch(/e-CF emitido en modalidad de Contingencia.*setenta y dos \(72\) horas\./);
+    const online = paper(receiptTicket(receipt({ sale: { ...receipt().sale, status: "SYNCED" } }), { cols: 48 })).lines.join(" ");
+    expect(online).not.toMatch(/Contingencia/);
+  });
+
   it("abre la gaveta al empezar si se pide, y solo corta si se pide", () => {
     const withDrawer = paper(receiptTicket(receipt(), { cols: 48, openDrawer: true }));
     expect(withDrawer.commands.slice(0, 3)).toEqual(["init", "page:19", "drawer"]); // antes de imprimir nada

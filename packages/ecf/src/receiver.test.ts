@@ -11,6 +11,7 @@ import {
   loadCertificate,
   PeerClient,
   peerEndpoint,
+  readAcknowledgement,
   signEcf,
   signReply,
   verifyEcfSignature,
@@ -272,5 +273,38 @@ describe("titular del certificado que firmó", () => {
     expect(infoOf({ cn: "X", serialNumber: "1234567890123" })!.rnc).toBeNull(); // 13 dígitos: ni RNC ni cédula
     expect(signerInfoOf("<Doc/>")).toBeNull();
     expect(infoOf({ cn: "V", notAfter: new Date("2030-01-01T00:00:00Z") })!.notAfter.toISOString()).toBe("2030-01-01T00:00:00.000Z");
+  });
+});
+
+describe("entrega del e-CF al comprador electrónico", () => {
+  const at = new Date("2026-10-22T15:30:05Z");
+  const ack = (reason: 1 | 2 | 3 | 4 | null) =>
+    signReply(buildArecf({ sellerRnc: "101672919", buyerRnc: "130000002", encf: "E310000000001", reason, at }), cert, "ARECF", at);
+
+  it("lee el acuse de recibo que devuelve el comprador", () => {
+    expect(readAcknowledgement(ack(null))).toMatchObject({ received: true, reason: null, encf: "E310000000001", buyerRnc: "130000002" });
+    expect(readAcknowledgement(ack(2))).toMatchObject({ received: false, reason: 2 });
+    expect(readAcknowledgement("<ACECF/>")).toBeNull();
+    expect(readAcknowledgement("no es xml")).toBeNull();
+  });
+
+  it("envía el e-CF a la recepción del comprador (con su autenticación) y devuelve el acuse", async () => {
+    const calls: string[] = [];
+    const fetch = async (input: string, init?: RequestInit) => {
+      const url = new URL(input);
+      calls.push(`${init?.method ?? "GET"} ${url.host}${url.pathname} ${new Headers(init?.headers).get("authorization") ?? ""}`.trim());
+      if (url.pathname.endsWith("/semilla")) return new Response("<SemillaModel><valor>x</valor><fecha>2026-10-22T08:00:00-04:00</fecha></SemillaModel>");
+      if (url.pathname.endsWith("/validacioncertificado")) return Response.json({ token: "tk" });
+      return new Response(ack(null), { headers: { "content-type": "application/xml" } });
+    };
+    const peer = { name: "Comprador", rnc: "130000002", receptionUrl: "https://comprador.example", approvalUrl: null, authenticationUrl: "https://comprador.example" };
+    const r = await new PeerClient({ certificate: cert, fetch }).sendEcf(peer, "<ECF/>", "101672919", "E310000000001");
+    expect(r.received).toBe(true);
+    expect(calls).toEqual([
+      "GET comprador.example/fe/autenticacion/api/semilla",
+      "POST comprador.example/fe/autenticacion/api/validacioncertificado",
+      "POST comprador.example/fe/recepcion/api/ecf bearer tk",
+    ]);
+    await expect(new PeerClient({ certificate: cert, fetch }).sendEcf({ ...peer, receptionUrl: null }, "<ECF/>", "1", "E1")).rejects.toMatchObject({ kind: "config" });
   });
 });

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createPrisma, withTenant } from "@facturacion/db";
 import { toCents, verifyPin } from "@facturacion/core";
-import { buildAcecf, buildEcf, loadCertificate, securityCodeOf, signEcf, signReply, signXml, verifyEcfSignature, type EcfCertificate } from "@facturacion/ecf";
+import { buildAcecf, buildArecf, buildEcf, loadCertificate, securityCodeOf, signEcf, signReply, signXml, verifyEcfSignature, type EcfCertificate } from "@facturacion/ecf";
 import { testP12 } from "@facturacion/ecf/testing";
 import { PosEngine, type FetchLike } from "@facturacion/pos-engine";
 import { createApp } from "./app";
@@ -14,6 +14,7 @@ import { loadEnv } from "./env";
 import { createLogger } from "./logger";
 import { MAX_SEND_ATTEMPTS, processDue } from "./lib/fiscal";
 import { processApprovals } from "./lib/receiver";
+import { processDeliveries } from "./lib/delivery";
 import { exchangeSeed, issueSeed, SeedStore, verifyToken } from "./lib/receiver-auth";
 import { open } from "./lib/secrets";
 
@@ -35,6 +36,8 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
   const prisma = createPrisma({ connectionString: env.DATABASE_URL, max: 3 });
 
   /** Una DGII de mentira: autentica, recibe e-CF (guarda lo recibido) y responde consultas según lo que cada prueba prepare. */
+  /** Certificado del comprador electrónico de mentira (firma sus acuses de recibo). */
+  const buyerCert = loadCertificate(...(Object.values(testP12()) as [Uint8Array, string]));
   const dgii = {
     received: [] as { name: string; xml: string; auth: string | null }[],
     /** Resúmenes de factura de consumo (RFCE) recibidos, y las consultas que se hicieron por ellos. */
@@ -46,6 +49,10 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     peerApprovals: [] as { url: string; name: string; xml: string }[],
     dgiiApprovals: [] as { name: string; xml: string }[],
     peerFails: [] as (() => Response)[],
+    /** e-CF que recibió el comprador electrónico (comprador.example) y cómo contesta su acuse (null = recibido). */
+    buyerReceived: [] as { url: string; name: string; xml: string }[],
+    buyerReason: null as null | 1 | 2 | 3 | 4,
+    buyerFails: [] as (() => Response)[],
     dgiiApprovalFails: [] as (() => Response)[],
     /** Anulaciones de rangos de e-NCF recibidas, y cómo contestar la próxima (por omisión: anulado). */
     annulments: [] as { name: string; xml: string }[],
@@ -67,6 +74,9 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       this.peerApprovals = [];
       this.dgiiApprovals = [];
       this.peerFails = [];
+      this.buyerReceived = [];
+      this.buyerReason = null;
+      this.buyerFails = [];
       this.dgiiApprovalFails = [];
       this.annulments = [];
       this.annulFails = [];
@@ -88,6 +98,18 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       const url = new URL(input);
       const method = init?.method ?? "GET";
       const auth = new Headers(init?.headers).get("authorization");
+      // El servicio de recepción de un comprador que también es contribuyente electrónico: responde su acuse firmado.
+      if (url.host === "comprador.example") {
+        const fail = dgii.buyerFails.shift();
+        if (fail) return fail();
+        const file = (init!.body as FormData).get("xml") as File;
+        const xml = await file.text();
+        dgii.buyerReceived.push({ url: url.host + url.pathname, name: file.name, xml });
+        const encf = /<eNCF>([^<]+)<\/eNCF>/.exec(xml)?.[1] ?? "";
+        const at = new Date();
+        const ack = buildArecf({ sellerRnc: "101001577", buyerRnc: "131246796", encf, reason: dgii.buyerReason, at });
+        return new Response(signReply(ack, buyerCert, "ARECF", at), { headers: { "content-type": "application/xml" } });
+      }
       // El servicio de aprobación comercial de otro contribuyente (el emisor de un e-CF que recibimos).
       if (url.host === "prov.example") {
         const fail = dgii.peerFails.shift();
@@ -5746,6 +5768,48 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       expect(again.status).toBe("ISSUED");
       // Lo que no fue rechazado no se sustituye.
       expect((await post(`/v1/documents/${again.id}/replace`, {}, b.cookie)).status).toBe(409);
+    });
+
+    it("aceptado por la DGII, el e-CF se entrega al comprador electrónico y se guarda su acuse", async () => {
+      const b = await emisor("dgdel");
+      const buyer = { nombre: "Cliente Fiscal", rnc: "131246796", urlRecepcion: "https://comprador.example", urlAceptacion: null, urlOpcional: null };
+      const deliver = () => processDeliveries(deps(), step(), 20, b.orgId);
+
+      // No está en el directorio: no hay a quién entregarlo.
+      const lonely = await e31(b);
+      await run(b, step());
+      await run(b, step());
+      expect((await detail(b, lonely.id)).delivery).toMatchObject({ state: "PENDING" });
+      expect(await deliver()).toBe(1);
+      expect((await detail(b, lonely.id)).delivery).toMatchObject({ state: "NOT_ELECTRONIC" });
+
+      // Ya está: se le entrega el XML firmado y responde «recibido».
+      dgii.directory.set("131246796", buyer);
+      const doc = await e31(b);
+      await run(b, step());
+      expect(await run(b, step())).toMatchObject({ accepted: 1 });
+      expect(await deliver()).toBe(1);
+      expect(dgii.buyerReceived).toEqual([expect.objectContaining({ url: "comprador.example/fe/recepcion/api/ecf", name: `101001577${doc.encf}.xml` })]);
+      expect(dgii.buyerReceived[0]!.xml).toContain("<SignatureValue>");
+      expect((await detail(b, doc.id)).delivery).toMatchObject({ state: "DELIVERED", received: true, reason: null });
+
+      // Responde «no recibido» (firma): queda anotado y se puede reintentar desde el panel.
+      dgii.buyerReason = 2;
+      const other = await e31(b);
+      await run(b, step());
+      await run(b, step());
+      await deliver();
+      expect((await detail(b, other.id)).delivery).toMatchObject({ state: "NOT_RECEIVED", received: false, reason: 2 });
+      dgii.buyerReason = null;
+      expect((await post(`/v1/documents/${other.id}/deliver`, {}, b.cookie)).status).toBe(200);
+      await deliver();
+      expect((await detail(b, other.id)).delivery).toMatchObject({ state: "DELIVERED" });
+      expect((await post(`/v1/documents/${other.id}/deliver`, {}, b.cookie)).status).toBe(409);
+
+      // La factura de consumo no se entrega a nadie.
+      const consumer = (await json(await issue(b, (await createDraft(b)).id))).data;
+      await run(b, step());
+      expect((await detail(b, consumer.id)).delivery).toBeNull();
     });
 
     it("«aceptado condicional» y «en proceso»: espera y vuelve a consultar con pausas crecientes", async () => {

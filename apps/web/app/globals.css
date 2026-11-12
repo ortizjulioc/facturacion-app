@@ -26,6 +26,17 @@ body {
 }
 
 /* Al imprimir un comprobante solo se muestra el documento. */
+/* Paginación de la representación impresa («Página No. X de Y», modelo 1.7 de la DGII). Chrome/Edge 131+ imprimen
+   las cajas de margen de @page; en otros navegadores simplemente no aparece. */
+@page {
+  margin: 14mm 12mm;
+  @bottom-right {
+    content: "Página No. " counter(page) " de " counter(pages);
+    font-size: 9pt;
+    color: #555;
+  }
+}
+
 @media print {
   .no-print {
     display: none !important;

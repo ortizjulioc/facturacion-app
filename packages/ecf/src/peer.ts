@@ -1,3 +1,4 @@
+import { DOMParser } from "@xmldom/xmldom";
 import { compactXml } from "./format";
 import { FiscalError, type DirectoryEntry } from "./provider";
 import { signXml, type EcfCertificate } from "./sign";
@@ -27,6 +28,21 @@ export class PeerClient {
     const form = new FormData();
     form.append("xml", new Blob([xml], { type: "text/xml" }), `${rnc}${encf}.xml`);
     await this.send("POST", peerEndpoint(peer.approvalUrl, "/fe/aprobacioncomercial/api/ecf"), { form, token });
+  }
+
+  /**
+   * Entrega un e-CF firmado (ya aceptado por la DGII) al servicio de recepción del comprador y devuelve su acuse de
+   * recibo (ARECF). Lanza `FiscalError` si no responde con un acuse válido.
+   */
+  async sendEcf(peer: DirectoryEntry, xml: string, rnc: string, encf: string): Promise<Acknowledgement> {
+    if (!peer.receptionUrl) throw new FiscalError("El comprador no publica un servicio de recepción de e-CF", "config");
+    const token = peer.authenticationUrl ? await this.authenticate(peer.authenticationUrl) : null;
+    const form = new FormData();
+    form.append("xml", new Blob([xml], { type: "text/xml" }), `${rnc}${encf}.xml`);
+    const body = await this.send("POST", peerEndpoint(peer.receptionUrl, "/fe/recepcion/api/ecf"), { form, token });
+    const ack = typeof body === "string" ? readAcknowledgement(body) : null;
+    if (!ack) throw new FiscalError("El comprador no devolvió un acuse de recibo válido", "server");
+    return ack;
   }
 
   private async authenticate(host: string): Promise<string> {
@@ -64,4 +80,24 @@ export class PeerClient {
     if (res.status === 429 || res.status >= 500) throw new FiscalError(reason, "server", res.status);
     throw new FiscalError(reason, "rejected", res.status);
   }
+}
+
+/** Acuse de recibo (ARECF) que devuelve el receptor: Estado 0 = recibido, 1 = no recibido (con su motivo 1–4). */
+export type Acknowledgement = { received: boolean; reason: number | null; encf: string | null; buyerRnc: string | null; xml: string };
+
+/** Lee un ARECF; null si no lo es. No verifica la firma: quien lo guarda conserva el XML tal como llegó. */
+export function readAcknowledgement(xml: string): Acknowledgement | null {
+  if (!xml.trimStart().startsWith("<")) return null;
+  let root: ReturnType<DOMParser["parseFromString"]>["documentElement"];
+  try {
+    root = new DOMParser({ onError: () => undefined }).parseFromString(xml.trim(), "text/xml").documentElement;
+  } catch {
+    return null;
+  }
+  if (!root || root.nodeName !== "ARECF") return null;
+  const text = (tag: string) => root.getElementsByTagName(tag)[0]?.textContent?.trim() || null;
+  const estado = text("Estado");
+  if (estado !== "0" && estado !== "1") return null;
+  const reason = text("CodigoMotivoNoRecibido");
+  return { received: estado === "0", reason: reason ? Number(reason) : null, encf: text("eNCF"), buyerRnc: text("RNCComprador"), xml };
 }

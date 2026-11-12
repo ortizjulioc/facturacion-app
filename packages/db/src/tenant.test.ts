@@ -196,6 +196,25 @@ describe.skipIf(!process.env.DATABASE_URL)("RLS multiempresa", () => {
       expect(await asB.document.findFirst({ where: { id: doc.id } })).toBeNull();
     });
 
+    it("la entrega del e-CF al comprador está aislada por empresa (salvo para el trabajador)", async () => {
+      const doc = await draftDoc(orgA);
+      const asA = withTenant(prisma, orgA);
+      const asB = withTenant(prisma, orgB);
+      await asA.ecfDelivery.create({ data: { organizationId: orgA, documentId: doc.id, buyerRnc: "131880681" } });
+      expect(await asA.ecfDelivery.count()).toBe(1);
+      expect(await asB.ecfDelivery.count()).toBe(0);
+      await expect(
+        asB.ecfDelivery.create({ data: { organizationId: orgA, documentId: (await draftDoc(orgA)).id, buyerRnc: "1" } }),
+      ).rejects.toThrow();
+      expect(await asB.ecfDelivery.updateMany({ data: { state: "FAILED" } })).toEqual({ count: 0 });
+      // El trabajador declara app.system y ve las entregas de todas las empresas.
+      const seen = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT set_config('app.system', 'fiscal-worker', TRUE)`;
+        return tx.ecfDelivery.count({ where: { documentId: doc.id } });
+      });
+      expect(seen).toBe(1);
+    });
+
     it("un borrador se puede editar y eliminar", async () => {
       const doc = await draftDoc(orgA);
       const asA = withTenant(prisma, orgA);

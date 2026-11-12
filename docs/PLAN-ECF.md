@@ -71,21 +71,21 @@ Llevan semanas y no dependen del código:
 
 ## 5. Fase C — Piezas nuevas que exige la certificación 🧑‍💻
 
-1. **Modo certificación (set de pruebas)** — *la pieza más importante*.
+1. **Modo certificación (set de pruebas)** — *la pieza más importante*. **Pendiente**: el formato exacto del Excel solo se ve en el portal; se construye en cuanto lo tengamos.
    - Importar el **Excel** de la DGII (pruebas de datos) y armar cada e-CF **con los mismos campos y en el mismo orden**, sin pasar por las facturas del sistema; validar contra XSD (A0) **antes** de enviar; firmar, enviar, consultar y mostrar el resultado de cada fila.
    - Lo mismo para el Excel de **aprobaciones/rechazos comerciales**.
    - Probablemente el set incluya tipos o campos que el sistema aún no emite (otros tipos de e-CF, ISC, otra moneda…): el generador debe ser **genérico por campo**, guiado por el Excel. Se precisará al ver el primer Excel real (en TesteCF/portal). Indicio: un ejemplo con datos del set («DOCUMENTOS ELECTRONICOS DE 02») es un **E47** con `OtraMoneda` (USD), `Retencion` de ISR por línea, `Transporte` y `TerminoPago`; representarlo como JSON anidado en el orden del XML (como hace el servicio de §7 E1) es un buen modelo.
-2. **PDF de la representación impresa** (A4 y ticket), conforme a los modelos de la DGII; en la simulación se suben estos PDF (máx. 10 MB) y la DGII los **aprueba o rechaza**. Debe incluir:
+2. ✔️ (2026-11-11) **PDF de la representación impresa** (A4 y ticket), conforme a los modelos de la DGII; en la simulación se suben estos PDF (máx. 10 MB) y la DGII los **aprueba o rechaza**. Debe incluir: **Hecho** en la página imprimible del panel (Imprimir → Guardar como PDF): encabezado, vencimiento, NCF modificado, ITBIS por línea con «E», subtotal gravado, «Fecha Firma» dd-MM-aaaa HH:mm:ss, leyendas y «Página No. X de Y» (Chrome/Edge 131+). Falta: subtotales por página y logo.
    - fecha de vencimiento de la secuencia (E31/E33), «NCF modificado» y motivo (E33/E34) **impresos** (hoy son `no-print`), ITBIS por línea, «Subtotal gravado», sucursal, municipio/provincia, paginación «Página X de Y» con subtotales por página, fecha de firma en `dd-MM-aaaa HH:mm:ss`;
    - leyendas de **envío diferido** (24 h) y **contingencia** (72 h); documento «no válido para fines fiscales» cuando no se pudo generar el e-CF.
-3. **Entregar el e-CF al comprador electrónico** ✅ hoy no existe: buscar al comprador en el directorio, enviarle el e-CF a su `urlRecepcion` (con su autenticación) y guardar el **ARECF** que responde. Se prueba en las pruebas de comunicación.
-4. **Servicios accesibles desde internet durante la certificación**: la DGII llama a tus URL de recepción, aprobación y autenticación. Opciones: **túnel HTTPS** (p. ej. Cloudflare Tunnel) a tu PC mientras duren las pruebas, o un despliegue temporal solo de la API. ⚠️ Choca con la regla «no desplegar hasta terminar»: el túnel la respeta.
+3. **Entregar el e-CF al comprador electrónico** ✔️ (2026-11-11) hecho: tabla `ecf_delivery`, trabajador de entregas, acuse guardado, estado y «Reintentar entrega» en el panel. Diseño: buscar al comprador en el directorio, enviarle el e-CF a su `urlRecepcion` (con su autenticación) y guardar el **ARECF** que responde. Se prueba en las pruebas de comunicación.
+4. ✔️ (2026-11-11, guía en [TUNEL-CERTIFICACION.md](TUNEL-CERTIFICACION.md)) **Servicios accesibles desde internet durante la certificación**: la DGII llama a tus URL de recepción, aprobación y autenticación. Opciones: **túnel HTTPS** (p. ej. Cloudflare Tunnel) a tu PC mientras duren las pruebas, o un despliegue temporal solo de la API. ⚠️ Choca con la regla «no desplegar hasta terminar»: el túnel la respeta.
 
 ---
 
 ## 6. Fase D — Contingencia completa 🧑‍💻
 
-1. **Sin conexión** (lo que ya hace la caja): imprimir la leyenda de 72 h en el ticket y en el panel; **alerta** si algo emitido lleva cerca de 72 h sin enviarse (caja y nube); evaluar `IndicadorEnvioDiferido` (solo para autorizados; confirmar en TesteCF).
+1. ✔️ (2026-11-11: leyenda en el ticket térmico, en la vista de la caja y en el panel; alerta de atrasados en el Resumen; `IndicadorEnvioDiferido` sin evaluar) **Sin conexión** (lo que ya hace la caja): imprimir la leyenda de 72 h en el ticket y en el panel; **alerta** si algo emitido lleva cerca de 72 h sin enviarse (caja y nube); evaluar `IndicadorEnvioDiferido` (solo para autorizados; confirmar en TesteCF).
 2. **Imposibilidad técnica**: registro de entrada/salida de contingencia en el sistema (tú la declaras en la OFV), secuencias **serie B** en papel (máx. 15 días), y al salir **reemplazo** de cada B por un e-CF con código de modificación 4, enviado **solo a la DGII**, en un plazo de **30 días**. Requiere notas/e-CF que referencien NCF B.
 3. Notas de crédito sobre **NCF no electrónicos** (B/A/P), útiles también para la migración de clientes que vienen del papel.
 

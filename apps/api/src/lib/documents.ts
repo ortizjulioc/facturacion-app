@@ -363,7 +363,7 @@ async function resolveBuyer(
 // ───────────── Salida ─────────────
 
 export type DocumentFull = Prisma.DocumentGetPayload<{
-  include: { lines: true; payments: true; fiscalSubmission: true; issuedApproval: true };
+  include: { lines: true; payments: true; fiscalSubmission: true; issuedApproval: true; ecfDelivery: { omit: { ackXml: true } } };
 }>;
 
 export const FULL = {
@@ -371,6 +371,7 @@ export const FULL = {
   payments: { orderBy: { createdAt: "asc" } },
   fiscalSubmission: true,
   issuedApproval: true,
+  ecfDelivery: { omit: { ackXml: true } },
 } satisfies Prisma.DocumentInclude;
 
 const m = (v: bigint) => fromCents(v);
@@ -412,6 +413,17 @@ export const documentDto = (d: DocumentFull, profile: StampProfile | null = null
       }
     : null,
   /** Respuesta comercial del cliente (aprobó o rechazó este comprobante), si la mandó. */
+  /** Entrega del e-CF al comprador contribuyente electrónico (null si no aplica o aún no toca). */
+  delivery: d.ecfDelivery
+    ? {
+        state: d.ecfDelivery.state,
+        attempts: d.ecfDelivery.attempts,
+        error: d.ecfDelivery.lastError,
+        received: d.ecfDelivery.ackStatus === null ? null : d.ecfDelivery.ackStatus === 0,
+        reason: d.ecfDelivery.ackReason,
+        deliveredAt: d.ecfDelivery.deliveredAt,
+      }
+    : null,
   approval: d.issuedApproval
     ? { approved: d.issuedApproval.approved, reason: d.issuedApproval.reason, at: d.issuedApproval.approvedAtText, receivedAt: d.issuedApproval.receivedAt }
     : null,
@@ -435,6 +447,8 @@ export const documentDto = (d: DocumentFull, profile: StampProfile | null = null
   paymentDueDate: d.paymentDueDate ? d.paymentDueDate.toISOString().slice(0, 10) : null,
   referencedDocumentId: d.referencedDocumentId,
   modificationCode: d.modificationCode,
+  /** Emitido en una caja sin conexión (contingencia): la representación impresa lleva la leyenda de 72 horas. */
+  offline: d.clientId !== null,
   totals: {
     discount: m(d.totalDiscount),
     subtotal: m(d.subtotal),

@@ -7,9 +7,11 @@ import {
   ECF_LABELS,
   formatDocument,
   formatTaxId,
+  MODIFICATION_CODES,
   TAX_LABELS,
   type DocumentType,
   type EcfType,
+  type ModificationCode,
   type TaxCode,
 } from "@facturacion/core";
 import { useDialogs } from "@/components/dialogs";
@@ -27,6 +29,40 @@ import {
   statusTone,
 } from "@/lib/format";
 import { useQuery } from "@/lib/use-query";
+
+/** Fecha y hora de la firma como en el e-CF y los modelos de la DGII: «dd-MM-aaaa HH:mm:ss» en hora dominicana. */
+const signedAtText = (at: string | Date) => {
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: "America/Santo_Domingo",
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    })
+      .formatToParts(new Date(at))
+      .map((x) => [x.type, x.value]),
+  );
+  return `${p.day}-${p.month}-${p.year} ${p.hour}:${p.minute}:${p.second}`;
+};
+
+const DELIVERY_LABELS: Record<string, string> = {
+  PENDING: "Por entregar",
+  DELIVERED: "Recibido por el comprador",
+  NOT_RECEIVED: "El comprador no lo recibió",
+  NOT_ELECTRONIC: "El comprador no es contribuyente electrónico",
+  FAILED: "No se pudo entregar",
+};
+/** Motivos del acuse de recibo «no recibido» (Formato Acuse de Recibo v1.0). */
+const NOT_RECEIVED_LABELS: Record<number, string> = {
+  1: "Error de especificación",
+  2: "Error de firma digital",
+  3: "Envío duplicado",
+  4: "El RNC del comprador no corresponde",
+};
 
 const linkButton =
   "inline-flex items-center justify-center rounded-md px-3.5 py-2 text-sm font-medium transition";
@@ -216,30 +252,52 @@ export function InvoiceDetail({ id }: { id: string }) {
             </p>
             {company && (
               <p className="text-sm text-zinc-600 dark:text-zinc-400">
-                {company.legalName} · RNC {formatTaxId(company.rnc)}
+                {company.legalName}
                 <br />
-                {company.address}
+                RNC {formatTaxId(company.rnc)}
+                <br />
+                Dirección: {company.address}
+                {[company.municipality, company.province].filter(Boolean).length > 0 && `, ${[company.municipality, company.province].filter(Boolean).join(", ")}`}
+                <br />
+                <span className="font-medium">Fecha Emisión:</span> {formatDate(doc.issuedAt ?? doc.createdAt)}
               </p>
             )}
           </div>
           <div className="text-right text-sm">
             <p className="font-medium">{ECF_LABELS[type]}</p>
-            <p className="font-mono">{doc.encf ?? "Sin número (borrador)"}</p>
-            <p className="text-zinc-600 dark:text-zinc-400">
-              {formatDateTime(doc.issuedAt ?? doc.createdAt)}
+            <p>
+              <span className="font-medium">e-NCF:</span> <span className="font-mono">{doc.encf ?? "Sin número (borrador)"}</span>
             </p>
-            <Badge tone={statusTone(doc.status)}>
-              {STATUS_LABELS[doc.status] ?? doc.status}
-            </Badge>
+            {/* Modelos de representación impresa de la DGII: vencimiento de la secuencia en el 31 y el 33; NCF modificado
+                y su motivo en las notas. */}
+            {(type === "E31" || type === "E33") && doc.sequenceExpiry && (
+              <p>
+                <span className="font-medium">Fecha Vencimiento:</span> {formatDate(doc.sequenceExpiry)}
+              </p>
+            )}
+            {doc.referencedEncf && (
+              <>
+                <p>
+                  <span className="font-medium">NCF Modificado:</span> <span className="font-mono">{doc.referencedEncf}</span>
+                </p>
+                {doc.modificationCode && <p className="font-medium">{MODIFICATION_CODES[doc.modificationCode as ModificationCode]}</p>}
+              </>
+            )}
+            <p className="no-print text-zinc-600 dark:text-zinc-400">{formatDateTime(doc.issuedAt ?? doc.createdAt)}</p>
+            <span className="no-print">
+              <Badge tone={statusTone(doc.status)}>{STATUS_LABELS[doc.status] ?? doc.status}</Badge>
+            </span>
           </div>
         </header>
 
         <section className="text-sm">
           <p className="text-xs uppercase tracking-wide text-zinc-500">Comprador</p>
-          <p className="font-medium">{doc.buyerName ?? "Consumidor final"}</p>
+          <p>
+            <span className="font-medium">Razón Social Cliente:</span> {doc.buyerName ?? "Consumidor final"}
+          </p>
           {doc.buyerDocType && doc.buyerDocNumber && (
-            <p className="text-zinc-600 dark:text-zinc-400">
-              {doc.buyerDocType}{" "}
+            <p>
+              <span className="font-medium">{doc.buyerDocType === "PASAPORTE" ? "Pasaporte" : "RNC Cliente"}:</span>{" "}
               {formatDocument(doc.buyerDocType as DocumentType, doc.buyerDocNumber)}
             </p>
           )}
@@ -254,16 +312,18 @@ export function InvoiceDetail({ id }: { id: string }) {
           <table className={tableStyles.table}>
             <thead>
               <tr>
+                <th className={`${tableStyles.th} text-right`}>Cantidad</th>
                 <th className={tableStyles.th}>Descripción</th>
-                <th className={`${tableStyles.th} text-right`}>Cant.</th>
+                <th className={tableStyles.th}>Unidad de Medida</th>
                 <th className={`${tableStyles.th} text-right`}>Precio</th>
-                <th className={tableStyles.th}>Impuesto</th>
-                <th className={`${tableStyles.th} text-right`}>Total</th>
+                <th className={`${tableStyles.th} text-right`}>ITBIS</th>
+                <th className={`${tableStyles.th} text-right`}>Valor</th>
               </tr>
             </thead>
             <tbody>
               {doc.lines.map((l) => (
-                <tr key={l.lineNumber}>
+                <tr key={l.lineNumber} className="break-inside-avoid">
+                  <td className={`${tableStyles.td} text-right tabular-nums`}>{l.quantity}</td>
                   <td className={tableStyles.td}>
                     {l.name}
                     {Number(l.discount) > 0 && (
@@ -272,13 +332,14 @@ export function InvoiceDetail({ id }: { id: string }) {
                       </div>
                     )}
                   </td>
-                  <td className={`${tableStyles.td} text-right tabular-nums`}>
-                    {l.quantity} <span className="text-xs text-zinc-500">{l.unit}</span>
-                  </td>
+                  <td className={tableStyles.td}>{l.unit}</td>
                   <td className={`${tableStyles.td} text-right tabular-nums`}>
                     {money(l.unitPrice, cur)}
                   </td>
-                  <td className={tableStyles.td}>{TAX_LABELS[l.tax as TaxCode]}</td>
+                  <td className={`${tableStyles.td} text-right tabular-nums`} title={TAX_LABELS[l.tax as TaxCode]}>
+                    {/* «E» marca las líneas exentas, como en la representación impresa de la DGII. */}
+                    {l.tax === "EXENTO" ? "E" : money(l.taxAmount, cur)}
+                  </td>
                   <td className={`${tableStyles.td} text-right tabular-nums`}>
                     {money(l.total, cur)}
                   </td>
@@ -330,6 +391,7 @@ export function InvoiceDetail({ id }: { id: string }) {
           </div>
 
           <div className="space-y-1.5 text-sm tabular-nums">
+            <Line label="Subtotal Gravado" value={money(String(Number(totals.base18) + Number(totals.base16) + Number(totals.base0)), cur)} />
             <Line label="Subtotal" value={money(totals.subtotal, cur)} />
             {Number(totals.discount) > 0 && (
               <Line label="Descuentos incluidos" value={money(totals.discount, cur)} />
@@ -384,6 +446,34 @@ export function InvoiceDetail({ id }: { id: string }) {
             )}
           </section>
         )}
+        {doc.delivery && (
+          <section className="no-print rounded-md border border-zinc-200 p-3 text-sm dark:border-zinc-800">
+            <p className="text-xs uppercase tracking-wide text-zinc-500">Entrega al comprador (contribuyente electrónico)</p>
+            <p>
+              <Badge tone={doc.delivery.state === "DELIVERED" ? "success" : doc.delivery.state === "PENDING" || doc.delivery.state === "NOT_ELECTRONIC" ? "neutral" : "warning"}>
+                {DELIVERY_LABELS[doc.delivery.state] ?? doc.delivery.state}
+              </Badge>
+              {doc.delivery.deliveredAt && <span className="ml-2 text-zinc-500">{formatDateTime(doc.delivery.deliveredAt)}</span>}
+            </p>
+            {doc.delivery.reason && <p className="text-zinc-600 dark:text-zinc-400">Motivo del comprador: {NOT_RECEIVED_LABELS[doc.delivery.reason] ?? doc.delivery.reason}</p>}
+            {doc.delivery.error && <p className="text-zinc-600 dark:text-zinc-400">{doc.delivery.error}</p>}
+            {canManage && ["FAILED", "NOT_RECEIVED", "NOT_ELECTRONIC"].includes(doc.delivery.state) && (
+              <Button
+                variant="secondary"
+                className="mt-2"
+                disabled={busy}
+                onClick={() =>
+                  run(async () => {
+                    await unwrap(await api.v1.documents[":id"].deliver.$post({ param: { id: doc.id } }));
+                    reload();
+                  })
+                }
+              >
+                Reintentar entrega
+              </Button>
+            )}
+          </section>
+        )}
         {doc.approval && (
           <section className="no-print rounded-md border border-zinc-200 p-3 text-sm dark:border-zinc-800">
             <p className="text-xs uppercase tracking-wide text-zinc-500">Respuesta comercial del cliente</p>
@@ -400,13 +490,28 @@ export function InvoiceDetail({ id }: { id: string }) {
             <div className="space-y-1">
               <p className="font-medium">Comprobante firmado electrónicamente</p>
               <p className="text-zinc-600 dark:text-zinc-400">
-                Código de seguridad: <span className="font-mono">{doc.ecf.securityCode}</span>
+                Código de Seguridad: <span className="font-mono">{doc.ecf.securityCode}</span>
                 <br />
-                Fecha de firma: {formatDateTime(doc.ecf.signedAt)}
+                Fecha Firma: {signedAtText(doc.ecf.signedAt)}
               </p>
               {doc.ecf.qrUrl && <p className="text-xs text-zinc-500">Escanee el código para verificarlo en la DGII.</p>}
             </div>
           </footer>
+        )}
+        {/* Leyendas de los modelos de representación impresa de la DGII. */}
+        {doc.offline && doc.ecf && (
+          <p className="text-sm font-medium italic">
+            e-CF emitido en modalidad de Contingencia, el cual podrá ser consultado para su validez fiscal, a partir de las
+            setenta y dos (72) horas.
+          </p>
+        )}
+        {!draft && !doc.ecf && (
+          <p className="text-sm font-medium italic">
+            Documento no válido para fines fiscales: el comprobante electrónico aún no está firmado.
+          </p>
+        )}
+        {doc.status === "REJECTED" && (
+          <p className="text-sm font-medium italic">Documento no válido para fines fiscales: la DGII lo rechazó.</p>
         )}
       </article>
 

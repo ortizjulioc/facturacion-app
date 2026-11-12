@@ -80,38 +80,39 @@ model Verification {
 }
 
 model Organization {
-  id               String            @id
-  name             String
-  slug             String            @unique
-  logo             String?
-  createdAt        DateTime          @default(now())
-  metadata         String?
-  members          Member[]
-  invitations      Invitation[]
-  branches         Branch[]
-  terminals        Terminal[]
-  categories       Category[]
-  products         Product[]
-  customers        Customer[]
-  companyProfile   CompanyProfile?
-  sequences        Sequence[]
-  documents        Document[]
-  auditLogs        AuditLog[]
-  stockLevels      StockLevel[]
-  stockMovements   StockMovement[]
-  suppliers        Supplier[]
-  purchases        Purchase[]
-  diningTables     DiningTable[]
-  restaurantOrders RestaurantOrder[]
-  modifierGroups   ModifierGroup[]
-  modifiers        Modifier[]
-  cashShifts       CashShift[]
-  cashierPins      CashierPin[]
-  certificate      CompanyCertificate?
-  fiscalSubmissions FiscalSubmission[]
-  receivedDocuments ReceivedDocument[]
+  id                 String              @id
+  name               String
+  slug               String              @unique
+  logo               String?
+  createdAt          DateTime            @default(now())
+  metadata           String?
+  members            Member[]
+  invitations        Invitation[]
+  branches           Branch[]
+  terminals          Terminal[]
+  categories         Category[]
+  products           Product[]
+  customers          Customer[]
+  companyProfile     CompanyProfile?
+  sequences          Sequence[]
+  documents          Document[]
+  auditLogs          AuditLog[]
+  stockLevels        StockLevel[]
+  stockMovements     StockMovement[]
+  suppliers          Supplier[]
+  purchases          Purchase[]
+  diningTables       DiningTable[]
+  restaurantOrders   RestaurantOrder[]
+  modifierGroups     ModifierGroup[]
+  modifiers          Modifier[]
+  cashShifts         CashShift[]
+  cashierPins        CashierPin[]
+  certificate        CompanyCertificate?
+  fiscalSubmissions  FiscalSubmission[]
+  ecfDeliveries      EcfDelivery[]
+  receivedDocuments  ReceivedDocument[]
   sequenceAnnulments SequenceAnnulment[]
-  issuedApprovals  IssuedApproval[]
+  issuedApprovals    IssuedApproval[]
 
   @@map("organization")
 }
@@ -222,9 +223,9 @@ model Category {
 
 /// Producto o servicio vendible. Dinero en centavos (BigInt); impuesto según TaxCode.
 model Product {
-  id               String          @id @default(uuid(7)) @db.Uuid
+  id               String                 @id @default(uuid(7)) @db.Uuid
   organizationId   String
-  categoryId       String?         @db.Uuid
+  categoryId       String?                @db.Uuid
   sku              String?
   barcode          String?
   name             String
@@ -232,27 +233,27 @@ model Product {
   /// Precio unitario en centavos.
   price            BigInt
   /// true: `price` ya incluye el impuesto (precio al consumidor).
-  priceIncludesTax Boolean         @default(true)
-  tax              TaxCode         @default(ITBIS18)
+  priceIncludesTax Boolean                @default(true)
+  tax              TaxCode                @default(ITBIS18)
   /// Unidad de medida mostrada: UND, KG, LB, HORA…
-  unit             String          @default("UND")
+  unit             String                 @default("UND")
   /// true: se vende con decimales (peso, volumen).
-  allowsDecimals   Boolean         @default(false)
+  allowsDecimals   Boolean                @default(false)
   /// true: al emitir se descuenta de las existencias de la sucursal.
-  trackInventory   Boolean         @default(false)
+  trackInventory   Boolean                @default(false)
   /// Existencia mínima (milésimas) por sucursal; por debajo se avisa de stock bajo.
-  minStock         BigInt          @default(0)
+  minStock         BigInt                 @default(0)
   /// Restaurante: dónde se prepara. Los productos NONE (p. ej. una botella) no pasan por la cocina.
-  prepStation      PrepStation     @default(NONE)
+  prepStation      PrepStation            @default(NONE)
   /// Restaurante: curso en el que sale por defecto (1 entrada, 2 plato fuerte, 3 postre…).
-  course           Int             @default(1)
+  course           Int                    @default(1)
   /// Restaurante: es un combo (varios productos a un precio; ver `ComboComponent`).
-  isCombo          Boolean         @default(false)
-  active           Boolean         @default(true)
-  createdAt        DateTime        @default(now())
-  updatedAt        DateTime        @updatedAt
-  organization     Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  category         Category?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  isCombo          Boolean                @default(false)
+  active           Boolean                @default(true)
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+  organization     Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  category         Category?              @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   documentLines    DocumentLine[]
   /// Último costo unitario neto (sin impuesto) de compra, en centavos.
   lastCost         BigInt?
@@ -261,8 +262,8 @@ model Product {
   purchaseLines    PurchaseLine[]
   orderItems       OrderItem[]
   modifierGroups   ProductModifierGroup[]
-  comboComponents  ComboComponent[]  @relation("combo")
-  usedInCombos     ComboComponent[]  @relation("component")
+  comboComponents  ComboComponent[]       @relation("combo")
+  usedInCombos     ComboComponent[]       @relation("component")
 
   @@unique([organizationId, sku])
   @@unique([organizationId, barcode])
@@ -334,52 +335,52 @@ enum EcfEnvironment {
 
 /// Datos fiscales del emisor (uno por empresa).
 model CompanyProfile {
-  id                 String         @id @default(uuid(7)) @db.Uuid
-  organizationId     String         @unique
-  rnc                String
-  legalName          String
-  tradeName          String?
-  address            String
-  province           String?
-  municipality       String?
-  economicActivity   String?
-  email              String?
-  phone              String?
-  environment        EcfEnvironment @default(TEST)
+  id                  String         @id @default(uuid(7)) @db.Uuid
+  organizationId      String         @unique
+  rnc                 String
+  legalName           String
+  tradeName           String?
+  address             String
+  province            String?
+  municipality        String?
+  economicActivity    String?
+  email               String?
+  phone               String?
+  environment         EcfEnvironment @default(TEST)
   /// false: no se puede emitir un comprobante si falta existencia de un producto con inventario.
-  allowNegativeStock Boolean        @default(true)
+  allowNegativeStock  Boolean        @default(true)
   /// true: una caja solo puede vender con un turno abierto (la app de caja y la emisión en línea con caja lo exigen).
-  requireShift       Boolean        @default(false)
+  requireShift        Boolean        @default(false)
   /// true: cada e-CF firmado se envía solo a la DGII (cola con reintentos). Requiere certificado y estar habilitado como emisor.
-  sendToDgii         Boolean        @default(true)
+  sendToDgii          Boolean        @default(true)
   /// true: quien nos envía un e-CF o una aprobación comercial debe autenticarse (semilla firmada → token) en los servicios /fe.
-  requireReceiverAuth Boolean       @default(false)
-  createdAt          DateTime       @default(now())
-  updatedAt          DateTime       @updatedAt
-  organization       Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  requireReceiverAuth Boolean        @default(false)
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+  organization        Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@map("company_profile")
 }
 
 /// Rango de e-NCF autorizado por la DGII. `nextNumber` avanza de forma atómica al emitir.
 model Sequence {
-  id             String       @id @default(uuid(7)) @db.Uuid
+  id             String              @id @default(uuid(7)) @db.Uuid
   organizationId String
   ecfType        EcfType
   fromNumber     BigInt
   toNumber       BigInt
   /// Próximo número a asignar (from <= next <= to + 1).
   nextNumber     BigInt
-  expiresAt      DateTime     @db.Date
+  expiresAt      DateTime            @db.Date
   /// null = sirve a toda la empresa; con valor, solo a esa caja.
-  terminalId     String?      @db.Uuid
+  terminalId     String?             @db.Uuid
   /// true = bloque entregado a una caja para facturar SIN conexión: solo la caja lo usa (la nube nunca asigna de aquí).
-  offline        Boolean      @default(false)
-  active         Boolean      @default(true)
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  terminal       Terminal?    @relation(fields: [terminalId], references: [id], onDelete: NoAction)
+  offline        Boolean             @default(false)
+  active         Boolean             @default(true)
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  organization   Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  terminal       Terminal?           @relation(fields: [terminalId], references: [id], onDelete: NoAction)
   annulments     SequenceAnnulment[]
 
   @@unique([organizationId, ecfType, fromNumber])
@@ -389,76 +390,77 @@ model Sequence {
 
 /// Comprobante. Editable solo en DRAFT; después una función de BD impide cambiar importes o líneas.
 model Document {
-  id                   String           @id @default(uuid(7)) @db.Uuid
-  organizationId       String
-  type                 EcfType
-  status               DocumentStatus   @default(DRAFT)
+  id                    String            @id @default(uuid(7)) @db.Uuid
+  organizationId        String
+  type                  EcfType
+  status                DocumentStatus    @default(DRAFT)
   /// Se asigna al emitir.
-  encf                 String?
-  branchId             String           @db.Uuid
-  terminalId           String?          @db.Uuid
-  customerId           String?          @db.Uuid
+  encf                  String?
+  branchId              String            @db.Uuid
+  terminalId            String?           @db.Uuid
+  customerId            String?           @db.Uuid
   /// Copia del comprador al emitir (el cliente puede cambiar después).
-  buyerName            String?
-  buyerDocType         DocumentType?
-  buyerDocNumber       String?
-  currency             String           @default("DOP")
-  exchangeRate         Decimal          @default(1) @db.Decimal(14, 4)
-  propinaLegal         Boolean          @default(false)
-  notes                String?
+  buyerName             String?
+  buyerDocType          DocumentType?
+  buyerDocNumber        String?
+  currency              String            @default("DOP")
+  exchangeRate          Decimal           @default(1) @db.Decimal(14, 4)
+  propinaLegal          Boolean           @default(false)
+  notes                 String?
   /// Fecha límite de pago (FechaLimitePago del e-CF). Obligatoria cuando toda la venta es a crédito (TipoPago 2).
-  paymentDueDate       DateTime?        @db.Date
+  paymentDueDate        DateTime?         @db.Date
   /// Solo notas de crédito/débito.
-  referencedDocumentId String?          @db.Uuid
-  referencedEncf       String?
-  modificationCode     Int?
+  referencedDocumentId  String?           @db.Uuid
+  referencedEncf        String?
+  modificationCode      Int?
   // Totales en centavos, calculados SIEMPRE en el servidor con @facturacion/core.
-  totalDiscount        BigInt           @default(0)
-  subtotal             BigInt           @default(0)
-  base18               BigInt           @default(0)
-  tax18                BigInt           @default(0)
-  base16               BigInt           @default(0)
-  tax16                BigInt           @default(0)
-  base0                BigInt           @default(0)
-  baseExempt           BigInt           @default(0)
-  totalTax             BigInt           @default(0)
-  propinaAmount        BigInt           @default(0)
-  total                BigInt           @default(0)
-  issuedAt             DateTime?
+  totalDiscount         BigInt            @default(0)
+  subtotal              BigInt            @default(0)
+  base18                BigInt            @default(0)
+  tax18                 BigInt            @default(0)
+  base16                BigInt            @default(0)
+  tax16                 BigInt            @default(0)
+  base0                 BigInt            @default(0)
+  baseExempt            BigInt            @default(0)
+  totalTax              BigInt            @default(0)
+  propinaAmount         BigInt            @default(0)
+  total                 BigInt            @default(0)
+  issuedAt              DateTime?
   /// Retenciones que el comprador nos hizo al pagar (607). Se completan después de emitir.
-  itbisWithheldByThirds BigInt          @default(0)
-  isrWithheldByThirds   BigInt          @default(0)
-  withholdingDate       DateTime?       @db.Date
-  createdById          String
-  createdAt            DateTime         @default(now())
-  updatedAt            DateTime         @updatedAt
-  organization         Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  branch               Branch           @relation(fields: [branchId], references: [id], onDelete: NoAction)
-  terminal             Terminal?        @relation(fields: [terminalId], references: [id], onDelete: NoAction)
-  customer             Customer?        @relation(fields: [customerId], references: [id], onDelete: NoAction)
+  itbisWithheldByThirds BigInt            @default(0)
+  isrWithheldByThirds   BigInt            @default(0)
+  withholdingDate       DateTime?         @db.Date
+  createdById           String
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+  organization          Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch                Branch            @relation(fields: [branchId], references: [id], onDelete: NoAction)
+  terminal              Terminal?         @relation(fields: [terminalId], references: [id], onDelete: NoAction)
+  customer              Customer?         @relation(fields: [customerId], references: [id], onDelete: NoAction)
   /// Si nació del cobro de una mesa del restaurante.
-  orderId              String?          @db.Uuid
-  order                RestaurantOrder? @relation(fields: [orderId], references: [id], onDelete: NoAction)
+  orderId               String?           @db.Uuid
+  order                 RestaurantOrder?  @relation(fields: [orderId], references: [id], onDelete: NoAction)
   /// Turno de caja en el que se emitió (si la caja tenía un turno abierto).
-  shiftId              String?          @db.Uuid
-  shift                CashShift?       @relation(fields: [shiftId], references: [id], onDelete: NoAction)
+  shiftId               String?           @db.Uuid
+  shift                 CashShift?        @relation(fields: [shiftId], references: [id], onDelete: NoAction)
   /// Identificador generado por la caja al vender sin conexión: hace idempotente la subida (reintentos sin duplicar).
-  clientId             String?          @db.Uuid
+  clientId              String?           @db.Uuid
   /// Nota de crédito que devuelve mercancía: al emitirla, las líneas con inventario vuelven a las existencias.
-  returnsStock         Boolean          @default(false)
+  returnsStock          Boolean           @default(false)
   /// e-CF firmado (XML completo con la firma). Se llena al emitir si la empresa tiene certificado, o después.
-  ecfXml               String?
+  ecfXml                String?
   /// Primeros 6 caracteres del SignatureValue: va en el QR de la representación impresa.
-  securityCode         String?
+  securityCode          String?
   /// Instante de la firma (FechaHoraFirma del e-CF).
-  signedAt             DateTime?
-  fiscalSubmission     FiscalSubmission?
-  issuedApproval       IssuedApproval?
-  referencedDocument   Document?        @relation("Modifies", fields: [referencedDocumentId], references: [id], onDelete: NoAction)
-  modifiedBy           Document[]       @relation("Modifies")
-  lines                DocumentLine[]
-  payments             Payment[]
-  stockMovements       StockMovement[]
+  signedAt              DateTime?
+  fiscalSubmission      FiscalSubmission?
+  ecfDelivery           EcfDelivery?
+  issuedApproval        IssuedApproval?
+  referencedDocument    Document?         @relation("Modifies", fields: [referencedDocumentId], references: [id], onDelete: NoAction)
+  modifiedBy            Document[]        @relation("Modifies")
+  lines                 DocumentLine[]
+  payments              Payment[]
+  stockMovements        StockMovement[]
 
   @@unique([organizationId, encf])
   @@unique([organizationId, clientId])
@@ -554,57 +556,57 @@ model Supplier {
 
 /// Compra o gasto. Se edita solo en DRAFT; al registrarla (POSTED) queda congelada.
 model Purchase {
-  id                String          @id @default(uuid(7)) @db.Uuid
-  organizationId    String
-  kind              PurchaseKind
-  status            PurchaseStatus  @default(DRAFT)
-  branchId          String          @db.Uuid
-  supplierId        String?         @db.Uuid
+  id                 String            @id @default(uuid(7)) @db.Uuid
+  organizationId     String
+  kind               PurchaseKind
+  status             PurchaseStatus    @default(DRAFT)
+  branchId           String            @db.Uuid
+  supplierId         String?           @db.Uuid
   /// Copia del proveedor al registrar.
-  supplierName      String?
-  supplierDocType   DocumentType?
-  supplierDocNumber String?
+  supplierName       String?
+  supplierDocType    DocumentType?
+  supplierDocNumber  String?
   /// NCF del proveedor (factura de proveedor) o e-NCF que emite la empresa (E41/E43).
-  ncf               String?
+  ncf                String?
   /// Fecha del comprobante (la que va en el formato 606).
-  invoiceDate       DateTime        @db.Date
-  currency          String          @default("DOP")
-  exchangeRate      Decimal         @default(1) @db.Decimal(14, 4)
+  invoiceDate        DateTime          @db.Date
+  currency           String            @default("DOP")
+  exchangeRate       Decimal           @default(1) @db.Decimal(14, 4)
   /// Tipo de bienes y servicios del 606 (1–11).
-  expenseType       Int             @default(9)
-  paymentMethod     PaymentMethod   @default(CASH)
-  notes             String?
+  expenseType        Int               @default(9)
+  paymentMethod      PaymentMethod     @default(CASH)
+  notes              String?
   // Totales en centavos, calculados SIEMPRE en el servidor con @facturacion/core.
-  totalDiscount     BigInt          @default(0)
-  subtotal          BigInt          @default(0)
-  base18            BigInt          @default(0)
-  tax18             BigInt          @default(0)
-  base16            BigInt          @default(0)
-  tax16             BigInt          @default(0)
-  base0             BigInt          @default(0)
-  baseExempt        BigInt          @default(0)
-  totalTax          BigInt          @default(0)
-  total             BigInt          @default(0)
-  itbisWithheld     BigInt          @default(0)
-  isrWithheld       BigInt          @default(0)
+  totalDiscount      BigInt            @default(0)
+  subtotal           BigInt            @default(0)
+  base18             BigInt            @default(0)
+  tax18              BigInt            @default(0)
+  base16             BigInt            @default(0)
+  tax16              BigInt            @default(0)
+  base0              BigInt            @default(0)
+  baseExempt         BigInt            @default(0)
+  totalTax           BigInt            @default(0)
+  total              BigInt            @default(0)
+  itbisWithheld      BigInt            @default(0)
+  isrWithheld        BigInt            @default(0)
   /// Fecha en que se pagó (606). Vacía = al contado el día del comprobante, o aún sin pagar si fue a crédito.
-  paymentDate       DateTime?       @db.Date
+  paymentDate        DateTime?         @db.Date
   /// Tipo de retención en ISR del 606 (1–9); obligatorio si hay ISR retenido.
   isrWithholdingType Int?
   /// ITBIS que se lleva directo al costo (no se adelanta) y el sujeto a proporcionalidad (606). Se completan después de registrar.
-  itbisToCost       BigInt          @default(0)
-  itbisProportional BigInt          @default(0)
-  postedAt          DateTime?
-  createdById       String
-  createdAt         DateTime        @default(now())
-  updatedAt         DateTime        @updatedAt
-  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  branch            Branch          @relation(fields: [branchId], references: [id], onDelete: NoAction)
-  supplier          Supplier?       @relation(fields: [supplierId], references: [id], onDelete: NoAction)
-  lines             PurchaseLine[]
-  stockMovements    StockMovement[]
+  itbisToCost        BigInt            @default(0)
+  itbisProportional  BigInt            @default(0)
+  postedAt           DateTime?
+  createdById        String
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+  organization       Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch             Branch            @relation(fields: [branchId], references: [id], onDelete: NoAction)
+  supplier           Supplier?         @relation(fields: [supplierId], references: [id], onDelete: NoAction)
+  lines              PurchaseLine[]
+  stockMovements     StockMovement[]
   /// El e-CF recibido de un proveedor del que nació esta compra, si fue así.
-  receivedDocument  ReceivedDocument?
+  receivedDocument   ReceivedDocument?
 
   @@unique([organizationId, supplierId, ncf])
   @@index([organizationId, status])
@@ -853,18 +855,18 @@ model ModifierGroup {
 }
 
 model Modifier {
-  id             String                  @id @default(uuid(7)) @db.Uuid
+  id             String        @id @default(uuid(7)) @db.Uuid
   organizationId String
-  groupId        String                  @db.Uuid
+  groupId        String        @db.Uuid
   name           String
   /// Recargo en centavos (0 = sin costo). Lleva el mismo impuesto que el producto.
-  price          BigInt                  @default(0)
-  sortOrder      Int                     @default(0)
-  active         Boolean                 @default(true)
-  createdAt      DateTime                @default(now())
-  updatedAt      DateTime                @updatedAt
-  organization   Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  group          ModifierGroup           @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  price          BigInt        @default(0)
+  sortOrder      Int           @default(0)
+  active         Boolean       @default(true)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  group          ModifierGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
 
   @@unique([groupId, name])
   @@map("modifier")
@@ -980,6 +982,46 @@ enum FiscalState {
 }
 
 /// Qué se le manda a la DGII: el e-CF completo (recepción de e-CF) o, en facturas de consumo menores a RD$250,000, su resumen.
+/// Entrega del e-CF al comprador cuando también es contribuyente electrónico (paso obligatorio del modelo e-CF).
+enum DeliveryState {
+  /// Por entregar (o reintentar tras un fallo temporal).
+  PENDING
+  /// El comprador respondió con un acuse de recibo «recibido» (Estado 0).
+  DELIVERED
+  /// El comprador respondió «no recibido» (Estado 1) con su motivo.
+  NOT_RECEIVED
+  /// El comprador no está en el directorio de contribuyentes electrónicos: no hay a quién entregarlo.
+  NOT_ELECTRONIC
+  /// Falló y no se reintenta solo (se puede reintentar desde el panel).
+  FAILED
+}
+
+model EcfDelivery {
+  id             String        @id @default(uuid(7)) @db.Uuid
+  organizationId String
+  documentId     String        @unique @db.Uuid
+  /// RNC o cédula del comprador al que se entrega.
+  buyerRnc       String
+  state          DeliveryState @default(PENDING)
+  attempts       Int           @default(0)
+  nextAttemptAt  DateTime      @default(now())
+  lockedUntil    DateTime?
+  lastError      String?
+  /// Acuse de recibo (ARECF) firmado que devolvió el comprador, su Estado (0/1) y el motivo si no lo recibió.
+  ackXml         String?
+  ackStatus      Int?
+  ackReason      Int?
+  deliveredAt    DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  document       Document      @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([state, nextAttemptAt])
+  @@index([organizationId, state])
+  @@map("ecf_delivery")
+}
+
 enum FiscalKind {
   ECF
   RFCE

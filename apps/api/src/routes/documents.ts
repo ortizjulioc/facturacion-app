@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { convertCents, ECF_TYPES, toCents } from "@facturacion/core";
+import { convertCents, ECF_TYPES, parseEncf, toCents } from "@facturacion/core";
 import type { Prisma } from "@facturacion/db";
 import { auditEntry } from "../lib/audit";
 import {
@@ -13,6 +13,7 @@ import {
   replacementInput,
 } from "../lib/documents";
 import { issueDocument } from "../lib/issue";
+import { retryDelivery } from "../lib/delivery";
 import { enqueueIfAuto, enqueueSubmission, fiscalBlock, processDue, retrySubmission } from "../lib/fiscal";
 import { signIssued } from "../lib/signing";
 import { requireRole } from "../middleware/tenant";
@@ -99,7 +100,15 @@ export const documents = new Hono<AppEnv>()
     });
     if (!doc) throw notFound();
     const profile = await c.get("db").companyProfile.findFirst({ select: { rnc: true, environment: true } });
-    return c.json({ data: documentDto(doc, profile) });
+    // Vencimiento de la secuencia del e-NCF: la representación impresa del 31 y el 33 lo muestra.
+    const parsed = doc.encf ? parseEncf(doc.encf) : null;
+    const sequence = parsed
+      ? await c.get("db").sequence.findFirst({
+          where: { ecfType: parsed.type, fromNumber: { lte: parsed.sequence }, toNumber: { gte: parsed.sequence } },
+          select: { expiresAt: true },
+        })
+      : null;
+    return c.json({ data: { ...documentDto(doc, profile), sequenceExpiry: sequence ? sequence.expiresAt.toISOString().slice(0, 10) : null } });
   })
   // Crea un borrador. Los totales siempre los calcula el servidor.
   .post("/", zv("json", documentInput), async (c) => {
@@ -305,6 +314,16 @@ export const documents = new Hono<AppEnv>()
       return created;
     });
     return c.json({ data: documentDto(doc) }, 201);
+  })
+  // Reintenta la entrega del e-CF al comprador (después de que corrigió su servicio, o si no lo había recibido).
+  .post("/:id/deliver", requireRole("owner", "admin"), zv("param", uuidParam), async (c) => {
+    const { id } = c.req.valid("param");
+    const doc = await c.get("run")(async (tx) => {
+      if (!(await retryDelivery(tx, id))) throw new HTTPException(409, { message: "No hay una entrega por reintentar para este comprobante" });
+      await tx.auditLog.create({ data: auditEntry(c, "document.deliver", "document", id) });
+      return tx.document.findFirstOrThrow({ where: { id }, include: FULL });
+    });
+    return c.json({ data: documentDto(doc) });
   })
   .post("/:id/send", requireRole("owner", "admin"), zv("param", uuidParam), async (c) => {
     const { id } = c.req.valid("param");

@@ -14,6 +14,7 @@ import type { Logger } from "../logger";
 import { FULL } from "./documents";
 import { fiscalBlock } from "./fiscal-queue";
 import { buildSummaryXml, loadSigner } from "./signing";
+import { enqueueDelivery } from "./delivery";
 
 export { enqueueIfAuto, enqueueSubmission, fiscalBlock, retrySubmission } from "./fiscal-queue";
 
@@ -237,7 +238,13 @@ async function recordResult(
   }
   const docStatus = r.status === "ACCEPTED" ? "ACCEPTED" : r.status === "ACCEPTED_CONDITIONAL" ? "ACCEPTED_CONDITIONAL" : "REJECTED";
   await save(deps, organizationId, sub.id, sub.documentId, { ...info, state: "DONE", attempts, lastError: null, lockedUntil: null, finishedAt: now }, docStatus);
-  return isFiscallyValid(r.status) ? "accepted" : "rejected";
+  if (!isFiscallyValid(r.status)) return "rejected";
+  // Aceptado: si el comprador es contribuyente, toca entregarle el e-CF (lo hace el trabajador de entregas).
+  await tenantTransaction(deps.prisma, organizationId, async (tx) => {
+    const doc = await tx.document.findFirst({ where: { id: sub.documentId }, select: { id: true, type: true, buyerDocType: true, buyerDocNumber: true } });
+    if (doc) await enqueueDelivery(tx, organizationId, doc);
+  });
+  return "accepted";
 }
 
 /** TrackId de un envío que la DGII ya recibió de este e-NCF (el más reciente), o null. En certificación no se puede consultar. */

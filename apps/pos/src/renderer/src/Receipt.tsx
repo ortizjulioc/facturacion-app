@@ -67,7 +67,15 @@ export function Receipt({ receipt }: { receipt: Receipt }) {
           {receipt.signedAt && <div className="small">Fecha de firma: {new Date(receipt.signedAt).toLocaleString("es-DO", { timeZone: "America/Santo_Domingo" })}</div>}
         </div>
       )}
-      {pending && <p className="small center-text no-print">Pendiente de subir a la nube (se envía sola al haber conexión).</p>}
+      {pending && (
+        <>
+          {/* Venta sin conexión: leyenda obligatoria de la DGII en la representación impresa (Instructivo de Contingencia). */}
+          <p className="small center-text">
+            e-CF emitido en modalidad de Contingencia, el cual podrá ser consultado para su validez fiscal, a partir de las setenta y dos (72) horas.
+          </p>
+          <p className="small center-text no-print">Pendiente de subir a la nube (se envía sola al haber conexión).</p>
+        </>
+      )}
       {!credit && <p className="small center-text">¡Gracias por su compra!</p>}
     </article>
   );

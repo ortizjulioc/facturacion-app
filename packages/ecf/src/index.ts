@@ -38,7 +38,7 @@ export {
 } from "./provider";
 export { formatDate, formatDateTime } from "./format";
 export { phoneOf, sellerOf, type CompanyData } from "./profile";
-export { PeerClient, peerEndpoint } from "./peer";
+export { PeerClient, peerEndpoint, readAcknowledgement, type Acknowledgement } from "./peer";
 export {
   buildAcecf,
   buildArecf,

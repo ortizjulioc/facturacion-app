@@ -4,7 +4,8 @@ import { EscPos } from "./escpos";
 
 /** Datos de un comprobante tal como los entrega la caja (misma forma que `Receipt` del motor). */
 export type ReceiptData = {
-  sale: { encf: string; type: "E31" | "E32" | "E34"; issuedAt: string; total: string; refundOf: string | null };
+  /** `status` PENDING = la venta aún no se subió a la nube: se emitió sin conexión (contingencia). */
+  sale: { encf: string; type: "E31" | "E32" | "E34"; issuedAt: string; total: string; refundOf: string | null; status?: string };
   company: { legalName: string; tradeName: string | null; rnc: string; address: string; phone: string | null } | null;
   buyerName: string | null;
   buyerDoc: string | null;
@@ -125,6 +126,10 @@ export function receiptTicket(r: ReceiptData, opts: TicketOptions): Uint8Array {
     if (r.securityCode) p.line(`Código de seguridad: ${r.securityCode}`);
     if (r.signedAt) p.line(`Fecha de firma: ${formatDateTime(r.signedAt)}`);
     p.left();
+  }
+  // Venta hecha sin conexión: la DGII exige esta leyenda en la representación impresa (Instructivo de Contingencia).
+  if (r.sale.status === "PENDING") {
+    p.feed(1).paragraph("e-CF emitido en modalidad de Contingencia, el cual podrá ser consultado para su validez fiscal, a partir de las setenta y dos (72) horas.");
   }
   if (!credit) p.feed(1).center().line("¡Gracias por su compra!").left();
   return end(p, opts);
