@@ -1,0 +1,116 @@
+{
+    "Encabezado": {
+      "Version": "1.0",
+      "IdDoc": {
+        "TipoeCF": "47",
+        "eNCF": "E470000000007",
+        "FechaVencimientoSecuencia": "31-12-2028",
+        "TipoPago": "1",
+        "TerminoPago": "6",
+        "TablaFormasPago": {
+          "FormaDePago": [
+            {
+              "FormaPago": "1",
+              "MontoPago": "35500.00"
+            }
+          ]
+        }
+      },
+      "Emisor": {
+        "RNCEmisor": "130750272",
+        "RazonSocialEmisor": "DOCUMENTOS ELECTRONICOS DE 02",
+        "NombreComercial": "DOCUMENTOS ELECTRONICOS DE 02",
+        "DireccionEmisor": "AVE. ISABEL AGUIAR NO. 269, ZONA INDUSTRIAL DE HERRERA",
+        "Municipio": "010100",
+        "Provincia": "010000",
+        "TablaTelefonoEmisor": {
+          "TelefonoEmisor": [
+            "809-472-7676",
+            "809-491-1918"
+          ]
+        },
+        "CorreoEmisor": "DOCUMENTOSELECTRONICOSDE0612345678969789+9000000000000000000000000000001@123.COM",
+        "WebSite": "www.facturaelectronica.com",
+        "NumeroFacturaInterna": "123456789016",
+        "NumeroPedidoInterno": "123456789016",
+        "FechaEmision": "01-04-2020"
+      },
+      "Comprador": {
+        "IdentificadorExtranjero": "350555123",
+        "RazonSocialComprador": "DOCUMENTOS ELECTRONICOS DE 03"
+      },
+      "Transporte": {
+        "PaisDestino": "ESTADOS UNIDOS"
+      },
+      "Totales": {
+        "MontoExento": "35500.00",
+        "MontoTotal": "35500.00",
+        "ValorPagar": "35500.00",
+        "TotalISRRetencion": "4819.50"
+      },
+      "OtraMoneda": {
+        "TipoMoneda": "USD",
+        "TipoCambio": "57.0000",
+        "MontoExentoOtraMoneda": "622.81",
+        "MontoTotalOtraMoneda": "622.81"
+      }
+    },
+    "DetallesItems": {
+      "Item": [
+        {
+          "NumeroLinea": "1",
+          "IndicadorFacturacion": "4",
+          "Retencion": {
+            "IndicadorAgenteRetencionoPercepcion": "1",
+            "MontoISRRetenido": "945.00"
+          },
+          "NombreItem": "Asesoria Legal P/H",
+          "IndicadorBienoServicio": "2",
+          "CantidadItem": "100.00",
+          "UnidadMedida": "19",
+          "PrecioUnitarioItem": "200.0000",
+          "OtraMonedaDetalle": {
+            "PrecioOtraMoneda": "3.51",
+            "MontoItemOtraMoneda": "350.88"
+          },
+          "MontoItem": "20000.00"
+        },
+        {
+          "NumeroLinea": "2",
+          "IndicadorFacturacion": "4",
+          "Retencion": {
+            "IndicadorAgenteRetencionoPercepcion": "1",
+            "MontoISRRetenido": "3132.00"
+          },
+          "NombreItem": "Asesoria Legal P/H",
+          "IndicadorBienoServicio": "2",
+          "CantidadItem": "80.00",
+          "UnidadMedida": "19",
+          "PrecioUnitarioItem": "150.0000",
+          "OtraMonedaDetalle": {
+            "PrecioOtraMoneda": "2.63",
+            "MontoItemOtraMoneda": "210.53"
+          },
+          "MontoItem": "12000.00"
+        },
+        {
+          "NumeroLinea": "3",
+          "IndicadorFacturacion": "4",
+          "Retencion": {
+            "IndicadorAgenteRetencionoPercepcion": "1",
+            "MontoISRRetenido": "742.50"
+          },
+          "NombreItem": "Asesoria Legal P/H",
+          "IndicadorBienoServicio": "2",
+          "CantidadItem": "50.00",
+          "UnidadMedida": "19",
+          "PrecioUnitarioItem": "70.0000",
+          "OtraMonedaDetalle": {
+            "PrecioOtraMoneda": "1.23",
+            "MontoItemOtraMoneda": "61.40"
+          },
+          "MontoItem": "3500.00"
+        }
+      ]
+    }
+  }

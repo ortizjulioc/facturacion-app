@@ -57,4 +57,5 @@ export {
   type NotReceivedReason,
 } from "./receiver";
 export { buildAnecf, countOf, type AnnulmentInput, type AnnulmentLine, type AnnulmentRange } from "./annulment";
+export { buildEcfFromFields, buildFromFields, buildSummaryFromFields, fieldsFromXml, GENERIC_SCHEMAS, projectFields, type FieldObject, type FieldValue, type SchemaNode } from "./generic";
 export { runPrototype, STEPS, STEP_LABELS, type Artifact, type PrototypeOptions, type PrototypeReport, type Step, type StepResult } from "./prototype";

@@ -5,8 +5,11 @@ import { join } from "node:path";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createPrisma, withTenant } from "@facturacion/db";
 import { toCents, verifyPin } from "@facturacion/core";
-import { buildAcecf, buildArecf, buildEcf, loadCertificate, securityCodeOf, signEcf, signReply, signXml, verifyEcfSignature, type EcfCertificate } from "@facturacion/ecf";
-import { testP12 } from "@facturacion/ecf/testing";
+import { buildAcecf, buildArecf, buildEcf, fieldsFromXml, type FieldObject, loadCertificate, securityCodeOf, signEcf, signReply, signXml, verifyEcfSignature, type EcfCertificate } from "@facturacion/ecf";
+import { sample as sampleEcf, testP12 } from "@facturacion/ecf/testing";
+import setE47Json from "../../../packages/ecf/src/fixtures/set-prueba-e47.json";
+
+const setE47 = setE47Json as FieldObject & { Encabezado: FieldObject };
 import { PosEngine, type FetchLike } from "@facturacion/pos-engine";
 import { createApp } from "./app";
 import { createAuth } from "./auth";
@@ -5768,6 +5771,49 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       expect(again.status).toBe("ISSUED");
       // Lo que no fue rechazado no se sustituye.
       expect((await post(`/v1/documents/${again.id}/replace`, {}, b.cookie)).status).toBe(409);
+    });
+
+    it("modo certificación: arma, firma y envía documentos del set dados campo por campo", async () => {
+      const b = await emisor("dgcert");
+      // e-CF completo (un E47 del set): se envía y se consulta su resultado por TrackId.
+      const res = await post("/v1/certification/ecf", { fields: setE47, send: true }, b.cookie);
+      expect(res.status, JSON.stringify(await res.clone().json())).toBe(200);
+      const sent = (await json(res)).data;
+      expect(sent).toMatchObject({ type: "47", encf: "E470000000007", kind: "ECF", environment: "TEST", summaryXml: null });
+      expect(sent.dgii.trackId).toMatch(/^trk-/);
+      expect(verifyEcfSignature(sent.xml)).toBe(true);
+      expect(dgii.received.at(-1)!.name).toBe("130750272E470000000007.xml");
+      const result = (await json(await get(`/v1/certification/result/${sent.dgii.trackId}`, b.cookie))).data;
+      expect(result).toMatchObject({ status: "ACCEPTED", encf: "E470000000007" });
+
+      // Factura de consumo menor a RD$250,000: se firma completa y se envía el resumen.
+      const consumer = fieldsFromXml(buildEcf(sampleEcf("E32", { encf: "E320000000777" })).xml);
+      const rfce = (await json(await post("/v1/certification/ecf", { fields: consumer, send: true }, b.cookie))).data;
+      expect(rfce).toMatchObject({ kind: "RFCE", dgii: { status: "ACCEPTED" } });
+      expect(rfce.summaryXml).toContain(`<CodigoSeguridadeCF>${rfce.securityCode}</CodigoSeguridadeCF>`);
+      expect(dgii.summaries.at(-1)!.xml).toBe(rfce.summaryXml);
+
+      // Sin enviar: solo arma y firma (para revisar antes).
+      const before = dgii.received.length;
+      expect((await json(await post("/v1/certification/ecf", { fields: setE47 }, b.cookie))).data.dgii).toBeNull();
+      expect(dgii.received).toHaveLength(before);
+
+      // Campos que no cuadran con el XSD: 422 con la lista completa.
+      const bad = await post("/v1/certification/ecf", { fields: { ...setE47, Inventado: "x", Encabezado: { ...setE47.Encabezado, Totales: {} } } }, b.cookie);
+      expect(bad.status).toBe(422);
+      const issues = ((await json(bad)).issues as Json[]).map((i) => i.message);
+      expect(issues).toEqual(expect.arrayContaining(["Campo desconocido «ECF.Inventado» (no está en el XSD)", "Falta «ECF.Encabezado.Totales.MontoTotal»"]));
+
+      // Aprobación comercial del set (ACECF).
+      const approvalFields = fieldsFromXml(buildAcecf({ sellerRnc: "131880681", buyerRnc: "101001577", encf: "E310000000009", issuedOn: "01-03-2026", total: toCents("100"), approved: true, at: new Date() }));
+      const approval = (await json(await post("/v1/certification/approval", { fields: approvalFields, send: true }, b.cookie))).data;
+      expect(approval).toMatchObject({ encf: "E310000000009", dgii: { approved: true } });
+      expect(dgii.dgiiApprovals.at(-1)!.xml).toBe(approval.xml);
+
+      // Solo propietarios y administradores.
+      const worker = await signUp("dgcertw");
+      await prisma.member.create({ data: { id: randomUUID(), organizationId: b.orgId, userId: worker.userId, role: "member" } });
+      expect((await post("/v1/certification/ecf", { fields: setE47 }, await setActive(b.orgId, worker.cookie))).status).toBe(403);
     });
 
     it("aceptado por la DGII, el e-CF se entrega al comprador electrónico y se guarda su acuse", async () => {

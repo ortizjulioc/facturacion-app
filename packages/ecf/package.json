@@ -10,7 +10,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "testecf": "tsx scripts/testecf.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "gen:schemas": "tsx scripts/gen-schemas.ts"
   },
   "dependencies": {
     "@facturacion/core": "workspace:*",

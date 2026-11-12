@@ -24,6 +24,7 @@ import { shifts } from "./routes/shifts";
 import { sync } from "./routes/sync";
 import { purchaseReports } from "./routes/reports-purchases";
 import { sequences } from "./routes/sequences";
+import { certification } from "./routes/certification";
 import { suppliers } from "./routes/suppliers";
 import { terminals } from "./routes/terminals";
 import { createUpdates } from "./routes/updates";
@@ -98,6 +99,7 @@ export function createApp(deps: Deps) {
     .route("/v1/sequences", sequences)
     .route("/v1/documents", documents)
     .route("/v1/fiscal", fiscal)
+    .route("/v1/certification", certification)
     .route("/v1/received", received)
     .route("/v1/reports", reports)
     .route("/v1/reports", purchaseReports)
