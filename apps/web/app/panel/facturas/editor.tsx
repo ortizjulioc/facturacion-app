@@ -11,8 +11,10 @@ import {
   fromCents,
   isModifier,
   MODIFICATION_CODES,
+  NOTE_MODIFICATION_CODES,
   TAX_CODES,
   TAX_LABELS,
+  TEXT_CORRECTION_CODE,
   toCents,
   toMilli,
   type DocumentType,
@@ -415,12 +417,15 @@ function EditorForm({
           <>
             <Field label="Motivo de la modificación" className="md:col-span-2">
               <Select value={code} onChange={(e) => setCode(e.target.value)}>
-                {Object.entries(MODIFICATION_CODES).map(([k, label]) => (
+                {NOTE_MODIFICATION_CODES.map((k) => (
                   <option key={k} value={k}>
-                    {k} · {label}
+                    {k} · {MODIFICATION_CODES[k]}
                   </option>
                 ))}
               </Select>
+              {Number(code) === TEXT_CORRECTION_CODE && (
+                <p className="mt-1 text-xs text-zinc-500">Solo corrige texto: deja los precios en cero (la DGII exige los montos en cero).</p>
+              )}
             </Field>
             {referenced && (
               <p className="text-sm text-zinc-600 md:col-span-2 dark:text-zinc-400">
@@ -975,7 +980,7 @@ function CustomerPicker({
 }: {
   value: string;
   label: string;
-  /** Factura de crédito fiscal: solo sirven clientes con RNC. */
+  /** Factura de crédito fiscal: solo sirven clientes con RNC o cédula (persona física). */
   requireRnc: boolean;
   onChange: (id: string, label: string) => void;
 }) {
@@ -1014,7 +1019,7 @@ function CustomerPicker({
   }
 
   const list = (results.data ?? []).filter(
-    (c) => !requireRnc || c.documentType === "RNC",
+    (c) => !requireRnc || c.documentType === "RNC" || c.documentType === "CEDULA",
   );
   return (
     <div className="relative">
@@ -1023,7 +1028,7 @@ function CustomerPicker({
         autoComplete="off"
         placeholder={
           requireRnc
-            ? "Buscar cliente con RNC…"
+            ? "Buscar cliente con RNC o cédula…"
             : "Consumidor final · escribe para buscar un cliente"
         }
         value={q}
@@ -1055,7 +1060,7 @@ function CustomerPicker({
           {list.length === 0 && !results.loading && (
             <li className="px-3 py-2 text-zinc-500">
               {requireRnc
-                ? "Ningún cliente con RNC coincide."
+                ? "Ningún cliente con RNC o cédula coincide."
                 : "Ningún cliente coincide."}
             </li>
           )}

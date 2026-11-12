@@ -351,7 +351,7 @@ model CompanyProfile {
   /// true: una caja solo puede vender con un turno abierto (la app de caja y la emisión en línea con caja lo exigen).
   requireShift       Boolean        @default(false)
   /// true: cada e-CF firmado se envía solo a la DGII (cola con reintentos). Requiere certificado y estar habilitado como emisor.
-  sendToDgii         Boolean        @default(false)
+  sendToDgii         Boolean        @default(true)
   /// true: quien nos envía un e-CF o una aprobación comercial debe autenticarse (semilla firmada → token) en los servicios /fe.
   requireReceiverAuth Boolean       @default(false)
   createdAt          DateTime       @default(now())

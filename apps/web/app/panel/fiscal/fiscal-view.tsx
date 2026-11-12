@@ -360,7 +360,7 @@ function CompanyForm({
         <Checkbox
           name="sendToDgii"
           label="Enviar cada comprobante firmado a la DGII automáticamente"
-          defaultChecked={company?.sendToDgii ?? false}
+          defaultChecked={company?.sendToDgii ?? true}
         />
         <p className="-mt-2 text-xs text-zinc-500">
           Necesita el certificado digital cargado y que la empresa esté habilitada como emisor electrónico en el ambiente elegido. Los envíos que fallen por la red se reintentan solos; los demás quedan para revisión.

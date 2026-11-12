@@ -213,7 +213,7 @@ export function createSale(db: Db, ctx: SaleCtx, input: SaleInput): Receipt {
         docNumber: customer.documentNumber,
       }
     : { name: input.buyer?.name ?? null, docType: input.buyer?.docType ?? null, docNumber: input.buyer?.docNumber ?? null };
-  const [problem] = buyerErrors(input.type, totals.total, { docType: buyer.docType, docNumber: buyer.docNumber });
+  const [problem] = buyerErrors(input.type, totals.total, { docType: buyer.docType, docNumber: buyer.docNumber, name: buyer.name });
   if (problem) throw new SaleError(problem);
 
   const payments = checkPayments(input.payments, totals.total, "Los pagos");

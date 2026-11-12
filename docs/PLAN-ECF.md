@@ -3,7 +3,7 @@
 > **Creado:** 2026-11-11 · **Base:** revisión completa de la documentación oficial descargada (5 carpetas: Informe y descripción técnica, Formatos XML, XSD, Proceso de certificación, Instructivos) contra el código de `packages/ecf`, `apps/api`, `packages/pos-engine`, `packages/printing` y `apps/web`.
 > **Siguiente paso:** trámites de §2 y Fase A (empezando por A0). El sandbox externo se revisó y queda solo como referencia (§7, E1).
 
-Leyenda: 🧑‍💻 código · 📋 trámite tuyo (no es código) · ✅ comprobado a mano · 🔎 hallazgo de revisión, se confirma al arreglarlo · ✔️ hecho.
+Leyenda: 🧑‍💻 código · 📋 trámite tuyo (no es código) · ✅ comprobado a mano · 🔎 hallazgo de revisión, se confirma al arreglarlo · ✔️ hecho. Fase B: ✔️ 2026-11-11.
 
 ---
 
@@ -43,12 +43,12 @@ Llevan semanas y no dependen del código:
 | A2 | **E32 < RD$250,000 sin comprador**: el XSD exige `<Comprador>`; en la simulación se sube el XML completo al portal. Emitir el elemento (vacío o con lo que haya) solo en ese caso. Confirmar en TesteCF qué acepta. | `xml.ts` (comprador) | ✔️ hecho (2026-11-11) |
 | A3 | **ANECF**: `<Secuencia>` → `<Secuencias>`. | `annulment.ts` | ✔️ hecho (2026-11-11) |
 | A4 | **Venta a crédito**: pasar `paymentDueDate` (y `incomeType`) al armar el e-CF; hoy sale `TipoPago 2` sin `FechaLimitePago`. Pedir la fecha límite en el editor si el pago es a crédito. | `apps/api/src/lib/signing.ts:135` | ✔️ hecho (2026-11-11): columna `paymentDueDate`, obligatoria al emitir si todo es a crédito; `TipoIngresos` sigue en «01» |
-| A5 | **`IndicadorNotaCredito`**: comparar días calendario en hora RD, no milisegundos / 24 h. | `xml.ts:177` | ✅ |
-| A6 | **E31 con cédula** (personas físicas): `RNCComprador` admite 9 u 11 dígitos. | `packages/core/src/ecf.ts:86` | ✅ |
-| A7 | **Nombre del comprador obligatorio** en E31 y en E32 ≥ RD$250,000. | `core/src/ecf.ts` (`buyerErrors`) | 🔎 |
-| A8 | **Notas**: solo códigos 1–3 (4 y 5 no aplican a E33/E34); **código 2** (corrección de texto) con montos en cero; no usar 3 «por defecto» en silencio. | `documents.ts:71`, `routes/sync.ts:97`, `issue.ts:47`, `signing.ts:131` | 🔎 |
+| A5 | **`IndicadorNotaCredito`**: comparar días calendario en hora RD, no milisegundos / 24 h. | `xml.ts:177` | ✔️ hecho (2026-11-11) |
+| A6 | **E31 con cédula** (personas físicas): `RNCComprador` admite 9 u 11 dígitos. | `packages/core/src/ecf.ts:86` | ✔️ hecho (2026-11-11) |
+| A7 | **Nombre del comprador obligatorio** en E31 y en E32 ≥ RD$250,000. | `core/src/ecf.ts` (`buyerErrors`) | ✔️ hecho (2026-11-11) |
+| A8 | **Notas**: solo códigos 1–3 (4 y 5 no aplican a E33/E34); **código 2** (corrección de texto) con montos en cero; no usar 3 «por defecto» en silencio. | `documents.ts:71`, `routes/sync.ts:97`, `issue.ts:47`, `signing.ts:131` | ✔️ hecho (2026-11-11) |
 | A9 | **Firma idéntica al ejemplo oficial**: quitar el transform C14N extra (dejar solo `enveloped-signature`). El resultado es el mismo; es para no dar motivos. | `sign.ts:140` | ✔️ hecho (2026-11-11) |
-| A10 | Menores: `IndicadorMontoGravado` solo si hay gravados; no inventar forma de pago en E33; validar formato de correos; unidades desconocidas avisan en vez de caer en «Unidad»; dígito verificador de RNC/cédula. | `xml.ts`, `core` | 🔎 |
+| A10 | Menores: `IndicadorMontoGravado` solo si hay gravados; no inventar forma de pago en E33; validar formato de correos; unidades desconocidas avisan en vez de caer en «Unidad»; dígito verificador de RNC/cédula. | `xml.ts`, `core` | ✔️ hecho (2026-11-11), salvo dígito verificador (hay RNC antiguos que no lo cumplen; se validará contra el padrón, A-7) y aviso de unidades desconocidas |
 
 ---
 
@@ -56,16 +56,16 @@ Llevan semanas y no dependen del código:
 
 | # | Qué | Por qué |
 |---|---|---|
-| B1 | **Conciliar antes de reenviar**: si el envío se cortó (timeout/red), consultar si la DGII ya lo recibió (`trackIdsOf` en TesteCF/producción; `summaryResult` para RFCE) antes de volver a enviar. ✅ hoy se reenvía a los 30 s sin preguntar. | La DGII prohíbe reenviar el mismo e-NCF; genera TrackIds duplicados. (`fiscal.ts:167-187`) |
-| B2 | **Rechazos**: bandeja de revisión que incluya los REJECTED (hoy solo lista FAILED); flujo para **sustituir** un e-CF rechazado (nuevo e-NCF si `secuenciaUtilizada = true`); los reportes no deben contar rechazados como válidos; el botón «Reintentar» no debe reenviar el mismo XML rechazado. | Estándares §4, Informe §10 |
-| B3 | **Caída de la DGII**: corte por empresa (si falla la DGII, pausar todo y no martillar), no pasar a FAILED a las ~17 h (la indisponibilidad puede durar días), enviar en orden de emisión al volver, consultar **Consulta Estatus Servicios**. | Estándares §5, Instructivo de Contingencia |
-| B4 | **Errores de configuración** (certificado no autorizado, URL mala): detener la cola de **esa empresa** y avisar, en vez de fallar documento por documento. | Estándares §4 |
-| B5 | **«En proceso» indefinido**: escalar a revisión manual tras N consultas; un estado desconocido no es «En proceso». | `dgii.ts:47` |
-| B6 | **ANECF**: dar por anulado solo con respuesta positiva explícita (hoy basta con que no aparezcan 3 frases de error). ✅ | `dgii.ts:194` |
-| B7 | **Directorio**: no consultarlo en CerteCF (no existe allí); caché con tiempo de vida. | `dgii.ts:198`, `receiver.ts:250` |
-| B8 | **Enviar al emitir por defecto**: `sendToDgii` nace en `false`; la norma pide enviar al momento de emitir. ✅ | `schema.prisma:354` |
-| B9 | **No emitir sin firma** cuando la empresa es emisor electrónico (hoy se puede emitir sin certificado y queda un e-NCF sin e-CF). | Informe §10 |
-| B10 | **Aprobación comercial**: enviarla solo cuando la DGII ya aceptó el e-CF recibido (consultar su estado); hoy, si aún no lo aceptó, queda FAILED para siempre. | Informe pág. 12, nota 10 |
+| B1 ✔️ | **Conciliar antes de reenviar**: si el envío se cortó (timeout/red), consultar si la DGII ya lo recibió (`trackIdsOf` en TesteCF/producción; `summaryResult` para RFCE) antes de volver a enviar. ✅ hoy se reenvía a los 30 s sin preguntar. | La DGII prohíbe reenviar el mismo e-NCF; genera TrackIds duplicados. (`fiscal.ts:167-187`) |
+| B2 ✔️ | **Rechazos**: bandeja de revisión que incluya los REJECTED (hoy solo lista FAILED); flujo para **sustituir** un e-CF rechazado (nuevo e-NCF si `secuenciaUtilizada = true`); los reportes no deben contar rechazados como válidos; el botón «Reintentar» no debe reenviar el mismo XML rechazado. | Estándares §4, Informe §10 Hecho: bandeja en el Resumen (rechazados, fallidos, atrasados), botón «Sustituir» (borrador con los mismos datos, e-NCF nuevo, sin mover inventario otra vez) y los reportes de ventas no cuentan los rechazados. |
+| B3 ✔️ | **Caída de la DGII**: corte por empresa (si falla la DGII, pausar todo y no martillar), no pasar a FAILED a las ~17 h (la indisponibilidad puede durar días), enviar en orden de emisión al volver, consultar **Consulta Estatus Servicios**. | Estándares §5, Instructivo de Contingencia Hecho salvo consultar «Consulta Estatus Servicios»: con la DGII caída se sigue intentando cada hora, la empresa entera espera y sale como atrasado. |
+| B4 ✔️ | **Errores de configuración** (certificado no autorizado, URL mala): detener la cola de **esa empresa** y avisar, en vez de fallar documento por documento. | Estándares §4 |
+| B5 ✔️ | **«En proceso» indefinido**: escalar a revisión manual tras N consultas; un estado desconocido no es «En proceso». | `dgii.ts:47` |
+| B6 ✔️ | **ANECF**: dar por anulado solo con respuesta positiva explícita (hoy basta con que no aparezcan 3 frases de error). ✅ | `dgii.ts:194` |
+| B7 ✔️ | **Directorio**: no consultarlo en CerteCF (no existe allí); caché con tiempo de vida. | `dgii.ts:198`, `receiver.ts:250` |
+| B8 ✔️ | **Enviar al emitir por defecto**: `sendToDgii` nace en `false`; la norma pide enviar al momento de emitir. ✅ | `schema.prisma:354` |
+| B9 ✔️ | **No emitir sin firma** cuando la empresa es emisor electrónico (hoy se puede emitir sin certificado y queda un e-NCF sin e-CF). | Informe §10 Hecho para producción: en TesteCF/CerteCF se sigue permitiendo emitir sin certificado para poder trabajar. |
+| B10 ✔️ | **Aprobación comercial**: enviarla solo cuando la DGII ya aceptó el e-CF recibido (consultar su estado); hoy, si aún no lo aceptó, queda FAILED para siempre. | Informe pág. 12, nota 10 |
 
 ---
 

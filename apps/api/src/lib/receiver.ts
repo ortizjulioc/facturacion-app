@@ -22,6 +22,8 @@ const iso = (d: Date) => d.toISOString();
 /** Esperas (segundos) entre reintentos de entrega de una aprobación; la última se repite. */
 export const APPROVAL_BACKOFF_SECONDS = [30, 120, 600, 1_800, 3_600];
 export const MAX_APPROVAL_ATTEMPTS = 20;
+/** La DGII rechaza la aprobación porque todavía no aceptó (o no encuentra) el e-CF: se reintenta. */
+const NOT_YET_ACCEPTED = /no (ha sido |fue |est[aá] )?(aceptad|encontrad|recibid|registrad)|no existe|en proceso/i;
 const LOCK_SECONDS = 120;
 
 // ───────────── Encontrar la empresa ─────────────
@@ -259,9 +261,15 @@ export async function deliverApproval(deps: FiscalDeps, organizationId: string, 
     if (row.dgiiSentAt) return { done: true };
     try {
       const r = await provider.submitApproval({ xml, rnc: profile.rnc, encf: row.encf });
-      return r.approved ? { done: true } : { done: false, retry: false, error: r.messages.join(" · ") || r.status || "La DGII no aceptó la aprobación" };
+      if (r.approved) return { done: true };
+      const error = r.messages.join(" · ") || r.status || "La DGII no aceptó la aprobación";
+      // La DGII solo recibe aprobaciones de e-CF que ya aceptó (Informe Técnico, pág. 12): si aún no lo tiene o lo está
+      // validando, se vuelve a intentar más tarde en vez de dar la entrega por fallida.
+      return { done: false, retry: NOT_YET_ACCEPTED.test(`${error} ${r.status}`), error };
     } catch (e) {
-      return legError(e);
+      const leg = legError(e);
+      // Lo mismo cuando la DGII lo contesta con un 4xx («Factura no encontrada para esta Aprobación comercial»).
+      return !leg.done && NOT_YET_ACCEPTED.test(leg.error) ? { ...leg, retry: true } : leg;
     }
   };
   const [peer, dgii] = await Promise.all([peerLeg(), dgiiLeg()]);

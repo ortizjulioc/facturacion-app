@@ -904,7 +904,7 @@ function BillDialog({
         )}
       </div>
 
-      {needsRnc && <p className="text-xs text-amber-700 dark:text-amber-400">El crédito fiscal necesita un cliente con RNC.</p>}
+      {needsRnc && <p className="text-xs text-amber-700 dark:text-amber-400">El crédito fiscal necesita un cliente con RNC o cédula.</p>}
       <ErrorNote message={error} />
       <div className="flex justify-end gap-2">
         <Button variant="secondary" onClick={onClose}>
@@ -949,13 +949,13 @@ function CustomerPicker({
       </div>
     );
   }
-  const list = (results.data ?? []).filter((c) => !requireRnc || c.documentType === "RNC");
+  const list = (results.data ?? []).filter((c) => !requireRnc || c.documentType === "RNC" || c.documentType === "CEDULA");
   return (
     <div className="space-y-1">
       <Input
         type="search"
         autoComplete="off"
-        placeholder={requireRnc ? "Buscar cliente con RNC…" : "Consumidor final · escribe para buscar un cliente"}
+        placeholder={requireRnc ? "Buscar cliente con RNC o cédula…" : "Consumidor final · escribe para buscar un cliente"}
         value={q}
         onChange={(e) => setQ(e.target.value)}
       />

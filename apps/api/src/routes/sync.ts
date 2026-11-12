@@ -94,7 +94,7 @@ const saleBody = z.object({
     .string()
     .regex(/^E3[123]\d{10}$/, "e-NCF del comprobante modificado inválido")
     .nullish(),
-  modificationCode: z.number().int().min(1).max(5).nullish(),
+  modificationCode: z.number().int().min(1).max(3, "Una nota de débito o crédito usa los códigos 1 a 3").nullish(),
   /** La devolución trae mercancía: las líneas con inventario vuelven a las existencias. */
   returnsStock: z.boolean().default(false),
   customerId: z.uuid().nullish(),

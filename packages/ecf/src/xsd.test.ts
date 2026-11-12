@@ -53,6 +53,7 @@ const CASES: [string, EcfInput][] = [
   ["E32 desde RD$250,000 con cédula", sample("E32", { buyer: { docType: "CEDULA", docNumber: "00112345678", name: "Juan Pérez" }, lines: [{ name: "Nevera", quantity: toMilli("5"), unitPrice: toCents("70000.00"), tax: "ITBIS18", unit: "UND" }], payments: undefined })],
   ["E33 nota de débito", sample("E33", { buyer: RNC_BUYER, payments: undefined, reference: { ...ORIGINAL, code: 3, reason: "Corrige montos" } })],
   ["E34 que anula", sample("E34", { buyer: RNC_BUYER, payments: undefined, reference: { ...ORIGINAL, code: 1, reason: "Anulación" } })],
+  ["E34 que solo corrige texto (código 2, montos en cero)", sample("E34", { buyer: RNC_BUYER, payments: undefined, lines: [{ name: "Corrige la dirección", quantity: toMilli("1"), unitPrice: 0n, tax: "EXENTO" }], reference: { ...ORIGINAL, code: 2, reason: "Corrige la dirección del cliente" } })],
   ["E34 parcial de una factura de consumo", sample("E34", { payments: undefined, reference: { encf: "E320000000005", issuedAt: new Date("2026-01-01T15:00:00Z"), code: 3, reason: "Devolución" } })],
 ];
 

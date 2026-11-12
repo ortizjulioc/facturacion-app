@@ -35,6 +35,8 @@ type Token = { value: string; expiresAt: number };
 
 /** Se renueva el token un minuto antes de que venza (dura una hora). */
 const TOKEN_MARGIN_MS = 60_000;
+/** Cuánto se guardan las direcciones de un contribuyente del directorio. */
+const DIRECTORY_TTL_MS = 60 * 60 * 1000;
 
 const STATUS_BY_TEXT: Record<string, FiscalStatus> = {
   "no encontrado": "NOT_FOUND",
@@ -44,8 +46,15 @@ const STATUS_BY_TEXT: Record<string, FiscalStatus> = {
   "aceptado condicional": "ACCEPTED_CONDITIONAL",
 };
 
-const statusOfText = (text: string): FiscalStatus =>
-  STATUS_BY_TEXT[text.trim().toLowerCase()] ?? "IN_PROCESS";
+/** Estado por su texto; null si la DGII usa uno que no conocemos (no se asume «En proceso»: se reporta). */
+const statusOfText = (text: string): FiscalStatus | null => STATUS_BY_TEXT[text.trim().toLowerCase()] ?? null;
+
+/** Estado de la consulta por TrackId: por código y, si no, por texto. Uno desconocido es un error (se reintenta y queda anotado). */
+function resultStatus(code: number, text: string | null): FiscalStatus {
+  const status = FISCAL_STATUS_BY_CODE[code] ?? (text ? statusOfText(text) : null);
+  if (!status) throw new FiscalError(`La DGII respondió un estado desconocido: «${text ?? code}»`, "server");
+  return status;
+}
 
 const asString = (v: unknown) => (typeof v === "string" ? v : typeof v === "number" ? String(v) : null);
 
@@ -86,6 +95,7 @@ function messageOf(body: unknown, fallback: string): string {
  */
 export class DgiiClient implements FiscalProvider {
   private token: Token | null = null;
+  private readonly directory = new Map<string, { entry: DirectoryEntry | null; until: number }>();
   private authenticating: Promise<string> | null = null;
   private readonly doFetch: FetchLike;
   private readonly now: () => Date;
@@ -150,7 +160,7 @@ export class DgiiClient implements FiscalProvider {
     const code = Number(b.codigo);
     return {
       trackId: asString(b.trackId) ?? trackId,
-      status: FISCAL_STATUS_BY_CODE[code] ?? statusOfText(asString(b.estado) ?? ""),
+      status: resultStatus(code, asString(b.estado)),
       code: Number.isFinite(code) ? code : -1,
       statusText: asString(b.estado) ?? "",
       rnc: asString(b.rnc),
@@ -190,22 +200,39 @@ export class DgiiClient implements FiscalProvider {
     form.append("xml", new Blob([input.xml], { type: "text/xml" }), `${input.rnc}${input.firstEncf}.xml`);
     const b = (await this.authorized("POST", `${this.urls.annulment}/api/operaciones/anularrango`, { form })) as Record<string, unknown> | null;
     const messages = Array.isArray(b?.mensajes) ? (b.mensajes as unknown[]).flatMap((m) => asString(m) ?? []) : asString(b?.mensajes) ? [asString(b?.mensajes)!] : [];
-    // Un 200 con «excepto…» o «no fue posible…» es una anulación parcial o fallida: no se da por hecha.
-    const failed = messages.some((m) => /excepci[oó]n|no fue posible|han sido utilizadas/i.test(m));
-    return { annulled: !failed, code: asString(b?.codigo) ?? "", name: asString(b?.nombre) ?? "", messages };
+    // Solo se da por anulada con una confirmación explícita («…anuladas correctamente») y sin ningún mensaje de falla:
+    // la DGII devuelve con 200 varios errores (firma no válida, tipo no válido, RNC no delegado…) que no se pueden
+    // enumerar todos, y acortar la secuencia sin que la DGII la haya anulado sería peor que pedir que se reintente.
+    const failed = messages.some((m) => /excepci[oó]n|no fue posible|han sido utilizad|no es v[aá]lid|no est[aá] delegad|mayor que|error/i.test(m));
+    const confirmed = messages.some((m) => /anulad[oa]s?\s+(correctamente|exitosamente|satisfactoriamente)/i.test(m));
+    return { annulled: confirmed && !failed, code: asString(b?.codigo) ?? "", name: asString(b?.nombre) ?? "", messages };
   }
 
   async directoryOf(rnc: string): Promise<DirectoryEntry | null> {
+    // El directorio solo se publica en TesteCF y producción (Descripción Técnica Servicios DGII, pág. 38).
+    if (this.opts.env === "CERT") throw new FiscalError("La consulta del directorio no está disponible en certificación", "config");
+    // Las direcciones de un contribuyente casi no cambian: se guardan un rato para no consultar en cada operación
+    // (Estándares de Comportamiento, «DirectorioFE»).
+    const cached = this.directory.get(rnc);
+    if (cached && cached.until > this.now().getTime()) return cached.entry;
     const body = await this.authorized("GET", `${this.urls.directory}/api/consultas/obtenerdirectorioporrnc?RNC=${encodeURIComponent(rnc)}`);
     const row = (Array.isArray(body) ? body[0] : body) as Record<string, unknown> | null | undefined;
-    if (!row || typeof row !== "object" || !asString(row.rnc)) return null;
-    return {
-      name: asString(row.nombre) ?? "",
-      rnc: asString(row.rnc)!,
-      receptionUrl: asString(row.urlRecepcion) || null,
-      approvalUrl: asString(row.urlAceptacion) || null,
-      authenticationUrl: asString(row.urlOpcional) || null,
-    };
+    const entry: DirectoryEntry | null =
+      !row || typeof row !== "object" || !asString(row.rnc)
+        ? null
+        : {
+            name: asString(row.nombre) ?? "",
+            rnc: asString(row.rnc)!,
+            receptionUrl: asString(row.urlRecepcion) || null,
+            approvalUrl: asString(row.urlAceptacion) || null,
+            authenticationUrl: asString(row.urlOpcional) || null,
+          };
+    // Solo se guarda lo encontrado: un contribuyente que aún no está en el directorio puede registrarse en cualquier momento.
+    if (entry) {
+      if (this.directory.size > 500) this.directory.clear();
+      this.directory.set(rnc, { entry, until: this.now().getTime() + DIRECTORY_TTL_MS });
+    }
+    return entry;
   }
 
   async trackIdsOf(rnc: string, encf: string): Promise<TrackSummary[]> {
@@ -217,7 +244,7 @@ export class DgiiClient implements FiscalProvider {
     return rows.flatMap((r: Record<string, unknown>) => {
       const trackId = asString(r.trackId);
       return trackId
-        ? [{ trackId, status: statusOfText(asString(r.estado) ?? ""), statusText: asString(r.estado) ?? "", receivedAt: asString(r.fechaRecepcion) }]
+        ? [{ trackId, status: statusOfText(asString(r.estado) ?? "") ?? "IN_PROCESS", statusText: asString(r.estado) ?? "", receivedAt: asString(r.fechaRecepcion) }]
         : [];
     });
   }
@@ -275,7 +302,7 @@ function summaryOf(body: unknown, fallback: string): SummaryResult {
   const b = body as Record<string, unknown>;
   const text = asString(b.estado) ?? "";
   const code = Number(b.codigo);
-  const status = text ? statusOfText(text) : (FISCAL_STATUS_BY_CODE[code] ?? null);
+  const status = (text ? statusOfText(text) : null) ?? FISCAL_STATUS_BY_CODE[code] ?? null;
   if (!status) throw new FiscalError(messageOf(body, fallback), "server");
   return {
     status,

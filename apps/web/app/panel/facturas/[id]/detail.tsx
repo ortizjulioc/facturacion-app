@@ -128,6 +128,19 @@ export function InvoiceDetail({ id }: { id: string }) {
                       Enviar a la DGII
                     </Button>
                   )}
+                  {doc.status === "REJECTED" && (
+                    <Button
+                      disabled={busy}
+                      onClick={() =>
+                        run(async () => {
+                          const res = await unwrap(await api.v1.documents[":id"].replace.$post({ param: { id: doc.id } }));
+                          router.push(`/panel/facturas/${res.data.id}/editar`);
+                        })
+                      }
+                    >
+                      Sustituir con otro comprobante
+                    </Button>
+                  )}
                   {canManage && doc.fiscal && doc.fiscal.state === "FAILED" && (
                     <Button
                       variant="secondary"
@@ -359,7 +372,7 @@ export function InvoiceDetail({ id }: { id: string }) {
                 {doc.fiscal.lastError && <p className="text-amber-700 dark:text-amber-300">{doc.fiscal.lastError}</p>}
                 {doc.status === "REJECTED" && doc.fiscal.sequenceUsed !== null && (
                   <p className="text-zinc-600 dark:text-zinc-400">
-                    {doc.fiscal.sequenceUsed ? "El e-NCF quedó gastado: emite un comprobante nuevo." : "El e-NCF no se gastó: se puede reutilizar."}
+                    {doc.fiscal.sequenceUsed ? "El e-NCF quedó gastado." : "El e-NCF no se gastó (la DGII lo considera libre)."} Sustitúyelo con otro comprobante: se emite con un e-NCF nuevo y no vuelve a descontar inventario.
                   </p>
                 )}
                 {(doc.fiscal.state === "PENDING" || doc.fiscal.state === "SENT") && doc.fiscal.attempts > 0 && (

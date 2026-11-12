@@ -128,7 +128,9 @@ async function ecfInputFor(tx: TenantTx, doc: DocumentFull, profile: Profile): P
   if (doc.referencedDocumentId) {
     const original = await tx.document.findFirst({ where: { id: doc.referencedDocumentId } });
     if (original?.encf && original.issuedAt) {
-      reference = { encf: original.encf, issuedAt: original.issuedAt, code: (doc.modificationCode ?? 3) as ModificationCode, reason: doc.notes };
+      // El código es obligatorio en las notas (lo valida la API al guardar): no se inventa uno si falta.
+      if (!doc.modificationCode) throw new EcfError("La nota no indica su código de modificación");
+      reference = { encf: original.encf, issuedAt: original.issuedAt, code: doc.modificationCode as ModificationCode, reason: doc.notes };
     }
   }
 

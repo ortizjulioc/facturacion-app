@@ -54,6 +54,14 @@ const PAYMENT_CODES: Record<EcfPaymentMethod, string> = {
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** Patrón del XSD (CorreoValidationType): un correo que no lo cumple se omite (es opcional) en vez de hacer rechazar el e-CF. */
+const EMAIL = /^\w+([-+.]\w+)*@\w+([-.]\w+)*\.\w+([-.]\w+)*$/;
+const emailOf = (raw: string | null | undefined) => {
+  const v = raw ? clean(raw, 80) : "";
+  return EMAIL.test(v) ? v : null;
+};
+/** Número de día calendario en hora dominicana (UTC-4 todo el año, sin horario de verano). */
+const dominicanDay = (at: Date) => Math.floor((at.getTime() - 4 * 60 * 60 * 1000) / DAY_MS);
 const NAME_MAX = 80;
 
 export type BuiltEcf = {
@@ -93,6 +101,7 @@ function checkInput(input: EcfInput, total: Cents): void {
   const errors = buyerErrors(input.type, total, {
     docType: input.buyer?.docType ?? null,
     docNumber: input.buyer?.docNumber ?? null,
+    name: input.buyer?.name ?? null,
   });
   if (errors.length > 0) throw new EcfError(errors[0]!);
   const gross = new Set(input.lines.map((l) => l.priceIncludesTax ?? false));
@@ -160,8 +169,9 @@ function paymentInfo(input: EcfInput, a: EcfAmounts) {
     const code = PAYMENT_CODES[p.method];
     byMethod.set(code, (byMethod.get(code) ?? 0n) + p.amount);
   }
+  // Sin tabla: notas de crédito, documentos en cero y notas de débito sin pagos registrados (no se inventa un efectivo).
   const paymentTable =
-    input.type === "E34" || a.total === 0n
+    input.type === "E34" || a.total === 0n || (input.type === "E33" && !input.payments?.length)
       ? null
       : node(
           "TablaFormasPago",
@@ -175,7 +185,10 @@ function paymentInfo(input: EcfInput, a: EcfAmounts) {
 function idDoc(input: EcfInput, a: EcfAmounts): XmlNode | null {
   const { paymentType, paymentTable } = paymentInfo(input, a);
   const grossPrices = input.lines.some((l) => l.priceIncludesTax);
-  const daysSince = input.reference ? (input.issuedAt.getTime() - input.reference.issuedAt.getTime()) / DAY_MS : 0;
+  // El indicador es condicional a que haya montos gravados: un comprobante todo exento no lo lleva.
+  const hasTaxable = input.lines.some((l) => l.tax !== "EXENTO");
+  // «Más de 30 días calendario» entre las fechas de emisión en hora RD, no entre los instantes (la hora no cuenta).
+  const daysSince = input.reference ? dominicanDay(input.issuedAt) - dominicanDay(input.reference.issuedAt) : 0;
 
   return node(
     "IdDoc",
@@ -183,7 +196,7 @@ function idDoc(input: EcfInput, a: EcfAmounts): XmlNode | null {
     leaf("eNCF", input.encf),
     input.type === "E31" || input.type === "E33" ? leaf("FechaVencimientoSecuencia", formatDateOnly(input.sequenceExpiry!)) : null,
     input.type === "E34" ? leaf("IndicadorNotaCredito", daysSince > 30 ? "1" : "0") : null,
-    leaf("IndicadorMontoGravado", grossPrices ? "1" : "0"),
+    hasTaxable ? leaf("IndicadorMontoGravado", grossPrices ? "1" : "0") : null,
     leaf("TipoIngresos", input.incomeType ?? "01"),
     leaf("TipoPago", paymentType),
     paymentType === "2" && input.paymentDueDate ? leaf("FechaLimitePago", formatDateOnly(input.paymentDueDate)) : null,
@@ -206,7 +219,7 @@ function emisor(input: EcfInput): XmlNode | null {
     leaf("Municipio", s.municipalityCode),
     leaf("Provincia", s.provinceCode),
     phones.length ? node("TablaTelefonoEmisor", ...phones.map((p) => leaf("TelefonoEmisor", p))) : null,
-    leaf("CorreoEmisor", s.email ? clean(s.email, 80) : null),
+    leaf("CorreoEmisor", emailOf(s.email)),
     leaf("WebSite", s.website ? clean(s.website, 50) : null),
     leaf("ActividadEconomica", s.economicActivity ? clean(s.economicActivity, 100) : null),
     leaf("NumeroFacturaInterna", s.internalInvoiceNumber ? clean(s.internalInvoiceNumber, 20) : null),
@@ -226,7 +239,7 @@ function comprador(input: EcfInput): XmlNode | null {
     foreign ? null : leaf("RNCComprador", doc.value),
     foreign ? leaf("IdentificadorExtranjero", doc.value) : null,
     leaf("RazonSocialComprador", b.name ? clean(b.name, 150) : null),
-    leaf("CorreoComprador", b.email ? clean(b.email, 80) : null),
+    leaf("CorreoComprador", emailOf(b.email)),
     leaf("DireccionComprador", b.address ? clean(b.address, 100) : null),
     leaf("MunicipioComprador", b.municipalityCode),
     leaf("ProvinciaComprador", b.provinceCode),

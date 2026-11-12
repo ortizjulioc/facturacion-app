@@ -10,6 +10,7 @@ import {
   documentInput,
   documentSummaryDto,
   FULL,
+  replacementInput,
 } from "../lib/documents";
 import { issueDocument } from "../lib/issue";
 import { enqueueIfAuto, enqueueSubmission, fiscalBlock, processDue, retrySubmission } from "../lib/fiscal";
@@ -279,6 +280,32 @@ export const documents = new Hono<AppEnv>()
     },
   )
   // Pone el comprobante firmado en la cola de envío a la DGII (o vuelve a ponerlo si falló).
+  // Sustituye un e-CF rechazado por la DGII: crea un borrador con sus mismos datos, para emitirlo con otro e-NCF.
+  .post("/:id/replace", zv("param", uuidParam), async (c) => {
+    const { id } = c.req.valid("param");
+    const organizationId = c.get("organizationId");
+    const doc = await c.get("run")(async (tx) => {
+      const rejected = await tx.document.findFirst({ where: { id }, include: FULL });
+      if (!rejected) throw notFound();
+      if (rejected.status !== "REJECTED") {
+        throw new HTTPException(409, { message: "Solo se sustituye un comprobante que la DGII rechazó" });
+      }
+      const { document, lines, payments } = await buildDraft(tx, replacementInput(rejected));
+      const created = await tx.document.create({
+        data: {
+          ...document,
+          organizationId,
+          createdById: c.get("user").id,
+          lines: { create: lines.map((l) => ({ ...l, organizationId })) },
+          payments: { create: payments.map((p) => ({ ...p, organizationId })) },
+        },
+        include: FULL,
+      });
+      await tx.auditLog.create({ data: auditEntry(c, "document.replace", "document", created.id, { replaces: rejected.encf }) });
+      return created;
+    });
+    return c.json({ data: documentDto(doc) }, 201);
+  })
   .post("/:id/send", requireRole("owner", "admin"), zv("param", uuidParam), async (c) => {
     const { id } = c.req.valid("param");
     const organizationId = c.get("organizationId");

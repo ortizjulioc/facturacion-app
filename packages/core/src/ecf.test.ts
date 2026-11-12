@@ -61,10 +61,18 @@ describe("buyerErrors", () => {
   const rnc = { docType: "RNC", docNumber: "101001577" } as const;
   const cedula = { docType: "CEDULA", docNumber: "00112345678" } as const;
 
-  it("E31 exige comprador con RNC", () => {
+  it("E31 exige comprador con RNC o cédula (persona física)", () => {
     expect(buyerErrors("E31", 1000n, none)).toHaveLength(1);
-    expect(buyerErrors("E31", 1000n, cedula)).toHaveLength(1);
+    expect(buyerErrors("E31", 1000n, cedula)).toEqual([]);
     expect(buyerErrors("E31", 1000n, rnc)).toEqual([]);
+    expect(buyerErrors("E31", 1000n, { docType: "PASAPORTE", docNumber: "AB12345" })).toHaveLength(1);
+  });
+
+  it("exige el nombre del comprador cuando debe identificarse (si se pasa)", () => {
+    expect(buyerErrors("E31", 1000n, { ...rnc, name: " " })[0]).toMatch(/razón social/);
+    expect(buyerErrors("E31", 1000n, { ...rnc, name: "Cliente SRL" })).toEqual([]);
+    expect(buyerErrors("E32", CONSUMER_ID_THRESHOLD, { ...cedula, name: null })[0]).toMatch(/nombre/);
+    expect(buyerErrors("E32", CONSUMER_ID_THRESHOLD - 1n, { ...none, name: null })).toEqual([]);
   });
 
   it("E32 por debajo del umbral no exige comprador", () => {

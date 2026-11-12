@@ -41,6 +41,13 @@ export const MODIFICATION_CODES = {
   5: "Referencia a una factura de consumo electrónica",
 } as const;
 export type ModificationCode = keyof typeof MODIFICATION_CODES;
+/**
+ * Códigos que admite una nota de débito o crédito (E33/E34): 1 a 3. El 4 es para el e-CF que reemplaza un comprobante
+ * de contingencia y el 5 para un E31 que referencia un E32; no aplican a notas (Formato e-CF, notas 80 y 81).
+ */
+export const NOTE_MODIFICATION_CODES = [1, 2, 3] as const satisfies readonly ModificationCode[];
+/** Código 2: la nota solo corrige texto y va con montos en cero. */
+export const TEXT_CORRECTION_CODE = 2;
 export const isModificationCode = (v: unknown): v is ModificationCode =>
   typeof v === "number" && v in MODIFICATION_CODES;
 
@@ -73,23 +80,32 @@ export function parseEncf(encf: string): { type: AnyEcfType; sequence: bigint } 
 export type BuyerInput = {
   docType: DocumentType | null;
   docNumber: string | null;
+  /** Razón social o nombre: obligatorio cuando el comprador debe identificarse. */
+  name?: string | null;
 };
+
+/** El documento sirve como RNCComprador del e-CF: RNC (persona jurídica) o cédula (persona física, 11 dígitos). */
+export const isTaxpayerDocument = (docType: DocumentType | null) => docType === "RNC" || docType === "CEDULA";
 
 /**
  * Reglas sobre el comprador al emitir. Devuelve una lista de mensajes (vacía = válido).
- *  - E31 (crédito fiscal): el comprador debe tener RNC.
- *  - E32 (consumo) de RD$250,000 o más: el comprador debe estar identificado.
+ *  - E31 (crédito fiscal): comprador con RNC o cédula (RNCComprador admite 9 u 11 dígitos) y su razón social.
+ *  - E32 (consumo) de RD$250,000 o más: comprador identificado y con nombre.
  *  - Notas (E33/E34): el comprador se hereda del comprobante modificado, no se valida aquí.
+ * `name` se valida solo si quien llama lo pasa (`undefined` = no aplica a ese flujo).
  */
 export function buyerErrors(type: EcfType, total: Cents, buyer: BuyerInput): string[] {
   const identified = Boolean(buyer.docType && buyer.docNumber);
-  if (type === "E31" && !(buyer.docType === "RNC" && buyer.docNumber)) {
-    return ["La factura de crédito fiscal requiere un cliente con RNC"];
+  const missingName = buyer.name !== undefined && !buyer.name?.trim();
+  if (type === "E31") {
+    if (!(isTaxpayerDocument(buyer.docType) && buyer.docNumber)) {
+      return ["La factura de crédito fiscal requiere un cliente con RNC o cédula"];
+    }
+    if (missingName) return ["La factura de crédito fiscal requiere el nombre o razón social del cliente"];
   }
-  if (type === "E32" && total >= CONSUMER_ID_THRESHOLD && !identified) {
-    return [
-      "Las facturas de consumo desde RD$250,000.00 requieren identificar al comprador",
-    ];
+  if (type === "E32" && total >= CONSUMER_ID_THRESHOLD) {
+    if (!identified) return ["Las facturas de consumo desde RD$250,000.00 requieren identificar al comprador"];
+    if (missingName) return ["Las facturas de consumo desde RD$250,000.00 requieren el nombre del comprador"];
   }
   return [];
 }

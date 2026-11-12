@@ -25,7 +25,7 @@ export type FiscalDeps = { env: Env; prisma: DbClient; logger: Logger; fetch?: F
 export const SEND_BACKOFF_SECONDS = [30, 120, 600, 1_800, 3_600];
 /** Esperas entre consultas del resultado mientras la DGII lo procesa («promedio estimado de validación: 200 ms»). */
 export const POLL_BACKOFF_SECONDS = [3, 10, 30, 60, 120, 300];
-/** Intentos de envío antes de rendirse y pedir revisión (≈ 17 horas con las esperas de arriba). */
+/** Intentos de envío (≈ 17 horas con las esperas de arriba) a partir de los cuales el envío sale como atrasado en el panel; se sigue intentando. */
 export const MAX_SEND_ATTEMPTS = 20;
 /** Consultas del resultado antes de rendirse (≈ 1 día). */
 export const MAX_POLL_ATTEMPTS = 300;
@@ -79,7 +79,7 @@ async function claim(prisma: DbClient, now: Date, o: ProcessOptions): Promise<{ 
         WHERE "state" IN ('PENDING'::"FiscalState", 'SENT'::"FiscalState")
           AND ${due} ${org}
           AND ("lockedUntil" IS NULL OR "lockedUntil" < ${iso(now)}::timestamp)
-        ORDER BY "nextAttemptAt"
+        ORDER BY "createdAt"
         LIMIT ${o.limit ?? 20}
         FOR UPDATE SKIP LOCKED
       )
@@ -98,7 +98,7 @@ export async function processDue(deps: FiscalDeps, o: ProcessOptions = {}): Prom
   summary.claimed = rows.length;
   for (const row of rows) {
     try {
-      const outcome = await processOne(deps, row.organizationId, row.id, now);
+      const outcome = await processOne(deps, row.organizationId, row.id, now, Boolean(o.documentId));
       summary[outcome]++;
     } catch (e) {
       // Un error nuestro (no de la DGII): se reintenta en un minuto y se deja el motivo.
@@ -117,7 +117,7 @@ export async function processDue(deps: FiscalDeps, o: ProcessOptions = {}): Prom
 
 type Outcome = "sent" | "accepted" | "rejected" | "retried" | "failed";
 
-async function processOne(deps: FiscalDeps, organizationId: string, id: string, now: Date): Promise<Outcome> {
+async function processOne(deps: FiscalDeps, organizationId: string, id: string, now: Date, forced = false): Promise<Outcome> {
   const loaded = await tenantTransaction(deps.prisma, organizationId, async (tx) => {
     const sub = await tx.fiscalSubmission.findFirst({ where: { id }, include: { document: true } });
     const profile = await tx.companyProfile.findFirst();
@@ -136,6 +136,11 @@ async function processOne(deps: FiscalDeps, organizationId: string, id: string, 
   });
   const { sub, profile, cert, summary } = loaded;
   if (!sub || (sub.state !== "PENDING" && sub.state !== "SENT")) return "retried";
+  // Se aplazó después de reservarla (otro envío de la empresa la puso en pausa en esta misma tanda): se respeta.
+  if (!forced && sub.nextAttemptAt.getTime() > now.getTime()) {
+    await save(deps, organizationId, sub.id, sub.documentId, { lockedUntil: null }, null);
+    return "retried";
+  }
 
   const fail = (message: string, outcome: Outcome = "failed") =>
     save(deps, organizationId, sub.id, sub.documentId, { state: "FAILED", lastError: message, lockedUntil: null, finishedAt: now, attempts: sub.attempts + 1 }, null).then(() => outcome);
@@ -151,6 +156,11 @@ async function processOne(deps: FiscalDeps, organizationId: string, id: string, 
   try {
     if (sub.kind === "RFCE") {
       // El resumen se responde en el mismo envío (sin TrackId); si la DGII no da un estado final, se consulta después.
+      // Un envío anterior se cortó: antes de reenviar se pregunta si la DGII ya tiene el resumen (no se duplica).
+      if (sub.state === "PENDING" && sub.attempts > 0) {
+        const prior = await receivedSummary(provider, profile.rnc, sub.document.encf!, sub.document.securityCode!);
+        if (prior) return await recordResult(deps, organizationId, sub, prior, attempts, now);
+      }
       const result =
         sub.state === "PENDING"
           ? await provider.submitSummary({ xml: summary.xml!, rnc: profile.rnc, encf: sub.document.encf! })
@@ -165,6 +175,15 @@ async function processOne(deps: FiscalDeps, organizationId: string, id: string, 
       return await recordResult(deps, organizationId, sub, result, sub.state === "PENDING" ? 1 : attempts, now);
     }
     if (sub.state === "PENDING") {
+      // Un envío anterior se cortó (sin respuesta): si la DGII ya lo recibió se retoma ese TrackId en vez de reenviar
+      // el mismo e-NCF (Estándares de Comportamiento §4; reenviar genera TrackIds duplicados).
+      const known = sub.attempts > 0 ? await receivedTrackId(provider, profile.rnc, sub.document.encf!) : null;
+      if (known) {
+        await save(deps, organizationId, sub.id, sub.documentId, {
+          state: "SENT", trackId: known, attempts: 0, sentAt: now, lastError: null, lockedUntil: null, nextAttemptAt: now,
+        }, "SENT");
+        return "sent";
+      }
       const { trackId } = await provider.submit({ xml: sub.document.ecfXml!, rnc: profile.rnc, encf: sub.document.encf! });
       await save(deps, organizationId, sub.id, sub.documentId, {
         state: "SENT", trackId, attempts: 0, sentAt: now, lastError: null, lockedUntil: null, nextAttemptAt: later(now, POLL_BACKOFF_SECONDS[0]!),
@@ -177,14 +196,20 @@ async function processOne(deps: FiscalDeps, organizationId: string, id: string, 
   } catch (e) {
     if (!(e instanceof FiscalError)) throw e;
     const polling = sub.state === "SENT";
-    const max = polling ? MAX_POLL_ATTEMPTS : MAX_SEND_ATTEMPTS;
-    if (!e.retryable || attempts >= max) {
-      return fail(e.retryable ? `Se agotaron los intentos: ${e.message}` : e.message);
+    if (e.retryable) {
+      // Consultando: se rinde tras muchas consultas. Enviando: la DGII puede estar caída días (Estándares §5): no se
+      // abandona; se sigue intentando con la espera máxima, y la empresa entera espera para no insistir en paralelo.
+      if (polling && attempts >= MAX_POLL_ATTEMPTS) return fail(`Se agotaron las consultas: ${e.message}`);
+      const next = later(now, wait(polling ? POLL_BACKOFF_SECONDS : SEND_BACKOFF_SECONDS, attempts));
+      await save(deps, organizationId, sub.id, sub.documentId, { attempts, lastError: e.message, lockedUntil: null, nextAttemptAt: next }, null);
+      if (!polling) await holdCompany(deps, organizationId, sub.id, next, null);
+      return "retried";
     }
-    await save(deps, organizationId, sub.id, sub.documentId, {
-      attempts, lastError: e.message, lockedUntil: null, nextAttemptAt: later(now, wait(polling ? POLL_BACKOFF_SECONDS : SEND_BACKOFF_SECONDS, attempts)),
-    }, null);
-    return "retried";
+    // Certificado no autorizado, credenciales, servicio no disponible en el ambiente…: es de configuración y afecta
+    // a todo lo de la empresa. Este queda fallido y el resto espera una hora en vez de fallar uno por uno.
+    const failed = await fail(e.message);
+    if (e.kind === "auth" || e.kind === "config") await holdCompany(deps, organizationId, sub.id, later(now, 3_600), `En pausa: ${e.message}`);
+    return failed;
   }
 }
 
@@ -213,6 +238,39 @@ async function recordResult(
   const docStatus = r.status === "ACCEPTED" ? "ACCEPTED" : r.status === "ACCEPTED_CONDITIONAL" ? "ACCEPTED_CONDITIONAL" : "REJECTED";
   await save(deps, organizationId, sub.id, sub.documentId, { ...info, state: "DONE", attempts, lastError: null, lockedUntil: null, finishedAt: now }, docStatus);
   return isFiscallyValid(r.status) ? "accepted" : "rejected";
+}
+
+/** TrackId de un envío que la DGII ya recibió de este e-NCF (el más reciente), o null. En certificación no se puede consultar. */
+async function receivedTrackId(provider: FiscalProvider, rnc: string, encf: string): Promise<string | null> {
+  try {
+    const known = await provider.trackIdsOf(rnc, encf);
+    return known.at(-1)?.trackId ?? null;
+  } catch (e) {
+    // La consulta no está en este ambiente (certificación) o no la entiende: se reenvía como antes.
+    if (e instanceof FiscalError && (e.kind === "config" || e.kind === "rejected")) return null;
+    throw e;
+  }
+}
+
+/** Resultado de un resumen (RFCE) que la DGII ya recibió, o null si no lo tiene. */
+async function receivedSummary(provider: FiscalProvider, rnc: string, encf: string, code: string) {
+  try {
+    const prior = await provider.summaryResult(rnc, encf, code);
+    return prior.status === "NOT_FOUND" ? null : prior;
+  } catch (e) {
+    if (e instanceof FiscalError && (e.kind === "config" || e.kind === "rejected")) return null;
+    throw e;
+  }
+}
+
+/** Aplaza los demás envíos pendientes de la empresa hasta `until` (con un motivo, si se da). */
+async function holdCompany(deps: FiscalDeps, organizationId: string, exceptId: string, until: Date, reason: string | null) {
+  await tenantTransaction(deps.prisma, organizationId, (tx) =>
+    tx.fiscalSubmission.updateMany({
+      where: { state: "PENDING", id: { not: exceptId }, nextAttemptAt: { lt: until } },
+      data: { nextAttemptAt: until, ...(reason ? { lastError: reason } : {}) },
+    }),
+  );
 }
 
 type SubmissionPatch = Prisma.FiscalSubmissionUncheckedUpdateInput;

@@ -238,3 +238,45 @@ describe("semilla con sangrías (como la entrega la DGII)", () => {
     expect(verifyEcfSignature(signed)).toBe(true);
   });
 });
+
+describe("respuestas que no se deben dar por buenas", () => {
+  const ANNUL = "POST /testecf/anulacionrangos/api/operaciones/anularrango";
+  const annul = (mensajes: string[]) =>
+    client(fakeDgii({ [ANNUL]: () => Response.json({ rnc: "x", codigo: "1", nombre: "Anulación", mensajes }) })).annulRanges({
+      xml: "<ANECF/>",
+      rnc: "101672919",
+      firstEncf: "E320000000010",
+    });
+
+  it("la anulación solo cuenta con una confirmación explícita y sin mensajes de falla", async () => {
+    expect((await annul(["Las secuencias fueron anuladas correctamente."])).annulled).toBe(true);
+    expect((await annul(["La firma del documento no es válida"])).annulled).toBe(false);
+    expect((await annul(["RNC 101672919 no está delegado"])).annulled).toBe(false);
+    expect((await annul(["Las secuencias fueron anuladas correctamente. Con excepción de las secuencias del detalle"])).annulled).toBe(false);
+    expect((await annul([])).annulled).toBe(false);
+  });
+
+  it("un estado desconocido de la DGII no se toma como «En proceso»", async () => {
+    const d = fakeDgii({ "GET /testecf/consultaresultado/api/consultas/estado": () => Response.json({ trackId: "t", codigo: 9, estado: "Suspendido", mensajes: [] }) });
+    await expect(client(d).result("t")).rejects.toThrow(/estado desconocido.*Suspendido/);
+  });
+
+  it("el directorio no se consulta en certificación y en los demás ambientes se guarda una hora", async () => {
+    await expect(client(fakeDgii({}), { env: "CERT" }).directoryOf("131880681")).rejects.toMatchObject({ kind: "config" });
+
+    let hits = 0;
+    const d = fakeDgii({
+      "GET /testecf/consultadirectorio/api/consultas/obtenerdirectorioporrnc": () => {
+        hits++;
+        return Response.json([{ nombre: "Cliente", rnc: "131880681", urlRecepcion: "https://c.example.com", urlAceptacion: null, urlOpcional: null }]);
+      },
+    });
+    const c = client(d);
+    expect((await c.directoryOf("131880681"))?.receptionUrl).toBe("https://c.example.com");
+    await c.directoryOf("131880681");
+    expect(hits).toBe(1);
+    d.clock.now = new Date(d.clock.now.getTime() + 61 * 60_000);
+    await c.directoryOf("131880681");
+    expect(hits).toBe(2);
+  });
+});

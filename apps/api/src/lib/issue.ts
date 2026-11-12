@@ -1,5 +1,5 @@
 import { HTTPException } from "hono/http-exception";
-import { buyerErrors, formatDop, isModifier, remainingCredit } from "@facturacion/core";
+import { buyerErrors, formatDop, isModifier, remainingCredit, TEXT_CORRECTION_CODE } from "@facturacion/core";
 import { auditRow } from "./audit";
 import { asSalesType, FULL, isCreditSale, type DocumentFull } from "./documents";
 import { allocateEncf } from "./encf";
@@ -47,7 +47,12 @@ export async function issueDocument(
   if (!profile) {
     throw unprocessable("Registra los datos fiscales de la empresa antes de emitir comprobantes");
   }
-  if (draft.total <= 0n) throw unprocessable("El total del comprobante debe ser mayor que cero");
+  // Una nota con código 2 solo corrige texto: la DGII exige sus montos en cero. Todo lo demás debe tener monto.
+  if (isModifier(asSalesType(draft.type)) && draft.modificationCode === TEXT_CORRECTION_CODE) {
+    if (draft.total !== 0n) throw unprocessable("Una nota que solo corrige texto (código 2) va con todos los montos en cero");
+  } else if (draft.total <= 0n) {
+    throw unprocessable("El total del comprobante debe ser mayor que cero");
+  }
 
   // El comprador se refresca desde la ficha del cliente: pudo cambiar desde que se creó el borrador.
   let buyer = {
@@ -71,6 +76,7 @@ export async function issueDocument(
     const [problem] = buyerErrors(type, draft.total, {
       docType: buyer.buyerDocType,
       docNumber: buyer.buyerDocNumber,
+      name: buyer.buyerName,
     });
     if (problem) throw unprocessable(problem);
 
@@ -155,6 +161,16 @@ export async function issueDocument(
         reason: e instanceof Error ? e.message : String(e),
       }),
     });
+  }
+  // En producción un e-NCF sin firma no es un e-CF válido: no se emite (la transacción se deshace y no se gasta el
+  // número). En pruebas sí, para poder trabajar sin certificado. La venta de una caja sin conexión ya ocurrió: se
+  // firma después.
+  if (!signature && !preset && profile.environment === "PROD") {
+    throw unprocessable(
+      draft.currency !== "DOP"
+        ? "Los comprobantes en dólares aún no se pueden firmar: en producción no se emiten"
+        : "En producción no se emite sin el certificado digital: súbelo en Configuración fiscal",
+    );
   }
 
   let issued = await tx.document.update({

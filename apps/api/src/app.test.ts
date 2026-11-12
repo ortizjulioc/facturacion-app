@@ -148,8 +148,16 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
         const q = url.searchParams;
         dgii.summaryQueries.push({ rnc: q.get("RNC_Emisor"), encf: q.get("ENCF"), code: q.get("Cod_Seguridad_eCF") });
         const custom = dgii.summaryHandlers.get(q.get("ENCF")!);
+        // Como la DGII real: lo que nunca recibió no aparece (salvo que la prueba fije la respuesta).
+        if (!custom && !dgii.summaries.some((x) => x.xml.includes(`<eNCF>${q.get("ENCF")}</eNCF>`))) {
+          return Response.json({ codigo: "0", estado: "No encontrado", mensajes: [] });
+        }
         const answer = typeof custom === "function" ? custom() : custom;
         return Response.json({ rnc: q.get("RNC_Emisor"), encf: q.get("ENCF"), codigo: "1", estado: "Aceptado", secuenciaUtilizada: true, mensajes: [], ...answer });
+      }
+      if (url.pathname.endsWith("/consultatrackids/api/trackids/consulta")) {
+        const encf = url.searchParams.get("encf");
+        return Response.json([...dgii.encfOf].filter(([, e]) => e === encf).map(([trackId]) => ({ trackId, estado: "Aceptado", fechaRecepcion: "22/10/2026 08:00:00" })));
       }
       if (url.pathname.endsWith("/consultaresultado/api/consultas/estado")) {
         const trackId = url.searchParams.get("trackid")!;
@@ -1148,7 +1156,7 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       );
     });
 
-    it("la factura de crédito fiscal (E31) exige un cliente con RNC", async () => {
+    it("la factura de crédito fiscal (E31) exige un cliente con RNC o cédula", async () => {
       const b = await billing("e7", { seqs: [["E31", 1, 10]] });
       const consumer = (
         await json(
@@ -1171,13 +1179,19 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
 
       const noCustomer = await createDraft(b, { type: "E31" });
       expect(await error(await issue(b, noCustomer.id))).toMatch(/RNC/);
+      // Una persona física contribuyente usa su cédula como RNC (RNCComprador admite 11 dígitos).
       const cedula = await createDraft(b, { type: "E31", customerId: consumer.id });
-      expect((await issue(b, cedula.id)).status).toBe(422);
+      const withCedula = await issue(b, cedula.id);
+      expect(withCedula.status, JSON.stringify(await withCedula.clone().json())).toBe(200);
+      expect((await json(withCedula)).data).toMatchObject({ encf: "E310000000001", buyerDocType: "CEDULA", buyerDocNumber: "00112345678" });
+      // Con pasaporte no hay RNCComprador posible.
+      const passport = await createDraft(b, { type: "E31", buyer: { name: "John Doe", docType: "PASAPORTE", docNumber: "AB123456" } });
+      expect(await error(await issue(b, passport.id))).toMatch(/RNC o cédula/);
 
       const ok = await createDraft(b, { type: "E31", customerId: company.id });
       const issued = (await json(await issue(b, ok.id))).data;
       expect(issued).toMatchObject({
-        encf: "E310000000001",
+        encf: "E310000000002",
         buyerName: "Acme SRL",
         buyerDocType: "RNC",
         buyerDocNumber: "131246796",
@@ -1274,6 +1288,24 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       });
       const issued = (await json(await issue(b, n.id))).data;
       expect(issued.encf).toBe("E340000000001");
+    });
+
+    it("solo admite los códigos 1 a 3, y el 2 (corrige texto) va con montos en cero", async () => {
+      const { b, original } = await issuedInvoice("n1c");
+      for (const code of [4, 5]) {
+        const res = await post("/v1/documents", draftBody(b, { type: "E34", referencedDocumentId: original.id, modificationCode: code, lines: [{ name: "Ajuste", unitPrice: "1.00", tax: "EXENTO", quantity: "1" }], payments: [] }), b.cookie);
+        expect(res.status).toBe(400);
+      }
+
+      const withAmount = await issue(b, (await note(b, original, "10.00", { modificationCode: 2 })).id);
+      expect(withAmount.status).toBe(422);
+      expect(await error(withAmount)).toMatch(/código 2/);
+
+      const textOnly = await issue(b, (await note(b, original, "0.00", { modificationCode: 2, notes: "Corrige la dirección del cliente" })).id);
+      expect(textOnly.status, JSON.stringify(await textOnly.clone().json())).toBe(200);
+      expect((await json(textOnly)).data).toMatchObject({ encf: "E340000000001", modificationCode: 2 });
+      // Una nota normal (código 3) sigue exigiendo monto.
+      expect((await issue(b, (await note(b, original, "0.00")).id)).status).toBe(422);
     });
 
     it("no permite acreditar más que el total del original", async () => {
@@ -5454,6 +5486,23 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       expect(xml).toMatch(/<FechaVencimientoSecuencia>\d{2}-\d{2}-\d{4}<\/FechaVencimientoSecuencia>/);
     });
 
+    it("en producción no se emite sin certificado (y no se gasta el e-NCF); en pruebas sí", async () => {
+      const b = await billing("sig4x", { profile: false, seqs: [] });
+      expect((await send("PUT", "/v1/company", { ...profileBody, environment: "PROD" }, b.cookie)).status).toBe(200);
+      expect((await post("/v1/sequences", seqBody("E32", 1, 10), b.cookie)).status).toBe(201);
+      const draft = await createDraft(b);
+      const res = await issue(b, draft.id);
+      expect(res.status).toBe(422);
+      expect(await error(res)).toMatch(/certificado digital/);
+
+      expect((await putCert(b, certBody())).status).toBe(200);
+      const ok = (await json(await issue(b, draft.id))).data;
+      expect(ok).toMatchObject({ status: "ISSUED", encf: "E320000000001" });
+      expect(ok.ecf.securityCode).toHaveLength(6);
+      // Las empresas nuevas envían solas a la DGII.
+      expect(ok.fiscal).toMatchObject({ kind: "RFCE", state: "PENDING" });
+    });
+
     it("un emisor persona física registra su cédula como RNC y firma con ella", async () => {
       const b = await billing("sig4p", { profile: false, seqs: [] });
       const bad = await send("PUT", "/v1/company", { ...profileBody, rnc: "1234567890" }, b.cookie);
@@ -5621,7 +5670,8 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
     async function emisor(label: string, auto = true) {
       const b = await billing(label, { seqs: [["E31", 1, 50], ["E32", 1, 50]] });
       expect((await send("PUT", "/v1/company/certificate", certBody(), b.cookie)).status).toBe(200);
-      if (auto) expect((await send("PUT", "/v1/company", { ...profileBody, sendToDgii: true }, b.cookie)).status).toBe(200);
+      // Las empresas nacen con el envío automático activado; sin él, se apaga a propósito.
+      expect((await send("PUT", "/v1/company", { ...profileBody, sendToDgii: auto }, b.cookie)).status).toBe(200);
       const cust = (await json(await post("/v1/customers", { name: "Cliente Fiscal", documentType: "RNC", documentNumber: "131246796" }, b.cookie))).data;
       customers.set(b, cust);
       return b;
@@ -5676,6 +5726,26 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       const d = await detail(b, doc.id);
       expect(d.status).toBe("REJECTED");
       expect(d.fiscal).toMatchObject({ state: "DONE", dgiiStatus: "Rechazado", sequenceUsed: false, messages: [{ code: "102", text: "Firma inválida" }] });
+
+      // Aparece en la cola para revisión y no cuenta en las ventas.
+      const queue = (await json(await get("/v1/fiscal/queue", b.cookie))).data;
+      expect(queue.rejected).toEqual([expect.objectContaining({ documentId: doc.id, encf: doc.encf, messages: ["Firma inválida"], sequenceUsed: false })]);
+      const today = new Intl.DateTimeFormat("sv-SE", { timeZone: "America/Santo_Domingo" }).format(new Date());
+      const sales = (await json(await get(`/v1/reports/sales?from=${today}&to=${today}`, b.cookie))).data;
+      expect(sales.totals.documents).toBe(0);
+
+      // Se sustituye: borrador con los mismos datos (sin mover inventario otra vez) y un e-NCF nuevo al emitirlo.
+      const replaced = await post(`/v1/documents/${doc.id}/replace`, {}, b.cookie);
+      expect(replaced.status, JSON.stringify(await replaced.clone().json())).toBe(201);
+      const draft = (await json(replaced)).data;
+      expect(draft).toMatchObject({ status: "DRAFT", type: "E31", customerId: doc.customerId, totals: { total: doc.totals.total } });
+      expect(draft.notes).toContain(`Sustituye el e-CF ${doc.encf}`);
+      expect(draft.lines.every((l: Json) => l.productId === null)).toBe(true);
+      const again = (await json(await issue(b, draft.id))).data;
+      expect(again.encf).not.toBe(doc.encf);
+      expect(again.status).toBe("ISSUED");
+      // Lo que no fue rechazado no se sustituye.
+      expect((await post(`/v1/documents/${again.id}/replace`, {}, b.cookie)).status).toBe(409);
     });
 
     it("«aceptado condicional» y «en proceso»: espera y vuelve a consultar con pausas crecientes", async () => {
@@ -5725,14 +5795,52 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       expect((await post(`/v1/documents/${doc.id}/send`, {}, b.cookie)).status).toBe(409); // ya está en la cola
     });
 
-    it("tras demasiados intentos de envío deja de insistir", async () => {
+    it("con la DGII caída no abandona el envío: lo sigue intentando y lo marca como atrasado", async () => {
       const b = await emisor("dg5");
       const doc = await e31(b);
       dgii.receptionFails = Array.from({ length: 30 }, () => () => new Response("", { status: 500 }));
       for (let i = 0; i < MAX_SEND_ATTEMPTS; i++) await run(b, step(4000));
       const d = await detail(b, doc.id);
-      expect(d.fiscal).toMatchObject({ state: "FAILED", attempts: MAX_SEND_ATTEMPTS });
-      expect(d.fiscal.lastError).toMatch(/Se agotaron los intentos/);
+      expect(d.fiscal).toMatchObject({ state: "PENDING", attempts: MAX_SEND_ATTEMPTS });
+      const queue = (await json(await get("/v1/fiscal/queue", b.cookie))).data;
+      expect(queue.overdue.map((o: Json) => o.documentId)).toEqual([doc.id]);
+
+      // Cuando la DGII vuelve, se envía (antes pregunta si ya lo tenía: no lo tenía).
+      dgii.receptionFails = [];
+      expect(await run(b, step(4000))).toMatchObject({ sent: 1 });
+      expect(dgii.received).toHaveLength(1);
+    });
+
+    it("si un envío se cortó sin respuesta, antes de reenviar retoma el TrackId que la DGII ya tiene", async () => {
+      const b = await emisor("dg5b");
+      const doc = await e31(b);
+      // La DGII lo recibe, pero la respuesta no llega (se cae la conexión).
+      dgii.receptionFails = [
+        () => {
+          dgii.encfOf.set("trk-perdido", doc.encf);
+          return new Response("", { status: 504 });
+        },
+      ];
+      expect(await run(b, step())).toMatchObject({ retried: 1 });
+      expect(await run(b, step(30))).toMatchObject({ sent: 1 });
+      expect(dgii.received).toHaveLength(0); // no se reenvió
+      const d = await detail(b, doc.id);
+      expect(d.fiscal).toMatchObject({ state: "SENT", trackId: "trk-perdido" });
+      expect(await run(b, step(5))).toMatchObject({ accepted: 1 });
+    });
+
+    it("un error de configuración pausa los demás envíos de la empresa en vez de fallarlos uno por uno", async () => {
+      const b = await emisor("dg5c");
+      const first = await e31(b);
+      const second = await e31(b);
+      dgii.receptionFails = [() => Response.json({ mensaje: "Certificado no autorizado" }, { status: 403 }), () => Response.json({ mensaje: "Certificado no autorizado" }, { status: 403 })];
+      const r = await run(b, step());
+      expect(r.failed).toBe(1);
+      const failed = [await detail(b, first.id), await detail(b, second.id)];
+      expect(failed.filter((x) => x.fiscal.state === "FAILED")).toHaveLength(1);
+      const held = failed.find((x) => x.fiscal.state === "PENDING")!;
+      expect(held.fiscal.lastError).toMatch(/En pausa: Certificado no autorizado/);
+      expect(new Date(held.fiscal.nextAttemptAt).getTime() - clock).toBeGreaterThanOrEqual(3_600_000);
     });
 
     it("sin envío automático el comprobante espera a que se pida; «consultar ahora» lo procesa en el momento", async () => {
@@ -6223,14 +6331,21 @@ describe.skipIf(!hasDb)("API de punta a punta", () => {
       expect((await post(`/v1/received/${row.id}/resend`, {}, b.cookie)).status).toBe(409); // ya está entregada
     });
 
-    it("si la DGII no acepta la aprobación se informa su motivo, pero el emisor igual la recibe", async () => {
+    it("si la DGII aún no tiene el e-CF, la aprobación se reintenta; otro rechazo se informa, pero el emisor igual la recibe", async () => {
       const b = await comprador("rxap5");
       dgii.directory.set("101672919", entry);
+      // La DGII solo recibe aprobaciones de e-CF que ya aceptó: «no encontrada» es esperar, no fallar.
       dgii.dgiiApprovalFails = [() => Response.json({ mensaje: ["Factura no encontrada para esta Aprobación comercial."], estado: "Aprobación comercial rechazada", codigo: "2" }, { status: 400 })];
       const row = await received(b);
       const d = (await json(await decision(b, row.id, { approved: true }))).data;
-      expect(d).toMatchObject({ approvalState: "FAILED", dgiiError: "Factura no encontrada para esta Aprobación comercial." });
+      expect(d).toMatchObject({ approvalState: "PENDING", dgiiError: "Factura no encontrada para esta Aprobación comercial." });
       expect(d.peerSentAt).toBeTruthy();
+
+      const other = await comprador("rxap5b");
+      dgii.dgiiApprovalFails = [() => Response.json({ mensaje: ["La firma de la aprobación no es válida"], estado: "Aprobación comercial rechazada", codigo: "2" }, { status: 400 })];
+      const row2 = await received(other);
+      const d2 = (await json(await decision(other, row2.id, { approved: true }))).data;
+      expect(d2).toMatchObject({ approvalState: "FAILED", dgiiError: "La firma de la aprobación no es válida" });
     });
 
     it("la factura de consumo no lleva aprobación comercial", async () => {

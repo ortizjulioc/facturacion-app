@@ -14,7 +14,7 @@ export function ResumenView() {
 
   const load = useCallback(async () => {
     const today = todayLocal();
-    const [products, customers, branches, terminals, drafts, lowStock, sales] =
+    const [products, customers, branches, terminals, drafts, lowStock, sales, fiscal] =
       await Promise.all([
         unwrap(await api.v1.products.$get({ query: { pageSize: "1", active: "true" } })),
         unwrap(await api.v1.customers.$get({ query: { pageSize: "1", active: "true" } })),
@@ -34,6 +34,8 @@ export function ResumenView() {
               }),
             )
           : null,
+        // Lo que necesita atención en los envíos a la DGII (también solo para administradores).
+        canManage ? unwrap(await api.v1.fiscal.queue.$get()) : null,
       ]);
     const todayRow = sales?.data.series.find((r) => r.period === today);
     return {
@@ -44,6 +46,7 @@ export function ResumenView() {
       drafts: drafts.total,
       lowStock: lowStock.total,
       sales: sales?.data ?? null,
+      fiscal: fiscal?.data ?? null,
       todayTotal: todayRow?.total ?? "0.00",
       todayCount: todayRow?.count ?? 0,
     };
@@ -148,6 +151,8 @@ export function ResumenView() {
         </Link>
       )}
 
+      {data?.fiscal && <FiscalAlerts queue={data.fiscal} />}
+
       {data && data.branches === 0 && (
         <p className="rounded-md bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:bg-amber-950 dark:text-amber-200">
           Empieza creando tu primera sucursal y caja en{" "}
@@ -158,5 +163,62 @@ export function ResumenView() {
         </p>
       )}
     </>
+  );
+}
+
+type FiscalQueue = {
+  failed: { documentId: string; encf: string | null; error: string | null }[];
+  rejected: { documentId: string; encf: string | null; messages: string[] }[];
+  overdue: { documentId: string; encf: string | null; error: string | null }[];
+};
+
+/** Envíos a la DGII que necesitan atención: rechazados (sustituirlos), fallidos (revisar y reintentar) y atrasados. */
+function FiscalAlerts({ queue }: { queue: FiscalQueue }) {
+  const groups = [
+    {
+      title: "Rechazados por la DGII: sustitúyelos por otro comprobante",
+      tone: "red",
+      rows: queue.rejected.map((r) => ({ id: r.documentId, encf: r.encf, why: r.messages.join(" · ") })),
+    },
+    {
+      title: "No se pudieron enviar: revisa el motivo y reintenta",
+      tone: "red",
+      rows: queue.failed.map((r) => ({ id: r.documentId, encf: r.encf, why: r.error ?? "" })),
+    },
+    {
+      title: "Atrasados: la DGII exige enviarlos en 72 horas",
+      tone: "amber",
+      rows: queue.overdue.map((r) => ({ id: r.documentId, encf: r.encf, why: r.error ?? "Esperando a la DGII" })),
+    },
+  ].filter((g) => g.rows.length > 0);
+  if (groups.length === 0) return null;
+  return (
+    <section className="space-y-3">
+      <h2 className="text-lg font-medium">Envíos a la DGII</h2>
+      {groups.map((g) => (
+        <div
+          key={g.title}
+          className={
+            g.tone === "red"
+              ? "rounded-md bg-red-50 px-4 py-3 text-sm text-red-900 dark:bg-red-950 dark:text-red-200"
+              : "rounded-md bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:bg-amber-950 dark:text-amber-200"
+          }
+        >
+          <p className="font-medium">
+            {g.title} ({g.rows.length})
+          </p>
+          <ul className="mt-2 space-y-1">
+            {g.rows.slice(0, 5).map((r) => (
+              <li key={r.id}>
+                <Link href={`/panel/facturas/${r.id}`} className="font-medium tabular-nums underline">
+                  {r.encf ?? "Sin e-NCF"}
+                </Link>
+                {r.why && <span className="ml-2">{r.why}</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </section>
   );
 }

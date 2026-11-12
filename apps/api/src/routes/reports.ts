@@ -74,7 +74,7 @@ export const reports = new Hono<AppEnv>()
                SUM(CASE WHEN d."type" = 'E34' THEN -1 ELSE 1 END * ROUND(d."totalTax"::numeric * d."exchangeRate"))::bigint AS tax,
                SUM(CASE WHEN d."type" = 'E34' THEN -1 ELSE 1 END * ROUND(d."total"::numeric * d."exchangeRate"))::bigint AS total
         FROM "document" d
-        WHERE d."status" <> 'DRAFT' AND d."issuedAt" >= ${start} AND d."issuedAt" < ${end}
+        WHERE d."status" NOT IN ('DRAFT', 'REJECTED') AND d."issuedAt" >= ${start} AND d."issuedAt" < ${end}
         GROUP BY 1 ORDER BY 1`;
 
       const byType = await tx.$queryRaw<
@@ -85,7 +85,7 @@ export const reports = new Hono<AppEnv>()
                SUM(ROUND(d."total"::numeric * d."exchangeRate"))::bigint AS total,
                SUM(ROUND(d."totalTax"::numeric * d."exchangeRate"))::bigint AS tax
         FROM "document" d
-        WHERE d."status" <> 'DRAFT' AND d."issuedAt" >= ${start} AND d."issuedAt" < ${end}
+        WHERE d."status" NOT IN ('DRAFT', 'REJECTED') AND d."issuedAt" >= ${start} AND d."issuedAt" < ${end}
         GROUP BY d."type" ORDER BY d."type"`;
 
       const taxes = await tx.$queryRaw<
@@ -110,13 +110,13 @@ export const reports = new Hono<AppEnv>()
         FROM (
           SELECT *, (CASE WHEN "type" = 'E34' THEN -1 ELSE 1 END) AS s
           FROM "document"
-          WHERE "status" <> 'DRAFT' AND "issuedAt" >= ${start} AND "issuedAt" < ${end}
+          WHERE "status" NOT IN ('DRAFT', 'REJECTED') AND "issuedAt" >= ${start} AND "issuedAt" < ${end}
         ) d`;
 
       const payments = await tx.$queryRaw<{ method: string; amount: Money }[]>`
         SELECT p."method"::text AS method, SUM(ROUND(p."amount"::numeric * d."exchangeRate"))::bigint AS amount
         FROM "payment" p JOIN "document" d ON d."id" = p."documentId"
-        WHERE d."status" <> 'DRAFT' AND d."issuedAt" >= ${start} AND d."issuedAt" < ${end}
+        WHERE d."status" NOT IN ('DRAFT', 'REJECTED') AND d."issuedAt" >= ${start} AND d."issuedAt" < ${end}
         GROUP BY p."method" ORDER BY amount DESC`;
 
       const products = await tx.$queryRaw<
@@ -126,7 +126,7 @@ export const reports = new Hono<AppEnv>()
                SUM(l."quantity")::bigint AS quantity,
                SUM(ROUND(l."total"::numeric * d."exchangeRate"))::bigint AS total
         FROM "document_line" l JOIN "document" d ON d."id" = l."documentId"
-        WHERE d."status" <> 'DRAFT' AND d."type" <> 'E34'
+        WHERE d."status" NOT IN ('DRAFT', 'REJECTED') AND d."type" <> 'E34'
           AND d."issuedAt" >= ${start} AND d."issuedAt" < ${end}
         GROUP BY COALESCE(l."productId"::text, l."name"), l."name"
         ORDER BY total DESC, name ASC
@@ -187,7 +187,7 @@ export const reports = new Hono<AppEnv>()
     const { start, end } = bounds(from, to);
 
     const docs = await c.get("db").document.findMany({
-      where: { status: { not: "DRAFT" }, issuedAt: { gte: start, lt: end } },
+      where: { status: { notIn: ["DRAFT", "REJECTED"] }, issuedAt: { gte: start, lt: end } },
       orderBy: [{ issuedAt: "asc" }, { encf: "asc" }],
     });
 

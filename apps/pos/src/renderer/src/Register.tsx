@@ -308,7 +308,7 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
               <button className={type === "E31" ? "on" : ""} onClick={() => setType("E31")}>Crédito fiscal</button>
             </div>
             <button className="customer" onClick={() => setModal("customer")}>
-              {customer ? `Cliente: ${customer.name}` : type === "E31" ? "Elegir cliente con RNC…" : "Cliente (opcional)…"}
+              {customer ? `Cliente: ${customer.name}` : type === "E31" ? "Elegir cliente con RNC o cédula…" : "Cliente (opcional)…"}
             </button>
             <label className="check"><input type="checkbox" checked={propina} onChange={(e) => setPropina(e.target.checked)} /> Propina legal (10 %)</label>
           </div>
@@ -326,7 +326,7 @@ export function Register({ state, reload }: { state: PosState; reload: () => voi
           >
             Cobrar {totals ? money(totals.total) : ""}
           </button>
-          {type === "E31" && !customer && cart.length > 0 && <p className="muted small">El crédito fiscal necesita un cliente con RNC.</p>}
+          {type === "E31" && !customer && cart.length > 0 && <p className="muted small">El crédito fiscal necesita un cliente con RNC o cédula.</p>}
           {state.requireShift && !state.shift && <p className="muted small">Abre un turno para poder vender.</p>}
         </aside>
       </main>
@@ -427,12 +427,12 @@ function CustomerModal(props: { requireRnc: boolean; onPick: (c: LocalCustomer) 
   const [results, setResults] = useState<LocalCustomer[]>([]);
   useEffect(() => {
     const t = setTimeout(() => {
-      window.pos.customers(q).then((r) => setResults(props.requireRnc ? r.filter((c) => c.documentType === "RNC") : r), () => undefined);
+      window.pos.customers(q).then((r) => setResults(props.requireRnc ? r.filter((c) => c.documentType === "RNC" || c.documentType === "CEDULA") : r), () => undefined);
     }, 150);
     return () => clearTimeout(t);
   }, [q, props.requireRnc]);
   return (
-    <Modal title={props.requireRnc ? "Cliente con RNC" : "Cliente"} onClose={props.onClose}>
+    <Modal title={props.requireRnc ? "Cliente con RNC o cédula" : "Cliente"} onClose={props.onClose}>
       <input autoFocus placeholder="Buscar por nombre o documento…" value={q} onChange={(e) => setQ(e.target.value)} />
       <ul className="picklist">
         {results.map((c) => (

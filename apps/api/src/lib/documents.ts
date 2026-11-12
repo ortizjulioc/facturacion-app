@@ -72,7 +72,7 @@ export const documentInput = z
     propinaLegal: z.boolean().default(false),
     notes: optionalText(1000),
     referencedDocumentId: z.uuid().nullish(),
-    modificationCode: z.number().int().min(1).max(5).nullish(),
+    modificationCode: z.number().int().min(1).max(3, "Una nota de débito o crédito usa los códigos 1 a 3").nullish(),
     lines: z.array(lineInput).min(1, "Agrega al menos una línea").max(500),
     payments: z.array(paymentInput).max(20).default([]),
     /** Fecha límite de pago (AAAA-MM-DD). Solo se guarda si toda la venta es a crédito; ahí es obligatoria al emitir. */
@@ -484,3 +484,43 @@ export const documentDto = (d: DocumentFull, profile: StampProfile | null = null
     reference: p.reference,
   })),
 });
+
+// ───────────── Sustitución de un comprobante rechazado ─────────────
+
+/**
+ * Borrador que sustituye un e-CF que la DGII rechazó: los mismos datos (comprador, líneas, pagos, nota modificada…)
+ * para emitirlo con un e-NCF nuevo. Las líneas van sin producto a propósito: el inventario ya se movió al emitir el
+ * rechazado (la venta ocurrió una sola vez), así que el sustituto no vuelve a descontar existencias.
+ */
+export function replacementInput(doc: DocumentFull): DocumentInput {
+  const m = (v: bigint) => fromCents(v);
+  return {
+    type: doc.type as DocumentInput["type"],
+    branchId: doc.branchId,
+    terminalId: null,
+    customerId: doc.customerId,
+    buyer: doc.customerId ? null : { name: doc.buyerName, docType: doc.buyerDocType, docNumber: doc.buyerDocNumber },
+    currency: doc.currency as DocumentInput["currency"],
+    exchangeRate: doc.exchangeRate.toString(),
+    propinaLegal: doc.propinaLegal,
+    notes: `Sustituye el e-CF ${doc.encf} rechazado por la DGII${doc.notes ? ` · ${doc.notes}` : ""}`.slice(0, 1000),
+    referencedDocumentId: doc.referencedDocumentId,
+    modificationCode: doc.modificationCode,
+    paymentDueDate: doc.paymentDueDate ? doc.paymentDueDate.toISOString().slice(0, 10) : null,
+    lines: doc.lines.map((l) => ({
+      productId: null,
+      name: l.name,
+      description: l.description,
+      unitPrice: m(l.unitPrice),
+      tax: l.tax,
+      priceIncludesTax: l.priceIncludesTax,
+      quantity: fromMilli(l.quantity),
+      ...(l.discountType === "PERCENT" && l.discountValue !== null
+        ? { discount: { type: "percent" as const, bps: Number(l.discountValue) } }
+        : l.discountType === "AMOUNT" && l.discountValue !== null
+          ? { discount: { type: "amount" as const, amount: m(l.discountValue) } }
+          : {}),
+    })),
+    payments: doc.payments.map((p) => ({ method: p.method, amount: m(p.amount), reference: p.reference })),
+  };
+}

@@ -162,6 +162,38 @@ describe("armado del XML", () => {
     expect(value(late.xml, "IndicadorNotaCredito")).toBe("1");
   });
 
+  it("cuenta los 30 días por fecha calendario en hora dominicana, no por horas", () => {
+    const note = (original: string, issued: string) =>
+      value(
+        buildEcf(sample("E34", { issuedAt: new Date(issued), reference: { encf: "E320000000001", issuedAt: new Date(original), code: 3 } })).xml,
+        "IndicadorNotaCredito",
+      );
+    // Original el 1 de marzo a las 8:00 a. m.; nota el 31 a las 8:00 p. m. (hora RD): 30 días calendario → «0»,
+    // aunque hayan pasado 30.5 días.
+    expect(note("2026-03-01T12:00:00Z", "2026-04-01T00:00:00Z")).toBe("0");
+    // El 1 de abril (día 31) ya es «1».
+    expect(note("2026-03-01T12:00:00Z", "2026-04-01T14:00:00Z")).toBe("1");
+    // Original a las 11:30 p. m. del 1 de marzo (ya 2 de marzo en UTC): cuenta desde el 1 de marzo.
+    expect(note("2026-03-02T03:30:00Z", "2026-03-31T15:00:00Z")).toBe("0");
+    expect(note("2026-03-02T03:30:00Z", "2026-04-01T15:00:00Z")).toBe("1");
+  });
+
+  it("omite lo condicional que no aplica: indicador de gravado, forma de pago inventada y correos mal escritos", () => {
+    const exempt = buildEcf(sample("E32", { lines: [{ name: "Arroz", quantity: toMilli("1"), unitPrice: toCents("40"), tax: "EXENTO" }], payments: undefined })).xml;
+    expect(exempt).not.toContain("IndicadorMontoGravado");
+    expect(buildEcf(sample("E32")).xml).toContain("<IndicadorMontoGravado>0</IndicadorMontoGravado>");
+
+    const reference = { encf: "E310000000001", issuedAt: new Date("2026-03-01T15:00:00Z"), code: 3 as const };
+    const debit = buildEcf(sample("E33", { buyer: { docType: "RNC", docNumber: "130000002", name: "Cliente" }, payments: undefined, reference })).xml;
+    expect(debit).not.toContain("TablaFormasPago");
+
+    const seller = { ...sample("E32").seller, email: "ventas en example.com" };
+    const buyer = { docType: "RNC" as const, docNumber: "130000002", name: "Cliente", email: "compras@example.com" };
+    const xml = buildEcf(sample("E31", { seller, buyer })).xml;
+    expect(xml).not.toContain("CorreoEmisor");
+    expect(xml).toContain("<CorreoComprador>compras@example.com</CorreoComprador>");
+  });
+
   it("traduce las unidades a la Tabla IV", () => {
     expect([unitCode("UND"), unitCode("kg"), unitCode("LB"), unitCode("LT"), unitCode("???"), unitCode(null)]).toEqual(["43", "21", "23", "24", "43", "43"]);
   });
