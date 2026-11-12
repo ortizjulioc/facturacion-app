@@ -20,7 +20,6 @@ import { usePanel } from "@/components/panel-context";
 import { Badge, Button, ErrorNote, PageHeader, tableStyles } from "@/components/ui";
 import { api, errorMessage, expectOk, unwrap } from "@/lib/api";
 import {
-  formatDate,
   formatDateTime,
   isDebitCredit,
   money,
@@ -29,6 +28,15 @@ import {
   statusTone,
 } from "@/lib/format";
 import { useQuery } from "@/lib/use-query";
+
+/** Monto sin símbolo de moneda, como en la tabla de los modelos de la DGII: «14,850.00». */
+const amount = (v: string) => Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+/** Fecha como en los modelos de la DGII: «dd-MM-aaaa» (las fechas sin hora no se mueven de día). */
+const dmy = (v: string | Date) => {
+  if (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) return v.split("-").reverse().join("-");
+  return signedAtText(v).slice(0, 10);
+};
 
 /** Fecha y hora de la firma como en el e-CF y los modelos de la DGII: «dd-MM-aaaa HH:mm:ss» en hora dominicana. */
 const signedAtText = (at: string | Date) => {
@@ -259,7 +267,7 @@ export function InvoiceDetail({ id }: { id: string }) {
                 Dirección: {company.address}
                 {[company.municipality, company.province].filter(Boolean).length > 0 && `, ${[company.municipality, company.province].filter(Boolean).join(", ")}`}
                 <br />
-                <span className="font-medium">Fecha Emisión:</span> {formatDate(doc.issuedAt ?? doc.createdAt)}
+                <span className="font-medium">Fecha Emisión:</span> {dmy(doc.issuedAt ?? doc.createdAt)}
               </p>
             )}
           </div>
@@ -272,7 +280,7 @@ export function InvoiceDetail({ id }: { id: string }) {
                 y su motivo en las notas. */}
             {(type === "E31" || type === "E33") && doc.sequenceExpiry && (
               <p>
-                <span className="font-medium">Fecha Vencimiento:</span> {formatDate(doc.sequenceExpiry)}
+                <span className="font-medium">Fecha Vencimiento:</span> {dmy(doc.sequenceExpiry)}
               </p>
             )}
             {doc.referencedEncf && (
@@ -333,16 +341,13 @@ export function InvoiceDetail({ id }: { id: string }) {
                     )}
                   </td>
                   <td className={tableStyles.td}>{l.unit}</td>
-                  <td className={`${tableStyles.td} text-right tabular-nums`}>
-                    {money(l.unitPrice, cur)}
-                  </td>
+                  <td className={`${tableStyles.td} text-right tabular-nums`}>{amount(l.unitPrice)}</td>
                   <td className={`${tableStyles.td} text-right tabular-nums`} title={TAX_LABELS[l.tax as TaxCode]}>
                     {/* «E» marca las líneas exentas, como en la representación impresa de la DGII. */}
-                    {l.tax === "EXENTO" ? "E" : money(l.taxAmount, cur)}
+                    {l.tax === "EXENTO" ? "E" : amount(l.taxAmount)}
                   </td>
-                  <td className={`${tableStyles.td} text-right tabular-nums`}>
-                    {money(l.total, cur)}
-                  </td>
+                  {/* «Valor» = precio × cantidad menos descuento, sin impuestos (modelo 1.1 de la DGII). */}
+                  <td className={`${tableStyles.td} text-right tabular-nums`}>{amount(l.base)}</td>
                 </tr>
               ))}
             </tbody>
@@ -368,7 +373,7 @@ export function InvoiceDetail({ id }: { id: string }) {
                 {doc.paymentDueDate && (
                   <div className="flex justify-between">
                     <span>Fecha límite de pago</span>
-                    <span>{formatDate(doc.paymentDueDate)}</span>
+                    <span>{dmy(doc.paymentDueDate)}</span>
                   </div>
                 )}
               </>
@@ -392,7 +397,9 @@ export function InvoiceDetail({ id }: { id: string }) {
 
           <div className="space-y-1.5 text-sm tabular-nums">
             <Line label="Subtotal Gravado" value={money(String(Number(totals.base18) + Number(totals.base16) + Number(totals.base0)), cur)} />
-            <Line label="Subtotal" value={money(totals.subtotal, cur)} />
+            <div className="no-print">
+              <Line label="Subtotal" value={money(totals.subtotal, cur)} />
+            </div>
             {Number(totals.discount) > 0 && (
               <Line label="Descuentos incluidos" value={money(totals.discount, cur)} />
             )}
@@ -587,7 +594,7 @@ function Retenciones({
 
   const field = "rounded-md border border-zinc-300 bg-background px-3 py-2 text-sm dark:border-zinc-700";
   return (
-    <section className="space-y-2 rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
+    <section className="no-print space-y-2 rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
       <p className="text-xs uppercase tracking-wide text-zinc-500">Retenciones del cliente (formato 607, en pesos)</p>
       <div className="flex flex-wrap items-end gap-3">
         <label className="flex flex-col gap-1 text-xs font-medium">

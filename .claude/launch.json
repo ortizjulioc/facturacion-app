@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "facturacion-dev",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["turbo", "run", "dev", "--filter=@facturacion/web", "--filter=@facturacion/api"],
+      "port": 3000
+    }
+  ]
+}
