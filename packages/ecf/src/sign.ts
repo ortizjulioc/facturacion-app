@@ -137,7 +137,9 @@ export function signXml(xml: string, cert: EcfCertificate): string {
   });
   sig.addReference({
     xpath: "/*",
-    transforms: [ENVELOPED, C14N],
+    // Solo «enveloped-signature», como el ejemplo oficial («Firmado de e-CF», DGII): la canonicalización C14N ya la
+    // aplica el validador a la salida de la transformación, así que el resumen es el mismo.
+    transforms: [ENVELOPED],
     digestAlgorithm: SHA256,
     isEmptyUri: true,
   });

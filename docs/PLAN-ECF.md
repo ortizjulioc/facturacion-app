@@ -3,7 +3,7 @@
 > **Creado:** 2026-11-11 · **Base:** revisión completa de la documentación oficial descargada (5 carpetas: Informe y descripción técnica, Formatos XML, XSD, Proceso de certificación, Instructivos) contra el código de `packages/ecf`, `apps/api`, `packages/pos-engine`, `packages/printing` y `apps/web`.
 > **Siguiente paso:** trámites de §2 y Fase A (empezando por A0). El sandbox externo se revisó y queda solo como referencia (§7, E1).
 
-Leyenda: 🧑‍💻 código · 📋 trámite tuyo (no es código) · ✅ comprobado a mano · 🔎 hallazgo de revisión, se confirma al arreglarlo.
+Leyenda: 🧑‍💻 código · 📋 trámite tuyo (no es código) · ✅ comprobado a mano · 🔎 hallazgo de revisión, se confirma al arreglarlo · ✔️ hecho.
 
 ---
 
@@ -38,16 +38,16 @@ Llevan semanas y no dependen del código:
 
 | # | Qué | Dónde | Estado |
 |---|---|---|---|
-| A0 | **Validar contra los XSD en las pruebas**: copiar los XSD oficiales al repo (`packages/ecf/xsd/`) y validar cada XML de los tests con un validador JS (p. ej. `xmllint-wasm`). En la certificación un solo rechazo reinicia el set completo. | `packages/ecf` | nuevo |
-| A1 | **RFCE**: quitar `ITBIS1/2/3` y `TasaImpuestoAdicional` (el XSD del RFCE no los tiene). Hoy **todo** resumen con ITBIS sería rechazado. | `xml.ts:362` usa `totales()` | ✅ |
-| A2 | **E32 < RD$250,000 sin comprador**: el XSD exige `<Comprador>`; en la simulación se sube el XML completo al portal. Emitir el elemento (vacío o con lo que haya) solo en ese caso. Confirmar en TesteCF qué acepta. | `xml.ts` (comprador) | ✅ |
-| A3 | **ANECF**: `<Secuencia>` → `<Secuencias>`. | `annulment.ts` | ✅ |
+| A0 | **Validar contra los XSD en las pruebas**: copiar los XSD oficiales al repo (`packages/ecf/xsd/`) y validar cada XML de los tests con un validador JS (p. ej. `xmllint-wasm`). En la certificación un solo rechazo reinicia el set completo. | `packages/ecf` | ✔️ hecho (2026-11-11) |
+| A1 | **RFCE**: quitar `ITBIS1/2/3` y `TasaImpuestoAdicional` (el XSD del RFCE no los tiene). Hoy **todo** resumen con ITBIS sería rechazado. | `xml.ts:362` usa `totales()` | ✔️ hecho (2026-11-11) |
+| A2 | **E32 < RD$250,000 sin comprador**: el XSD exige `<Comprador>`; en la simulación se sube el XML completo al portal. Emitir el elemento (vacío o con lo que haya) solo en ese caso. Confirmar en TesteCF qué acepta. | `xml.ts` (comprador) | ✔️ hecho (2026-11-11) |
+| A3 | **ANECF**: `<Secuencia>` → `<Secuencias>`. | `annulment.ts` | ✔️ hecho (2026-11-11) |
 | A4 | **Venta a crédito**: pasar `paymentDueDate` (y `incomeType`) al armar el e-CF; hoy sale `TipoPago 2` sin `FechaLimitePago`. Pedir la fecha límite en el editor si el pago es a crédito. | `apps/api/src/lib/signing.ts:135` | ✅ |
 | A5 | **`IndicadorNotaCredito`**: comparar días calendario en hora RD, no milisegundos / 24 h. | `xml.ts:177` | ✅ |
 | A6 | **E31 con cédula** (personas físicas): `RNCComprador` admite 9 u 11 dígitos. | `packages/core/src/ecf.ts:86` | ✅ |
 | A7 | **Nombre del comprador obligatorio** en E31 y en E32 ≥ RD$250,000. | `core/src/ecf.ts` (`buyerErrors`) | 🔎 |
 | A8 | **Notas**: solo códigos 1–3 (4 y 5 no aplican a E33/E34); **código 2** (corrección de texto) con montos en cero; no usar 3 «por defecto» en silencio. | `documents.ts:71`, `routes/sync.ts:97`, `issue.ts:47`, `signing.ts:131` | 🔎 |
-| A9 | **Firma idéntica al ejemplo oficial**: quitar el transform C14N extra (dejar solo `enveloped-signature`). El resultado es el mismo; es para no dar motivos. | `sign.ts:140` | ✅ |
+| A9 | **Firma idéntica al ejemplo oficial**: quitar el transform C14N extra (dejar solo `enveloped-signature`). El resultado es el mismo; es para no dar motivos. | `sign.ts:140` | ✔️ hecho (2026-11-11) |
 | A10 | Menores: `IndicadorMontoGravado` solo si hay gravados; no inventar forma de pago en E33; validar formato de correos; unidades desconocidas avisan en vez de caer en «Unidad»; dígito verificador de RNC/cédula. | `xml.ts`, `core` | 🔎 |
 
 ---

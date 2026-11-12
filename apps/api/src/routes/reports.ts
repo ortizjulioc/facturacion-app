@@ -66,7 +66,9 @@ export const reports = new Hono<AppEnv>()
     const data = await c.get("run")(async (tx) => {
       // Filtro y conversión a pesos compartidos por todas las consultas.
       const series = await tx.$queryRaw<SeriesRow[]>`
-        SELECT date_trunc(${unit}, d."issuedAt" AT TIME ZONE ${TZ})::date AS period,
+        -- "issuedAt" es un timestamp SIN zona que guarda la hora UTC: primero se declara UTC y luego se pasa a hora RD
+        -- (si no, una venta después de las 8:00 p. m. caería en el día siguiente).
+        SELECT date_trunc(${unit}, (d."issuedAt" AT TIME ZONE 'UTC') AT TIME ZONE ${TZ})::date AS period,
                COUNT(*)::int AS count,
                SUM(CASE WHEN d."type" = 'E34' THEN -1 ELSE 1 END * ROUND(d."subtotal"::numeric * d."exchangeRate"))::bigint AS subtotal,
                SUM(CASE WHEN d."type" = 'E34' THEN -1 ELSE 1 END * ROUND(d."totalTax"::numeric * d."exchangeRate"))::bigint AS tax,

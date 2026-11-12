@@ -25,8 +25,8 @@ export const countOf = (ranges: AnnulmentRange[]) => ranges.reduce((n, r) => n +
 /**
  * Archivo de anulación de rangos de e-NCF (ANECF), sin firmar: encabezado con quién anula y cuántos e-NCF, y una línea
  * por tipo de comprobante con sus rangos «desde–hasta». Solo se anulan secuencias NO usadas. Formato oficial «Formato
- * Anulación de e-NCF v1.0»; el nombre del elemento que envuelve cada par desde/hasta (`Secuencia`) no figura en el PDF
- * y sale del XSD, que no se pudo consultar.
+ * Anulación de e-NCF v1.0»; el elemento que envuelve cada par desde/hasta (`Secuencias`) no figura en el PDF y sale
+ * del XSD oficial (`xsd/ANECF.xsd`), contra el que se valida en `xsd.test.ts`.
  */
 export function buildAnecf(input: AnnulmentInput): string {
   if (input.lines.length === 0) throw new EcfError("Indica al menos un rango para anular");
@@ -54,7 +54,7 @@ export function buildAnecf(input: AnnulmentInput): string {
       node(
         "TablaRangoSecuenciasAnuladaseNCF",
         ...sorted.map((r) =>
-          node("Secuencia", leaf("SecuenciaeNCFDesde", formatEncf(line.type, r.from)), leaf("SecuenciaeNCFHasta", formatEncf(line.type, r.to))),
+          node("Secuencias", leaf("SecuenciaeNCFDesde", formatEncf(line.type, r.from)), leaf("SecuenciaeNCFHasta", formatEncf(line.type, r.to))),
         ),
       ),
       leaf("CantidadeNCFAnulados", countOf(line.ranges)),

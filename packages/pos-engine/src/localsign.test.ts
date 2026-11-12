@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { loadCertificate, verifyEcfSignature } from "@facturacion/ecf";
 import { testP12 } from "@facturacion/ecf/testing";
 import { ApiClient } from "./api";
@@ -87,7 +87,13 @@ describe("certificado en la caja", () => {
 
   it("un certificado que vence deja de usarse", () => {
     const { db } = tienda({ cert: false });
-    installCertificate(db, secure, p12({ notAfter: new Date("2026-11-01T00:00:00Z") }));
+    // La instalación revisa el certificado con el reloj real: se fija en NOW para que la prueba no venza con el tiempo.
+    vi.useFakeTimers({ now: NOW, toFake: ["Date"] });
+    try {
+      installCertificate(db, secure, p12({ notAfter: new Date("2026-11-01T00:00:00Z") }));
+    } finally {
+      vi.useRealTimers();
+    }
     expect(localCertificate(db, secure, NOW)).not.toBeNull();
     const later = new Date("2026-11-02T00:00:00Z");
     expect(certificateInfo(db, later)!.problem).toMatch(/vencido/);

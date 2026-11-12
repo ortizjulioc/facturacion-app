@@ -85,6 +85,14 @@ export function node(name: string, ...children: (XmlNode | null | undefined)[]):
   return present.length ? { name, children: present } : null;
 }
 
+/**
+ * Elemento que el XSD exige aunque no lleve datos: se emite siempre, vacío si hace falta. Es la única excepción a «sin
+ * etiquetas vacías» y la decide el XSD (p. ej. `<Comprador>` en la factura de consumo y en su resumen).
+ */
+export function requiredNode(name: string, ...children: (XmlNode | null | undefined)[]): XmlNode {
+  return { name, children: children.filter((c): c is XmlNode => !!c) };
+}
+
 /** Serializa sin sangrías ni saltos de línea: la firma no depende del espacio en blanco. */
 export function serialize(n: XmlNode): string {
   if ("text" in n) return `<${n.name}>${escapeXml(n.text)}</${n.name}>`;

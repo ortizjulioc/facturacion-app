@@ -50,7 +50,8 @@ describe("armado del XML", () => {
     expect(value(xml, "TotalITBIS1")).toBe("54.00");
     expect(value(xml, "MontoTotal")).toBe("409.00");
     expect(xml).not.toContain("MontoGravadoI2");
-    expect(xml).not.toContain("Comprador");
+    // Sin comprador identificado el área va vacía: el XSD del 32 la exige.
+    expect(xml).toContain("</Emisor><Comprador></Comprador><Totales>");
     expect(xml).not.toContain("InformacionReferencia");
 
     // Orden de las secciones.
@@ -60,8 +61,10 @@ describe("armado del XML", () => {
 
   it("no deja etiquetas vacías y escapa los caracteres especiales", () => {
     const { xml } = buildEcf(sample("E32"));
-    expect(xml).not.toMatch(/<([A-Za-z0-9]+)><\/\1>/);
-    expect(xml).not.toMatch(/<[A-Za-z0-9]+\/>/);
+    // La única etiqueta vacía permitida es la que exige el XSD.
+    const rest = xml.replace("<Comprador></Comprador>", "");
+    expect(rest).not.toMatch(/<([A-Za-z0-9]+)><\/\1>/);
+    expect(rest).not.toMatch(/<[A-Za-z0-9]+\/>/);
     expect(value(xml, "RazonSocialEmisor")).toBe("Comercial Prueba &amp; Hijos SRL");
     expect(xml).toContain("Café &quot;molido&quot; &lt;1 lb&gt;");
     // Es XML bien formado.

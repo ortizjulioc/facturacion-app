@@ -19,11 +19,11 @@ describe("anulación de rangos de e-NCF (ANECF)", () => {
       "<ANECF><Encabezado><Version>1.0</Version><RncEmisor>123456789</RncEmisor><CantidadeNCFAnulados>84</CantidadeNCFAnulados><FechaHoraAnulacioneNCF>23-10-2026 11:30:05</FechaHoraAnulacioneNCF></Encabezado>" +
         "<DetalleAnulacion>" +
         "<Anulacion><NoLinea>1</NoLinea><TipoeCF>31</TipoeCF><TablaRangoSecuenciasAnuladaseNCF>" +
-        "<Secuencia><SecuenciaeNCFDesde>E310000000001</SecuenciaeNCFDesde><SecuenciaeNCFHasta>E310000000005</SecuenciaeNCFHasta></Secuencia>" +
-        "<Secuencia><SecuenciaeNCFDesde>E310000000050</SecuenciaeNCFDesde><SecuenciaeNCFHasta>E310000000091</SecuenciaeNCFHasta></Secuencia>" +
+        "<Secuencias><SecuenciaeNCFDesde>E310000000001</SecuenciaeNCFDesde><SecuenciaeNCFHasta>E310000000005</SecuenciaeNCFHasta></Secuencias>" +
+        "<Secuencias><SecuenciaeNCFDesde>E310000000050</SecuenciaeNCFDesde><SecuenciaeNCFHasta>E310000000091</SecuenciaeNCFHasta></Secuencias>" +
         "</TablaRangoSecuenciasAnuladaseNCF><CantidadeNCFAnulados>47</CantidadeNCFAnulados></Anulacion>" +
         "<Anulacion><NoLinea>2</NoLinea><TipoeCF>43</TipoeCF><TablaRangoSecuenciasAnuladaseNCF>" +
-        "<Secuencia><SecuenciaeNCFDesde>E430000000010</SecuenciaeNCFDesde><SecuenciaeNCFHasta>E430000000046</SecuenciaeNCFHasta></Secuencia>" +
+        "<Secuencias><SecuenciaeNCFDesde>E430000000010</SecuenciaeNCFDesde><SecuenciaeNCFHasta>E430000000046</SecuenciaeNCFHasta></Secuencias>" +
         "</TablaRangoSecuenciasAnuladaseNCF><CantidadeNCFAnulados>37</CantidadeNCFAnulados></Anulacion>" +
         "</DetalleAnulacion></ANECF>",
     );

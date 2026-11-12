@@ -20,6 +20,7 @@ import {
   formatUnitPrice,
   leaf,
   node,
+  requiredNode,
   serialize,
   type XmlNode,
 } from "./format";
@@ -215,7 +216,8 @@ function emisor(input: EcfInput): XmlNode | null {
 
 function comprador(input: EcfInput): XmlNode | null {
   const b = input.buyer;
-  if (!b) return null;
+  // El XSD de la factura de consumo (32) exige el área Comprador aunque no se identifique a nadie (< RD$250,000).
+  if (!b) return input.type === "E32" ? requiredNode("Comprador") : null;
   const doc = normalizeDocument(b.docType, b.docNumber);
   if (!doc.ok) throw new EcfError(doc.error);
   const foreign = b.docType === "PASAPORTE";
@@ -231,8 +233,13 @@ function comprador(input: EcfInput): XmlNode | null {
   );
 }
 
-function totales(a: EcfAmounts, totals: DocumentTotals): XmlNode | null {
+/**
+ * Totales del e-CF. Con `summary` (resumen RFCE) se omiten las tasas `ITBIS1/2/3` y `TasaImpuestoAdicional`, que el XSD
+ * del resumen no tiene: los montos son los mismos.
+ */
+function totales(a: EcfAmounts, totals: DocumentTotals, summary = false): XmlNode | null {
   const has = (v: Cents) => v !== 0n;
+  const rate = (name: string, value: string | number, present: boolean) => (present && !summary ? leaf(name, value) : null);
   const taxable = a.taxableI1 + a.taxableI2 + a.taxableI3;
   const hasTaxable = taxable !== 0n || totals.lines.some((l) => l.tax !== "EXENTO");
   const propina = a.propinaLegal;
@@ -243,9 +250,9 @@ function totales(a: EcfAmounts, totals: DocumentTotals): XmlNode | null {
     has(a.taxableI2) ? leaf("MontoGravadoI2", formatAmount(a.taxableI2)) : null,
     has(a.taxableI3) ? leaf("MontoGravadoI3", formatAmount(a.taxableI3)) : null,
     has(a.exempt) ? leaf("MontoExento", formatAmount(a.exempt)) : null,
-    has(a.taxableI1) ? leaf("ITBIS1", "18") : null,
-    has(a.taxableI2) ? leaf("ITBIS2", "16") : null,
-    has(a.taxableI3) ? leaf("ITBIS3", "0") : null,
+    rate("ITBIS1", "18", has(a.taxableI1)),
+    rate("ITBIS2", "16", has(a.taxableI2)),
+    rate("ITBIS3", "0", has(a.taxableI3)),
     hasTaxable ? leaf("TotalITBIS", formatAmount(a.totalItbis)) : null,
     has(a.taxableI1) ? leaf("TotalITBIS1", formatAmount(a.itbisI1)) : null,
     has(a.taxableI2) ? leaf("TotalITBIS2", formatAmount(a.itbisI2)) : null,
@@ -257,7 +264,7 @@ function totales(a: EcfAmounts, totals: DocumentTotals): XmlNode | null {
           node(
             "ImpuestoAdicional",
             leaf("TipoImpuesto", PROPINA_TAX_CODE),
-            leaf("TasaImpuestoAdicional", PROPINA_LEGAL_BPS / 100),
+            rate("TasaImpuestoAdicional", PROPINA_LEGAL_BPS / 100, true),
             leaf("OtrosImpuestosAdicionales", formatAmount(propina)),
           ),
         )
@@ -329,12 +336,13 @@ export function buildRfce(input: EcfInput, securityCode: string): BuiltRfce {
   const rnc = normalizeDocument(input.seller.rnc.length === 11 ? "CEDULA" : "RNC", input.seller.rnc);
   if (!rnc.ok) throw new EcfError(`RNC del emisor: ${rnc.error}`);
 
-  let buyer: XmlNode | null = null;
+  // El XSD del resumen exige el área Comprador aunque vaya vacía.
+  let buyer: XmlNode = requiredNode("Comprador");
   if (input.buyer) {
     const doc = normalizeDocument(input.buyer.docType, input.buyer.docNumber);
     if (!doc.ok) throw new EcfError(doc.error);
     const foreign = input.buyer.docType === "PASAPORTE";
-    buyer = node(
+    buyer = requiredNode(
       "Comprador",
       foreign ? null : leaf("RNCComprador", doc.value),
       foreign ? leaf("IdentificadorExtranjero", doc.value) : null,
@@ -359,7 +367,7 @@ export function buildRfce(input: EcfInput, securityCode: string): BuiltRfce {
           ),
           node("Emisor", leaf("RNCEmisor", rnc.value), leaf("RazonSocialEmisor", clean(input.seller.legalName, 150)), leaf("FechaEmision", formatDate(input.issuedAt))),
           buyer,
-          totales(built.amounts, built.totals),
+          totales(built.amounts, built.totals, true),
           leaf("CodigoSeguridadeCF", securityCode),
         ],
       },
